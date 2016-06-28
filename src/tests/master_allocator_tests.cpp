@@ -23,7 +23,7 @@
 #include <mesos/executor.hpp>
 #include <mesos/scheduler.hpp>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 
 #include <mesos/module/allocator.hpp>
 
@@ -52,7 +52,7 @@
 
 using google::protobuf::RepeatedPtrField;
 
-using mesos::master::allocator::Allocator;
+using mesos::allocator::Allocator;
 using mesos::internal::master::allocator::HierarchicalDRFAllocator;
 
 using mesos::internal::master::Master;
@@ -626,7 +626,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkExited)
   EXPECT_CALL(allocator, recoverResources(_, _, _, _))
     .WillRepeatedly(DoDefault());
 
-  // After we stop framework 1, all of it's resources should
+  // After we stop framework 1, all of its resources should
   // have been returned, but framework 2 should still have a
   // task with 1 cpu and 256 mem, leaving 2 cpus and 768 mem.
   Future<Nothing> resourceOffers;
@@ -740,7 +740,8 @@ TYPED_TEST(MasterAllocatorTest, SlaveLost)
   AWAIT_READY(removeSlave);
 
   slave::Flags flags2 = this->CreateSlaveFlags();
-  flags2.resources = string("cpus:3;mem:256;disk:1024;ports:[31000-32000]");
+  flags2.resources = string("cpus:3;gpus:0;mem:256;"
+                            "disk:1024;ports:[31000-32000]");
 
   EXPECT_CALL(allocator, addSlave(_, _, _, _, _));
 
@@ -1530,7 +1531,8 @@ TYPED_TEST(MasterAllocatorTest, RebalancedForUpdatedWeights)
   vector<Owned<cluster::Slave>> slaves;
 
   // Register three agents with the same resources.
-  string agentResources = "cpus:2;mem:1024;disk:4096;ports:[31000-32000]";
+  string agentResources = "cpus:2;gpus:0;mem:1024;"
+                          "disk:4096;ports:[31000-32000]";
   for (int i = 0; i < 3; i++) {
     Future<Nothing> addSlave;
     EXPECT_CALL(allocator, addSlave(_, _, _, _, _))

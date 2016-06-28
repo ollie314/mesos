@@ -162,7 +162,7 @@ public:
     // We only need an XFS-specific directory for the work directory. We
     // don't mind that other flags refer to a different temp directory.
     flags.work_dir = mountPoint.get();
-    flags.isolation = "xfs/disk";
+    flags.isolation = "disk/xfs";
     return flags;
   }
 
@@ -396,7 +396,7 @@ TEST_F(ROOT_XFS_QuotaTest, DiskUsageExceedsQuota)
   EXPECT_EQ(task.task_id(), status2.get().task_id());
   EXPECT_EQ(TASK_FAILED, status2.get().state());
 
-  // Unlike the posix/disk isolator, the reason for task failure
+  // Unlike the 'disk/du' isolator, the reason for task failure
   // should be that dd got an IO error.
   EXPECT_EQ(TaskStatus::SOURCE_EXECUTOR, status2.get().source());
   EXPECT_EQ("Command exited with status 1", status2.get().message());

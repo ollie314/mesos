@@ -235,7 +235,7 @@ inline Try<Nothing> sleep(const Duration& duration)
 inline Try<std::list<std::string>> glob(const std::string& pattern)
 {
   glob_t g;
-  int status = ::glob(pattern.c_str(), GLOB_NOSORT, NULL, &g);
+  int status = ::glob(pattern.c_str(), GLOB_NOSORT, nullptr, &g);
 
   std::list<std::string> result;
 
@@ -363,24 +363,11 @@ inline Option<std::string> getenv(const std::string& key)
 {
   char* value = ::getenv(key.c_str());
 
-  if (value == NULL) {
+  if (value == nullptr) {
     return None();
   }
 
   return std::string(value);
-}
-
-
-inline Try<bool> access(const std::string& path, int how)
-{
-  if (::access(path.c_str(), how) < 0) {
-    if (errno == EACCES) {
-      return false;
-    } else {
-      return ErrnoError();
-    }
-  }
-  return true;
 }
 
 
@@ -457,6 +444,22 @@ inline Option<std::string> which(const std::string& command)
   }
 
   return None();
+}
+
+
+inline std::string temp()
+{
+  return "/tmp";
+}
+
+
+// Create pipes for interprocess communication.
+inline Try<Nothing> pipe(int pipe_fd[2])
+{
+  if (::pipe(pipe_fd) == -1) {
+    return ErrnoError();
+  }
+  return Nothing();
 }
 
 } // namespace os {

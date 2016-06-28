@@ -24,6 +24,7 @@
 
 #include <process/subprocess.hpp>
 
+#include <stout/check.hpp>
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
 #include <stout/nothing.hpp>
@@ -327,7 +328,7 @@ inline Try<pid_t> cloneChild(
   for (size_t i = 0; i < argv.size(); i++) {
     _argv[i] = (char*) argv[i].c_str();
   }
-  _argv[argv.size()] = NULL;
+  _argv[argv.size()] = nullptr;
 
   // Like above, we need to construct the environment that we'll pass
   // to 'os::execvpe' as it might not be async-safe to perform the
@@ -335,7 +336,7 @@ inline Try<pid_t> cloneChild(
   char** envp = os::raw::environment();
 
   if (environment.isSome()) {
-    // NOTE: We add 1 to the size for a NULL terminator.
+    // NOTE: We add 1 to the size for a `nullptr` terminator.
     envp = new char*[environment.get().size() + 1];
 
     size_t index = 0;
@@ -346,7 +347,7 @@ inline Try<pid_t> cloneChild(
       ++index;
     }
 
-    envp[index] = NULL;
+    envp[index] = nullptr;
   }
 
   // Determine the function to clone the child process. If the user
@@ -362,7 +363,7 @@ inline Try<pid_t> cloneChild(
   if (blocking) {
     // We assume this should not fail under reasonable conditions so we
     // use CHECK.
-    CHECK_EQ(0, ::pipe(pipes));
+    CHECK_SOME(os::pipe(pipes));
   }
 
   // Now, clone the child process.
@@ -387,7 +388,7 @@ inline Try<pid_t> cloneChild(
   if (environment.isSome()) {
     CHECK_NE(os::raw::environment(), envp);
 
-    // We ignore the last 'envp' entry since it is NULL.
+    // We ignore the last 'envp' entry since it is nullptr.
     for (size_t index = 0; index < environment->size(); index++) {
       delete[] envp[index];
     }

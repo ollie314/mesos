@@ -14,6 +14,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
+#include <list>
+#include <set>
+#include <string>
+
+#include <mesos/mesos.hpp>
+#include <mesos/resources.hpp>
+
+#include <process/pid.hpp>
+
+#include <stout/check.hpp>
+#include <stout/foreach.hpp>
+#include <stout/option.hpp>
+
 #include "logging/logging.hpp"
 
 #include "master/allocator/sorter/drf/sorter.hpp"
@@ -21,6 +35,8 @@
 using std::list;
 using std::set;
 using std::string;
+
+using process::UPID;
 
 namespace mesos {
 namespace internal {
@@ -40,13 +56,15 @@ bool DRFComparator::operator()(const Client& client1, const Client& client2)
 
 
 DRFSorter::DRFSorter(
-    const process::UPID& allocator,
-    const std::string& metricsPrefix)
+    const UPID& allocator,
+    const string& metricsPrefix)
   : metrics(Metrics(allocator, *this, metricsPrefix)) {}
 
 
 void DRFSorter::add(const string& name, double weight)
 {
+  CHECK(!contains(name));
+
   Client client(name, 0, 0);
   clients.insert(client);
 
@@ -63,6 +81,13 @@ void DRFSorter::update(const string& name, double weight)
 {
   CHECK(weights.contains(name));
   weights[name] = weight;
+
+  // If the total resources have changed, we're going to
+  // recalculate all the shares, so don't bother just
+  // updating this client.
+  if (!dirty) {
+    update(name);
+  }
 }
 
 
@@ -87,8 +112,11 @@ void DRFSorter::activate(const string& name)
 {
   CHECK(allocations.contains(name));
 
-  Client client(name, calculateShare(name), 0);
-  clients.insert(client);
+  set<Client, DRFComparator>::iterator it = find(name);
+  if (it == clients.end()) {
+    Client client(name, calculateShare(name), 0);
+    clients.insert(client);
+  }
 }
 
 
@@ -326,6 +354,10 @@ list<string> DRFSorter::sort()
     }
 
     clients = temp;
+
+    // Reset dirty to false so as not to re-calculate *all*
+    // shares unless another dirtying operation occurs.
+    dirty = false;
   }
 
   list<string> result;

@@ -145,6 +145,59 @@ string getRegistryHost(const string& registry)
 }
 
 
+Try<hashmap<string, Config::Auth>> parseAuthConfig(
+    const JSON::Object& _config)
+{
+  // This function handles both old and new docker config format,
+  // e.g., '~/.docker/config.json' or '~/.dockercfg'.
+  Result<JSON::Object> auths = _config.find<JSON::Object>("auths");
+  if (auths.isError()) {
+    return Error("Failed to find 'auths' in docker config file: " +
+                 auths.error());
+  }
+
+  const JSON::Object& config = auths.isSome()
+    ? auths.get()
+    : _config;
+
+  hashmap<string, Config::Auth> result;
+
+  foreachpair (const string& key, const JSON::Value& value, config.values) {
+    if (!value.is<JSON::Object>()) {
+      return Error("Invalid JSON object '" + stringify(value) + "'");
+    }
+
+    Try<Config::Auth> auth =
+      protobuf::parse<Config::Auth>(value.as<JSON::Object>());
+
+    if (auth.isError()) {
+      return Error("Protobuf parse failed: " + auth.error());
+    }
+
+    // Assuming no duplicate registry url in docker config file,
+    // if there exists, overwrite it.
+    result[key] = auth.get();
+  }
+
+  return result;
+}
+
+
+string parseAuthUrl(const string& _url)
+{
+  string url = _url;
+  if (strings::startsWith(_url, "http://")) {
+    url = strings::remove(_url, "http://", strings::PREFIX);
+  } else if (strings::startsWith(_url, "https://")) {
+    url = strings::remove(_url, "https://", strings::PREFIX);
+  }
+
+  vector<string> parts = strings::split(url, "/", 2);
+
+  return parts[0];
+}
+
+
 namespace v1 {
 
 Option<Error> validate(const ImageManifest& manifest)
@@ -159,6 +212,73 @@ Try<ImageManifest> parse(const JSON::Object& json)
   Try<ImageManifest> manifest = protobuf::parse<ImageManifest>(json);
   if (manifest.isError()) {
     return Error("Protobuf parse failed: " + manifest.error());
+  }
+
+  Result<JSON::Object> config = json.find<JSON::Object>("config");
+  if (config.isError()) {
+    return Error(
+        "Failed to parse 'config' as a JSON object: " + config.error());
+  }
+
+  if (config.isSome()) {
+    // Parse `Labels` as JSON value first in case it is JSON null.
+    Result<JSON::Value> value = config->find<JSON::Value>("Labels");
+    if (value.isError()) {
+      return Error(
+          "Failed to parse 'Labels' as a JSON value: " + value.error());
+    }
+
+    if (value.isSome() && !value.get().is<JSON::Null>()) {
+      const JSON::Object labels = value.get().as<JSON::Object>();
+
+      foreachpair (const string& key,
+                   const JSON::Value& value,
+                   labels.values) {
+        if (!value.is<JSON::String>()) {
+          return Error(
+              "The value of label key '" + key + "' is not a JSON string");
+        }
+
+        Label* label = manifest->mutable_config()->add_labels();
+        label->set_key(key);
+        label->set_value(value.as<JSON::String>().value);
+      }
+    }
+  }
+
+  // Parse docker labels in `container_config` in case they are
+  // different from the labels parsed above.
+  config = json.find<JSON::Object>("container_config");
+  if (config.isError()) {
+    return Error(
+        "Failed to parse 'container_config' as a JSON object: " +
+        config.error());
+  }
+
+  if (config.isSome()) {
+    // Parse `Labels` as JSON value first in case it is JSON null.
+    Result<JSON::Value> value = config->find<JSON::Value>("Labels");
+    if (value.isError()) {
+      return Error(
+          "Failed to parse 'Labels' as a JSON value: " + value.error());
+    }
+
+    if (value.isSome() && !value.get().is<JSON::Null>()) {
+      const JSON::Object labels = value.get().as<JSON::Object>();
+
+      foreachpair (const string& key,
+                   const JSON::Value& value,
+                   labels.values) {
+        if (!value.is<JSON::String>()) {
+          return Error(
+              "The value of label key '" + key + "' is not a JSON string");
+        }
+
+        Label* label = manifest->mutable_container_config()->add_labels();
+        label->set_key(key);
+        label->set_value(value.as<JSON::String>().value);
+      }
+    }
   }
 
   Option<Error> error = validate(manifest.get());

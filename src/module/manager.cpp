@@ -30,6 +30,7 @@
 #include <stout/stringify.hpp>
 #include <stout/version.hpp>
 
+#include "common/parse.hpp"
 #include "messages/messages.hpp"
 
 #include "module/manager.hpp"
@@ -94,11 +95,11 @@ void ModuleManager::initialize()
   //
   // Mesos   kindToVersion    library    modules loadable?
   // 0.18.0      0.18.0       0.18.0          YES
-  // 0.29.0      0.18.0       0.18.0          YES
-  // 0.29.0      0.18.0       0.21.0          YES
-  // 0.18.0      0.18.0       0.29.0          NO
-  // 0.29.0      0.21.0       0.18.0          NO
-  // 0.29.0      0.29.0       0.18.0          NO
+  // 1.0.0       0.18.0       0.18.0          YES
+  // 1.0.0       0.18.0       0.21.0          YES
+  // 0.18.0      0.18.0       1.0.0           NO
+  // 1.0.0       0.21.0       0.18.0          NO
+  // 1.0.0       1.0.0        0.18.0          NO
 
   // ATTENTION: This mechanism only protects the interfaces of
   // modules, not how they maintain functional compatibility with
@@ -131,12 +132,12 @@ Try<Nothing> ModuleManager::verifyModule(
     const ModuleBase* moduleBase)
 {
   CHECK_NOTNULL(moduleBase);
-  if (moduleBase->mesosVersion == NULL ||
-      moduleBase->moduleApiVersion == NULL ||
-      moduleBase->authorName == NULL ||
-      moduleBase->authorEmail == NULL ||
-      moduleBase->description == NULL ||
-      moduleBase->kind == NULL) {
+  if (moduleBase->mesosVersion == nullptr ||
+      moduleBase->moduleApiVersion == nullptr ||
+      moduleBase->authorName == nullptr ||
+      moduleBase->authorEmail == nullptr ||
+      moduleBase->description == nullptr ||
+      moduleBase->kind == nullptr) {
     return Error("Error loading module '" + moduleName + "'; missing fields");
   }
 
@@ -169,7 +170,7 @@ Try<Nothing> ModuleManager::verifyModule(
         "with version " + stringify(moduleMesosVersion.get()));
   }
 
-  if (moduleBase->compatible == NULL) {
+  if (moduleBase->compatible == nullptr) {
     if (moduleMesosVersion.get() != mesosVersion.get()) {
       return Error(
           "Mesos has version " + stringify(mesosVersion.get()) +
@@ -263,7 +264,7 @@ Try<Nothing> ModuleManager::verifyIdenticalModule(
 }
 
 
-Try<Nothing> ModuleManager::load(const Modules& modules)
+Try<Nothing> ModuleManager::loadManifest(const Modules& modules)
 {
   synchronized (mutex) {
     initialize();
@@ -342,6 +343,48 @@ Try<Nothing> ModuleManager::load(const Modules& modules)
         moduleParameters[moduleName].mutable_parameter()->CopyFrom(
             module.parameters());
       }
+    }
+  }
+
+  return Nothing();
+}
+
+
+// We load the module manifests sequentially in an alphabetical order. If an
+// error is encountered while processing a particular manifest, we do not load
+// the remaining manifests and exit with the appropriate error message.
+Try<Nothing> ModuleManager::load(const string& modulesDir)
+{
+  Try<list<string>> moduleManifests = os::ls(modulesDir);
+  if (moduleManifests.isError()) {
+    return Error(
+        "Error loading module manifests from '" + modulesDir + "' directory: " +
+        moduleManifests.error());
+  }
+
+  moduleManifests->sort();
+  foreach (const string& filename, moduleManifests.get()) {
+    const string filepath = path::join(modulesDir, filename);
+    VLOG(1) << "Processing module manifest from '" << filepath << "'";
+
+    Try<string> read = os::read(filepath);
+    if (read.isError()) {
+      return Error(
+          "Error reading module manifest file '" + filepath + "': " +
+          read.error());
+    }
+
+    Try<Modules> modules = flags::parse<Modules>(read.get());
+    if (modules.isError()) {
+      return Error(
+          "Error parsing module manifest file '" + filepath + "': " +
+          modules.error());
+    }
+
+    Try<Nothing> result = loadManifest(modules.get());
+    if (result.isError()) {
+      return Error(
+          "Error loading modules from '" + filepath + "': " + result.error());
     }
   }
 

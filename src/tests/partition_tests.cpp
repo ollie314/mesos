@@ -65,19 +65,28 @@ using testing::AtMost;
 using testing::Eq;
 using testing::Return;
 
+using ::testing::WithParamInterface;
+
 namespace mesos {
 namespace internal {
 namespace tests {
 
 
-class PartitionTest : public MesosTest {};
+class PartitionTest : public MesosTest,
+                      public WithParamInterface<bool> {};
+
+
+// The Registrar tests are parameterized by "strictness".
+INSTANTIATE_TEST_CASE_P(Strict, PartitionTest, ::testing::Bool());
 
 
 // This test checks that a scheduler gets a slave lost
 // message for a partitioned slave.
-TEST_F(PartitionTest, PartitionedSlave)
+TEST_P(PartitionTest, PartitionedSlave)
 {
   master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry_strict = GetParam();
+
   Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
@@ -156,11 +165,13 @@ TEST_F(PartitionTest, PartitionedSlave)
 // partitioned slave, thus sending its tasks to LOST. At this point,
 // when the partition is removed, the slave will attempt to
 // re-register with its running tasks. We've already notified
-// frameworks that these tasks were LOST, so we have to have the slave
+// frameworks that these tasks were LOST, so we have to have the
 // slave shut down.
-TEST_F(PartitionTest, PartitionedSlaveReregistration)
+TEST_P(PartitionTest, PartitionedSlaveReregistration)
 {
   master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry_strict = GetParam();
+
   Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
@@ -274,6 +285,11 @@ TEST_F(PartitionTest, PartitionedSlaveReregistration)
   // The master will notify the framework that the slave was lost.
   AWAIT_READY(slaveLost);
 
+  JSON::Object stats = Metrics();
+  EXPECT_EQ(1, stats.values["master/tasks_lost"]);
+  EXPECT_EQ(1, stats.values["master/slave_removals"]);
+  EXPECT_EQ(1, stats.values["master/slave_removals/reason_unhealthy"]);
+
   Clock::resume();
 
   // We now complete the partition on the slave side as well. This
@@ -308,9 +324,11 @@ TEST_F(PartitionTest, PartitionedSlaveReregistration)
 // the slave may attempt to send updates if it was unaware that the
 // master removed it. We've already notified frameworks that these
 // tasks were LOST, so we have to have the slave shut down.
-TEST_F(PartitionTest, PartitionedSlaveStatusUpdates)
+TEST_P(PartitionTest, PartitionedSlaveStatusUpdates)
 {
   master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry_strict = GetParam();
+
   Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
@@ -389,6 +407,10 @@ TEST_F(PartitionTest, PartitionedSlaveStatusUpdates)
   // The master will notify the framework that the slave was lost.
   AWAIT_READY(slaveLost);
 
+  JSON::Object stats = Metrics();
+  EXPECT_EQ(1, stats.values["master/slave_removals"]);
+  EXPECT_EQ(1, stats.values["master/slave_removals/reason_unhealthy"]);
+
   shutdownMessage = FUTURE_PROTOBUF(ShutdownMessage(), _, slave.get()->pid);
 
   // At this point, the slave still thinks it's registered, so we
@@ -428,9 +450,11 @@ TEST_F(PartitionTest, PartitionedSlaveStatusUpdates)
 // it was unaware that the master removed it. We've already
 // notified frameworks that the tasks under the executors were LOST,
 // so we have to have the slave shut down.
-TEST_F(PartitionTest, PartitionedSlaveExitedExecutor)
+TEST_P(PartitionTest, PartitionedSlaveExitedExecutor)
 {
   master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.registry_strict = GetParam();
+
   Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
@@ -538,6 +562,11 @@ TEST_F(PartitionTest, PartitionedSlaveExitedExecutor)
   // The master will notify the framework that the slave was lost.
   AWAIT_READY(slaveLost);
 
+  JSON::Object stats = Metrics();
+  EXPECT_EQ(1, stats.values["master/tasks_lost"]);
+  EXPECT_EQ(1, stats.values["master/slave_removals"]);
+  EXPECT_EQ(1, stats.values["master/slave_removals/reason_unhealthy"]);
+
   shutdownMessage = FUTURE_PROTOBUF(ShutdownMessage(), _, slave.get()->pid);
 
   // Induce an ExitedExecutorMessage from the slave.
@@ -554,10 +583,13 @@ TEST_F(PartitionTest, PartitionedSlaveExitedExecutor)
 }
 
 
+class OneWayPartitionTest : public MesosTest {};
+
+
 // This test verifies that if master --> slave socket closes and the
 // slave is not aware of it (i.e., one way network partition), slave
 // will re-register with the master.
-TEST_F(PartitionTest, OneWayPartitionMasterToSlave)
+TEST_F(OneWayPartitionTest, MasterToSlave)
 {
   // Start a master.
   master::Flags masterFlags = CreateMasterFlags();
@@ -609,7 +641,7 @@ TEST_F(PartitionTest, OneWayPartitionMasterToSlave)
 // framework is not aware of it (i.e., one way network partition), all
 // subsequent calls from the framework after the master has marked it as
 // disconnected would result in an error message causing the framework to abort.
-TEST_F(PartitionTest, OneWayPartitionMasterToScheduler)
+TEST_F(OneWayPartitionTest, MasterToScheduler)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);

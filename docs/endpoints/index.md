@@ -38,6 +38,7 @@ For example, http://master.com:5050/files/browse
 * [/logging/toggle](logging/toggle.md)
 
 ### master ###
+* [/api/v1](master/api/v1.md)
 * [/api/v1/scheduler](master/api/v1/scheduler.md)
 * [/create-volumes](master/create-volumes.md)
 * [/destroy-volumes](master/destroy-volumes.md)
@@ -48,7 +49,6 @@ For example, http://master.com:5050/files/browse
 * [/machine/up](master/machine/up.md)
 * [/maintenance/schedule](master/maintenance/schedule.md)
 * [/maintenance/status](master/maintenance/status.md)
-* [/observe](master/observe.md)
 * [/quota](master/quota.md)
 * [/redirect](master/redirect.md)
 * [/reserve](master/reserve.md)
@@ -108,6 +108,7 @@ For example, http://agent.com:5051/files/browse
 * [/profiler/stop](profiler/stop.md)
 
 ### slave(id) ###
+* [/api/v1](slave/api/v1.md)
 * [/api/v1/executor](slave/api/v1/executor.md)
 * [/containers](slave/containers.md)
 * [/flags](slave/flags.md)

@@ -22,7 +22,7 @@
 
 #include <gmock/gmock.h>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 
 #include <process/clock.hpp>
 #include <process/future.hpp>
@@ -55,7 +55,7 @@ using mesos::internal::master::allocator::HierarchicalDRFAllocator;
 
 using mesos::internal::protobuf::createLabel;
 
-using mesos::master::allocator::Allocator;
+using mesos::allocator::Allocator;
 
 using process::Clock;
 using process::Future;
@@ -1463,7 +1463,7 @@ TEST_F(HierarchicalAllocatorTest, QuotaProvidesGuarantee)
       allocation.get().resources.get(agent2.id()).get(),
       offerFilter);
 
-  // Total cluster resources: cpus=1, mem=512.
+  // Total cluster resources: cpus=2, mem=1024.
   // QUOTA_ROLE share = 0.5 (cpus=1, mem=512) [quota: cpus=2, mem=1024]
   //   framework1 share = 1
   // NO_QUOTA_ROLE share = 0

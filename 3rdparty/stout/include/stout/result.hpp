@@ -58,7 +58,13 @@ public:
   Result(const T& _t)
     : data(Some(_t)) {}
 
-  template <typename U>
+  Result(T&& _t)
+    : data(Some(std::move(_t))) {}
+
+  template <
+      typename U,
+      typename = typename std::enable_if<
+          std::is_constructible<T, const U&>::value>::type>
   Result(const U& u)
     : data(Some(u)) {}
 
@@ -95,6 +101,7 @@ public:
   Result(const Result<T>& that) = default;
   ~Result() = default;
   Result<T>& operator=(const Result<T>& that) = default;
+  Result<T>& operator=(Result<T>&& that) = default;
 
   // 'isSome', 'isNone', and 'isError' are mutually exclusive. They
   // correspond to the underlying unioned state of the Option and Try.

@@ -25,6 +25,7 @@
 #include "slave/containerizer/mesos/provisioner/backend.hpp"
 
 #ifdef __linux__
+#include "slave/containerizer/mesos/provisioner/backends/aufs.hpp"
 #include "slave/containerizer/mesos/provisioner/backends/bind.hpp"
 #endif
 #include "slave/containerizer/mesos/provisioner/backends/copy.hpp"
@@ -47,7 +48,15 @@ hashmap<string, Owned<Backend>> Backend::create(const Flags& flags)
 #ifdef __linux__
   creators.put("bind", &BindBackend::create);
 
-  Try<bool> overlayfsSupported = fs::overlay::supported();
+  Try<bool> aufsSupported = fs::supported("aufs");
+  if (aufsSupported.isError()) {
+    LOG(WARNING) << "Failed to check aufs availability: '"
+                 << aufsSupported.error();
+  } else if (aufsSupported.get()) {
+    creators.put("aufs", &AufsBackend::create);
+  }
+
+  Try<bool> overlayfsSupported = fs::supported("overlayfs");
   if (overlayfsSupported.isError()) {
     LOG(WARNING) << "Failed to check overlayfs availability: '"
                  << overlayfsSupported.error();

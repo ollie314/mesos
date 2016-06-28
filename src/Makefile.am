@@ -38,6 +38,7 @@ GMOCK = 3rdparty/gmock-$(GMOCK_VERSION)
 GTEST = $(GMOCK)/gtest
 PROTOBUF = 3rdparty/protobuf-$(PROTOBUF_VERSION)
 PICOJSON = 3rdparty/picojson-$(PICOJSON_VERSION)
+NVML = 3rdparty/nvml-$(NVML_VERSION)
 
 
 # Unfortunatley, 'pkglibexecdir' and 'pkgsysconfdir' are not set
@@ -157,6 +158,10 @@ else
 LIB_PROCESS = -lprocess
 endif
 
+if WITH_BUNDLED_NVML
+MESOS_CPPFLAGS += -I../$(NVML)
+endif
+
 if WITH_BUNDLED_PICOJSON
 MESOS_CPPFLAGS += -I../$(PICOJSON)
 endif
@@ -182,11 +187,15 @@ LIB_ZOOKEEPER = -lzookeeper_mt
 LDADD += -lzookeeper_mt
 endif
 
-if ENABLE_NVIDIA_GPU_SUPPORT
-LIB_NVIDIA = -lnvidia-ml
-LDADD += -lnvidia-ml
-endif
-
+# TODO(hausdorff): Remove our hard dependency on SASL, as some platforms
+# (namely Windows) will not support it in the forseeable future. As a
+# stop-gap, we conditionally compile the code in libmesos that depends on
+# SASL, by always setting `HAS_AUTHENTICATION` on non-Windows platforms, and
+# never setting it on Windows platforms. This means that non-Windows builds
+# of libmesos will still take a hard dependency on SASL, while Windows builds
+# won't. Currently, the dependency is still assumed throughout the tests,
+# though the plan is to remove this hard dependency as well. See MESOS-5450.
+MESOS_CPPFLAGS += -DHAS_AUTHENTICATION=1
 
 # README: we build the Mesos library out of a collection of
 # convenience libraries (that is, libraries that do not get installed
@@ -197,7 +206,8 @@ endif
 # First, let's define necessary protocol buffer files.
 
 ACLS_PROTO = $(top_srcdir)/include/mesos/authorizer/acls.proto
-ALLOCATOR_PROTO = $(top_srcdir)/include/mesos/master/allocator.proto
+AGENT_PROTO = $(top_srcdir)/include/mesos/agent/agent.proto
+ALLOCATOR_PROTO = $(top_srcdir)/include/mesos/allocator/allocator.proto
 APPC_SPEC_PROTO = $(top_srcdir)/include/mesos/appc/spec.proto
 AUTHENTICATION_PROTO = $(top_srcdir)/include/mesos/authentication/authentication.proto
 AUTHORIZATION_PROTO = $(top_srcdir)/include/mesos/authorizer/authorizer.proto
@@ -208,6 +218,7 @@ DOCKER_V2_PROTO = $(top_srcdir)/include/mesos/docker/v2.proto
 EXECUTOR_PROTO = $(top_srcdir)/include/mesos/executor/executor.proto
 FETCHER_PROTO = $(top_srcdir)/include/mesos/fetcher/fetcher.proto
 MAINTENANCE_PROTO = $(top_srcdir)/include/mesos/maintenance/maintenance.proto
+MASTER_PROTO = $(top_srcdir)/include/mesos/master/master.proto
 MESOS_PROTO = $(top_srcdir)/include/mesos/mesos.proto
 MODULE_PROTO = $(top_srcdir)/include/mesos/module/module.proto
 QUOTA_PROTO = $(top_srcdir)/include/mesos/quota/quota.proto
@@ -216,14 +227,23 @@ STATE_PROTO = $(top_srcdir)/include/mesos/state/state.proto
 ISOLATOR_PROTO = $(top_srcdir)/include/mesos/slave/isolator.proto
 OVERSUBSCRIPTION_PROTO = $(top_srcdir)/include/mesos/slave/oversubscription.proto
 URI_PROTO = $(top_srcdir)/include/mesos/uri/uri.proto
+V1_AGENT_PROTO = $(top_srcdir)/include/mesos/v1/agent/agent.proto
+V1_ALLOCATOR_PROTO = $(top_srcdir)/include/mesos/v1/allocator/allocator.proto
 V1_EXECUTOR_PROTO = $(top_srcdir)/include/mesos/v1/executor/executor.proto
+V1_MAINTENANCE_PROTO = $(top_srcdir)/include/mesos/v1/maintenance/maintenance.proto
+V1_MASTER_PROTO = $(top_srcdir)/include/mesos/v1/master/master.proto
 V1_MESOS_PROTO = $(top_srcdir)/include/mesos/v1/mesos.proto
+V1_QUOTA_PROTO = $(top_srcdir)/include/mesos/v1/quota/quota.proto
 V1_SCHEDULER_PROTO = $(top_srcdir)/include/mesos/v1/scheduler/scheduler.proto
 
 
 CXX_PROTOS =								\
   ../include/mesos/mesos.pb.cc						\
   ../include/mesos/mesos.pb.h						\
+  ../include/mesos/agent/agent.pb.cc					\
+  ../include/mesos/agent/agent.pb.h					\
+  ../include/mesos/allocator/allocator.pb.cc				\
+  ../include/mesos/allocator/allocator.pb.h				\
   ../include/mesos/appc/spec.pb.cc					\
   ../include/mesos/appc/spec.pb.h					\
   ../include/mesos/authentication/authentication.pb.cc			\
@@ -246,8 +266,8 @@ CXX_PROTOS =								\
   ../include/mesos/fetcher/fetcher.pb.h					\
   ../include/mesos/maintenance/maintenance.pb.cc			\
   ../include/mesos/maintenance/maintenance.pb.h				\
-  ../include/mesos/master/allocator.pb.cc				\
-  ../include/mesos/master/allocator.pb.h				\
+  ../include/mesos/master/master.pb.cc					\
+  ../include/mesos/master/master.pb.h					\
   ../include/mesos/module/module.pb.cc					\
   ../include/mesos/module/module.pb.h					\
   ../include/mesos/quota/quota.pb.cc					\
@@ -264,8 +284,18 @@ CXX_PROTOS =								\
   ../include/mesos/uri/uri.pb.h						\
   ../include/mesos/v1/mesos.pb.cc					\
   ../include/mesos/v1/mesos.pb.h					\
+  ../include/mesos/v1/agent/agent.pb.cc					\
+  ../include/mesos/v1/agent/agent.pb.h					\
+  ../include/mesos/v1/allocator/allocator.pb.cc				\
+  ../include/mesos/v1/allocator/allocator.pb.h				\
   ../include/mesos/v1/executor/executor.pb.cc				\
   ../include/mesos/v1/executor/executor.pb.h				\
+  ../include/mesos/v1/maintenance/maintenance.pb.cc			\
+  ../include/mesos/v1/maintenance/maintenance.pb.h			\
+  ../include/mesos/v1/master/master.pb.cc				\
+  ../include/mesos/v1/master/master.pb.h				\
+  ../include/mesos/v1/quota/quota.pb.cc					\
+  ../include/mesos/v1/quota/quota.pb.h					\
   ../include/mesos/v1/scheduler/scheduler.pb.cc				\
   ../include/mesos/v1/scheduler/scheduler.pb.h
 
@@ -301,6 +331,7 @@ PYTHON_PROTOS =								\
 
 V1_JAVA_PROTOS =							\
   java/generated/org/apache/mesos/v1/Protos.java			\
+  java/generated/org/apache/mesos/v1/executor/Protos.java		\
   java/generated/org/apache/mesos/v1/scheduler/Protos.java
 
 V1_PYTHON_PROTOS =							\
@@ -433,6 +464,15 @@ nodist_pkginclude_HEADERS =						\
   ../include/mesos/version.hpp						\
   ../include/mesos/mesos.pb.h
 
+allocatordir = $(pkgincludedir)/allocator
+
+allocator_HEADERS =								\
+  $(top_srcdir)/include/mesos/allocator/allocator.hpp				\
+  $(top_srcdir)/include/mesos/allocator/allocator.proto
+
+nodist_allocator_HEADERS =							\
+  ../include/mesos/allocator/allocator.pb.h
+
 appcdir = $(pkgincludedir)/appc
 
 appc_HEADERS =								\
@@ -525,13 +565,13 @@ nodist_maintenance_HEADERS =						\
 masterdir = $(pkgincludedir)/master
 
 master_HEADERS =							\
-  $(top_srcdir)/include/mesos/master/allocator.hpp			\
-  $(top_srcdir)/include/mesos/master/allocator.proto			\
   $(top_srcdir)/include/mesos/master/contender.hpp			\
-  $(top_srcdir)/include/mesos/master/detector.hpp
+  $(top_srcdir)/include/mesos/master/detector.hpp			\
+  $(top_srcdir)/include/mesos/master/master.hpp				\
+  $(top_srcdir)/include/mesos/master/master.proto
 
 nodist_master_HEADERS =							\
-  ../include/mesos/master/allocator.pb.h
+  ../include/mesos/master/master.pb.h
 
 moduledir = $(pkgincludedir)/module
 
@@ -576,6 +616,8 @@ nodist_scheduler_HEADERS =						\
 agentdir = $(pkgincludedir)/agent
 
 agent_HEADERS =								\
+  $(top_srcdir)/include/mesos/agent/agent.hpp				\
+  $(top_srcdir)/include/mesos/agent/agent.proto			\
   $(top_srcdir)/include/mesos/slave/container_logger.hpp		\
   $(top_srcdir)/include/mesos/slave/isolator.hpp			\
   $(top_srcdir)/include/mesos/slave/isolator.proto			\
@@ -585,6 +627,7 @@ agent_HEADERS =								\
   $(top_srcdir)/include/mesos/slave/resource_estimator.hpp
 
 nodist_agent_HEADERS =							\
+  ../include/mesos/agent/agent.pb.h					\
   ../include/mesos/slave/isolator.pb.h					\
   ../include/mesos/slave/oversubscription.pb.h
 
@@ -627,6 +670,23 @@ v1_HEADERS =								\
 nodist_v1_HEADERS =							\
   ../include/mesos/v1/mesos.pb.h
 
+v1agentdir = $(pkgincludedir)/v1/agent
+
+v1agent_HEADERS =							\
+  $(top_srcdir)/include/mesos/v1/agent/agent.hpp			\
+  $(top_srcdir)/include/mesos/v1/agent/agent.proto
+
+nodist_v1agent_HEADERS =						\
+  ../include/mesos/v1/agent/agent.pb.h
+
+v1allocatordir = $(pkgincludedir)/v1/allocator
+
+v1allocator_HEADERS =							\
+  $(top_srcdir)/include/mesos/v1/allocator/allocator.proto
+
+nodist_v1allocator_HEADERS =						\
+  ../include/mesos/v1/allocator/allocator.pb.h
+
 v1executordir = $(pkgincludedir)/v1/executor
 
 v1executor_HEADERS =							\
@@ -635,6 +695,32 @@ v1executor_HEADERS =							\
 
 nodist_v1executor_HEADERS =						\
   ../include/mesos/v1/executor/executor.pb.h
+
+v1maintenancedir = $(pkgincludedir)/v1/maintenance
+
+v1maintenance_HEADERS =							\
+  $(top_srcdir)/include/mesos/v1/maintenance/maintenance.hpp		\
+  $(top_srcdir)/include/mesos/v1/maintenance/maintenance.proto
+
+nodist_v1maintenance_HEADERS =						\
+  ../include/mesos/v1/maintenance/maintenance.pb.h
+
+v1masterdir = $(pkgincludedir)/v1/master
+
+v1master_HEADERS =							\
+  $(top_srcdir)/include/mesos/v1/master/master.hpp			\
+  $(top_srcdir)/include/mesos/v1/master/master.proto
+
+nodist_v1master_HEADERS =						\
+  ../include/mesos/v1/master/master.pb.h
+
+v1quotadir = $(pkgincludedir)/v1/quota
+
+v1quota_HEADERS =							\
+  $(top_srcdir)/include/mesos/v1/quota/quota.proto
+
+nodist_v1quota_HEADERS =						\
+  ../include/mesos/v1/quota/quota.pb.h
 
 v1schedulerdir = $(pkgincludedir)/v1/scheduler
 
@@ -698,6 +784,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   docker/spec.cpp							\
   exec/exec.cpp								\
   executor/executor.cpp							\
+  executor/v0_v1executor.cpp						\
   files/files.cpp							\
   hdfs/hdfs.cpp								\
   hook/manager.cpp							\
@@ -714,7 +801,6 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   master/quota.cpp							\
   master/quota_handler.cpp						\
   master/registrar.cpp							\
-  master/repairer.cpp							\
   master/validation.cpp							\
   master/weights.cpp							\
   master/weights_handler.cpp						\
@@ -818,11 +904,15 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   examples/test_anonymous_module.hpp					\
   examples/test_module.hpp						\
   examples/utils.hpp							\
+  executor/v0_v1executor.hpp						\
   files/files.hpp							\
   hdfs/hdfs.hpp								\
   hook/manager.hpp							\
   internal/devolve.hpp							\
   internal/evolve.hpp							\
+  launcher/executor.hpp							\
+  launcher/posix/executor.hpp						\
+  launcher/windows/executor.hpp						\
   local/flags.hpp							\
   local/local.hpp							\
   logging/flags.hpp							\
@@ -836,7 +926,6 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   master/quota.hpp							\
   master/registrar.hpp							\
   master/registry.hpp							\
-  master/repairer.hpp							\
   master/validation.hpp							\
   master/weights.hpp							\
   master/allocator/mesos/allocator.hpp					\
@@ -854,6 +943,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   module/manager.hpp							\
   sched/constants.hpp							\
   sched/flags.hpp							\
+  scheduler/constants.hpp						\
+  scheduler/flags.hpp							\
   slave/constants.hpp							\
   slave/flags.hpp							\
   slave/gc.hpp								\
@@ -878,6 +969,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/mount.hpp					\
   slave/containerizer/mesos/isolators/posix.hpp				\
   slave/containerizer/mesos/isolators/filesystem/posix.hpp		\
+  slave/containerizer/mesos/isolators/filesystem/windows.hpp		\
   slave/containerizer/mesos/isolators/posix/disk.hpp			\
   slave/containerizer/mesos/isolators/docker/volume/driver.hpp		\
   slave/containerizer/mesos/isolators/docker/volume/paths.hpp		\
@@ -885,6 +977,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/isolators/network/cni/paths.hpp		\
   slave/containerizer/mesos/isolators/network/cni/spec.hpp		\
   slave/containerizer/mesos/isolators/network/cni/spec.hpp		\
+  slave/containerizer/mesos/isolators/windows.hpp			\
   slave/containerizer/mesos/provisioner/backend.hpp			\
   slave/containerizer/mesos/provisioner/paths.hpp			\
   slave/containerizer/mesos/provisioner/provisioner.hpp			\
@@ -939,10 +1032,12 @@ libmesos_no_3rdparty_la_SOURCES +=					\
 MESOS_LINUX_FILES =							\
   linux/cgroups.cpp							\
   linux/fs.cpp								\
+  linux/ldcache.cpp							\
   linux/perf.cpp							\
   linux/systemd.cpp							\
   slave/containerizer/mesos/linux_launcher.cpp				\
   slave/containerizer/mesos/isolators/cgroups/cpushare.cpp		\
+  slave/containerizer/mesos/isolators/cgroups/devices.cpp		\
   slave/containerizer/mesos/isolators/cgroups/mem.cpp			\
   slave/containerizer/mesos/isolators/cgroups/net_cls.cpp		\
   slave/containerizer/mesos/isolators/cgroups/perf_event.cpp		\
@@ -950,14 +1045,19 @@ MESOS_LINUX_FILES =							\
   slave/containerizer/mesos/isolators/docker/volume/isolator.cpp	\
   slave/containerizer/mesos/isolators/filesystem/linux.cpp		\
   slave/containerizer/mesos/isolators/filesystem/shared.cpp		\
+  slave/containerizer/mesos/isolators/gpu/allocator.cpp			\
+  slave/containerizer/mesos/isolators/gpu/nvidia.cpp			\
+  slave/containerizer/mesos/isolators/gpu/nvml.cpp			\
   slave/containerizer/mesos/isolators/namespaces/pid.cpp		\
   slave/containerizer/mesos/isolators/network/cni/cni.cpp		\
+  slave/containerizer/mesos/provisioner/backends/aufs.cpp		\
   slave/containerizer/mesos/provisioner/backends/bind.cpp		\
   slave/containerizer/mesos/provisioner/backends/overlay.cpp
 
 MESOS_LINUX_FILES +=							\
   linux/cgroups.hpp							\
   linux/fs.hpp								\
+  linux/ldcache.hpp							\
   linux/ns.hpp								\
   linux/perf.hpp							\
   linux/sched.hpp							\
@@ -965,6 +1065,7 @@ MESOS_LINUX_FILES +=							\
   slave/containerizer/mesos/linux_launcher.hpp				\
   slave/containerizer/mesos/isolators/cgroups/constants.hpp		\
   slave/containerizer/mesos/isolators/cgroups/cpushare.hpp		\
+  slave/containerizer/mesos/isolators/cgroups/devices.hpp		\
   slave/containerizer/mesos/isolators/cgroups/mem.hpp			\
   slave/containerizer/mesos/isolators/cgroups/net_cls.hpp		\
   slave/containerizer/mesos/isolators/cgroups/perf_event.hpp		\
@@ -972,8 +1073,12 @@ MESOS_LINUX_FILES +=							\
   slave/containerizer/mesos/isolators/docker/volume/isolator.hpp	\
   slave/containerizer/mesos/isolators/filesystem/linux.hpp		\
   slave/containerizer/mesos/isolators/filesystem/shared.hpp		\
+  slave/containerizer/mesos/isolators/gpu/allocator.hpp			\
+  slave/containerizer/mesos/isolators/gpu/nvidia.hpp			\
+  slave/containerizer/mesos/isolators/gpu/nvml.hpp			\
   slave/containerizer/mesos/isolators/namespaces/pid.hpp		\
   slave/containerizer/mesos/isolators/network/cni/cni.hpp		\
+  slave/containerizer/mesos/provisioner/backends/aufs.hpp		\
   slave/containerizer/mesos/provisioner/backends/bind.hpp		\
   slave/containerizer/mesos/provisioner/backends/overlay.hpp
 
@@ -1023,12 +1128,6 @@ MESOS_NETWORK_ISOLATOR_FILES +=						\
   linux/routing/queueing/statistics.hpp					\
   slave/containerizer/mesos/isolators/network/port_mapping.hpp
 
-MESOS_NVIDIA_GPU_ISOLATOR_FILES =					\
-  slave/containerizer/mesos/isolators/cgroups/devices/gpus/nvidia.cpp
-
-MESOS_NVIDIA_GPU_ISOLATOR_FILES +=					\
-  slave/containerizer/mesos/isolators/cgroups/devices/gpus/nvidia.hpp
-
 if OS_LINUX
 libmesos_no_3rdparty_la_SOURCES += $(MESOS_LINUX_FILES)
 else
@@ -1039,12 +1138,6 @@ if WITH_NETWORK_ISOLATOR
 libmesos_no_3rdparty_la_SOURCES += $(MESOS_NETWORK_ISOLATOR_FILES)
 else
 EXTRA_DIST += $(MESOS_NETWORK_ISOLATOR_FILES)
-endif
-
-if ENABLE_NVIDIA_GPU_SUPPORT
-libmesos_no_3rdparty_la_SOURCES += $(MESOS_NVIDIA_GPU_ISOLATOR_FILES)
-else
-EXTRA_DIST += $(MESOS_NVIDIA_GPU_ISOLATOR_FILES)
 endif
 
 libmesos_no_3rdparty_la_CPPFLAGS = $(MESOS_CPPFLAGS)
@@ -1151,6 +1244,7 @@ lib_LTLIBRARIES += libmesos.la
 # Include as part of the distribution.
 libmesos_la_SOURCES =							\
   $(ACLS_PROTO)								\
+  $(AGENT_PROTO)								\
   $(ALLOCATOR_PROTO)							\
   $(APPC_SPEC_PROTO)							\
   $(AUTHENTICATION_PROTO)						\
@@ -1163,6 +1257,7 @@ libmesos_la_SOURCES =							\
   $(FETCHER_PROTO)							\
   $(ISOLATOR_PROTO)							\
   $(MAINTENANCE_PROTO)							\
+  $(MASTER_PROTO)							\
   $(MESOS_PROTO)							\
   $(MODULE_PROTO)							\
   $(OVERSUBSCRIPTION_PROTO)						\
@@ -1170,8 +1265,13 @@ libmesos_la_SOURCES =							\
   $(SCHEDULER_PROTO)							\
   $(STATE_PROTO)							\
   $(URI_PROTO)								\
+  $(V1_AGENT_PROTO)							\
+  $(V1_ALLOCATOR_PROTO)							\
   $(V1_EXECUTOR_PROTO)							\
+  $(V1_MAINTENANCE_PROTO)						\
+  $(V1_MASTER_PROTO)							\
   $(V1_MESOS_PROTO)							\
+  $(V1_QUOTA_PROTO)							\
   $(V1_SCHEDULER_PROTO)
 
 libmesos_la_LDFLAGS = -release $(PACKAGE_VERSION)
@@ -1185,7 +1285,6 @@ libmesos_la_LIBADD =							\
   libmesos_no_3rdparty.la						\
   $(LIB_GLOG)								\
   $(LIB_LEVELDB)							\
-  $(LIB_NVIDIA)								\
   $(LIB_PROCESS)							\
   $(LIB_PROTOBUF)							\
   $(LIB_ZOOKEEPER)							\
@@ -1223,14 +1322,11 @@ mesos_fetcher_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_fetcher_LDADD = libmesos.la $(LDADD)
 
 pkglibexec_PROGRAMS += mesos-executor
-mesos_executor_SOURCES = launcher/executor.cpp
+mesos_executor_SOURCES = 						\
+  launcher/executor.cpp							\
+  launcher/posix/executor.cpp
 mesos_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_executor_LDADD = libmesos.la $(LDADD)
-
-pkglibexec_PROGRAMS += mesos-http-executor
-mesos_http_executor_SOURCES = launcher/http_command_executor.cpp
-mesos_http_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
-mesos_http_executor_LDADD = libmesos.la $(LDADD)
 
 pkglibexec_PROGRAMS += mesos-containerizer
 mesos_containerizer_SOURCES = slave/containerizer/mesos/main.cpp
@@ -1312,6 +1408,10 @@ nobase_dist_pkgdata_DATA +=						\
 
 # Need to distribute/install webui HTML.
 nobase_dist_pkgdata_DATA +=						\
+  webui/master/static/agent.html					\
+  webui/master/static/agents.html					\
+  webui/master/static/agent_executor.html				\
+  webui/master/static/agent_framework.html				\
   webui/master/static/browse.html					\
   webui/master/static/framework.html					\
   webui/master/static/frameworks.html					\
@@ -1319,10 +1419,6 @@ nobase_dist_pkgdata_DATA +=						\
   webui/master/static/index.html					\
   webui/master/static/offers.html					\
   webui/master/static/pailer.html					\
-  webui/master/static/slave.html					\
-  webui/master/static/slave_executor.html				\
-  webui/master/static/slave_framework.html				\
-  webui/master/static/slaves.html					\
   webui/master/static/directives/pagination.html			\
   webui/master/static/directives/tableHeader.html			\
   webui/master/static/directives/timestamp.html
@@ -1934,6 +2030,7 @@ endif
 mesos_tests_SOURCES =						\
   slave/qos_controllers/load.cpp				\
   tests/anonymous_tests.cpp					\
+  tests/api_tests.cpp						\
   tests/attributes_tests.cpp					\
   tests/authentication_tests.cpp				\
   tests/authorization_tests.cpp					\
@@ -1985,7 +2082,6 @@ mesos_tests_SOURCES =						\
   tests/rate_limiting_tests.cpp					\
   tests/reconciliation_tests.cpp				\
   tests/registrar_tests.cpp					\
-  tests/repair_tests.cpp					\
   tests/reservation_endpoints_tests.cpp				\
   tests/reservation_tests.cpp					\
   tests/resource_offers_tests.cpp				\
@@ -2033,7 +2129,12 @@ mesos_tests_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_tests_CPPFLAGS += -DSOURCE_DIR=\"$(abs_top_srcdir)\"
 mesos_tests_CPPFLAGS += -DBUILD_DIR=\"$(abs_top_builddir)\"
 mesos_tests_CPPFLAGS += -I../$(GTEST)/include
-mesos_tests_CPPFLAGS += -I../$(GMOCK)/include
+
+# We use "-isystem" instead of "-I" to add googlemock to the include
+# search path. This disables compiler warnings inside googlemock
+# headers since we can't easily fix them.
+mesos_tests_CPPFLAGS += -isystem ../$(GMOCK)/include
+
 mesos_tests_CPPFLAGS += -DTESTLIBEXECDIR=\"$(testlibexecdir)\"
 mesos_tests_CPPFLAGS += -DSBINDIR=\"$(sbindir)\"
 
@@ -2052,14 +2153,16 @@ if OS_LINUX
 mesos_tests_SOURCES +=						\
   tests/containerizer/cgroups_isolator_tests.cpp		\
   tests/containerizer/cgroups_tests.cpp				\
+  tests/containerizer/cni_isolator_tests.cpp			\
   tests/containerizer/docker_volume_isolator_tests.cpp		\
-  tests/containerizer/runtime_isolator_tests.cpp		\
   tests/containerizer/filesystem_isolator_tests.cpp		\
   tests/containerizer/fs_tests.cpp				\
   tests/containerizer/launch_tests.cpp				\
   tests/containerizer/memory_pressure_tests.cpp			\
   tests/containerizer/ns_tests.cpp				\
+  tests/containerizer/nvidia_gpu_isolator_tests.cpp		\
   tests/containerizer/perf_tests.cpp				\
+  tests/containerizer/runtime_isolator_tests.cpp		\
   tests/containerizer/sched_tests.cpp				\
   tests/containerizer/setns_test_helper.cpp
 endif
@@ -2068,11 +2171,6 @@ if WITH_NETWORK_ISOLATOR
 mesos_tests_SOURCES +=						\
   tests/containerizer/port_mapping_tests.cpp			\
   tests/containerizer/routing_tests.cpp
-endif
-
-if ENABLE_NVIDIA_GPU_SUPPORT
-mesos_tests_SOURCES +=						\
-  tests/containerizer/nvidia_gpu_isolator_tests.cpp
 endif
 
 if HAS_JAVA

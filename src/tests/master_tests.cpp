@@ -25,7 +25,7 @@
 #include <mesos/executor.hpp>
 #include <mesos/scheduler.hpp>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 
 #include <mesos/scheduler/scheduler.hpp>
 
@@ -671,7 +671,7 @@ TEST_F(MasterTest, RecoverResources)
 
   slave::Flags flags = CreateSlaveFlags();
   flags.resources = Option<string>(
-      "cpus:2;mem:1024;disk:1024;ports:[1-10, 20-30]");
+      "cpus:2;gpus:0;mem:1024;disk:1024;ports:[1-10, 20-30]");
 
   Owned<MasterDetector> detector = master.get()->createDetector();
 
@@ -1701,7 +1701,7 @@ TEST_F(MasterTest, SlavesEndpointWithoutSlaves)
 }
 
 
-// Ensures that the number of registered slaves resported by
+// Ensures that the number of registered slaves reported by
 // /master/slaves coincides with the actual number of registered
 // slaves.
 TEST_F(MasterTest, SlavesEndpointTwoSlaves)
@@ -2462,6 +2462,95 @@ TEST_F(MasterTest, OrphanTasks)
 }
 
 
+// This tests /tasks endpoint to return correct task information.
+TEST_F(MasterTest, TasksEndpoint)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  TaskInfo task;
+  task.set_name("test");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
+  task.mutable_resources()->MergeFrom(offers.get()[0].resources());
+  task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .Times(1);
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
+  EXPECT_TRUE(status.get().has_executor_id());
+  EXPECT_EQ(exec.id, status.get().executor_id());
+
+  Future<Response> response = process::http::get(
+      master.get()->pid,
+      "tasks",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+  Try<JSON::Value> value = JSON::parse<JSON::Value>(response.get().body);
+  ASSERT_SOME(value);
+
+  Try<JSON::Value> expected = JSON::parse(
+      "{"
+        "\"tasks\":"
+          "[{"
+              "\"executor_id\":\"default\","
+              "\"id\":\"1\","
+              "\"name\":\"test\","
+              "\"state\":\"TASK_RUNNING\""
+          "}]"
+      "}");
+
+  ASSERT_SOME(expected);
+
+  EXPECT_TRUE(value.get().contains(expected.get()));
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+}
+
+
 // This test verifies that the master will strip ephemeral ports
 // resource from offers so that frameworks cannot see it.
 TEST_F(MasterTest, IgnoreEphemeralPortsResource)
@@ -2470,7 +2559,7 @@ TEST_F(MasterTest, IgnoreEphemeralPortsResource)
   ASSERT_SOME(master);
 
   string resourcesWithoutEphemeralPorts =
-    "cpus:2;mem:1024;disk:1024;ports:[31000-32000]";
+    "cpus:2;gpus:0;mem:1024;disk:1024;ports:[31000-32000]";
 
   string resourcesWithEphemeralPorts =
     resourcesWithoutEphemeralPorts + ";ephemeral_ports:[30001-30999]";
@@ -3526,8 +3615,13 @@ TEST_F(MasterTest, TaskStatusContainerStatus)
   EXPECT_TRUE(status->has_container_status());
   ContainerStatus containerStatus = status->container_status();
   EXPECT_EQ(1, containerStatus.network_infos().size());
-  EXPECT_TRUE(containerStatus.network_infos(0).has_ip_address());
-  EXPECT_EQ(slaveIPAddress, containerStatus.network_infos(0).ip_address());
+  EXPECT_EQ(1, containerStatus.network_infos(0).ip_addresses().size());
+
+  NetworkInfo::IPAddress ipAddress =
+    containerStatus.network_infos(0).ip_addresses(0);
+
+  ASSERT_TRUE(ipAddress.has_ip_address());
+  EXPECT_EQ(slaveIPAddress, ipAddress.ip_address());
 
   // Now do the same validation with state endpoint.
   Future<Response> response = process::http::get(
@@ -3548,7 +3642,8 @@ TEST_F(MasterTest, TaskStatusContainerStatus)
       slaveIPAddress,
       parse.get().find<JSON::String>(
           "frameworks[0].tasks[0].statuses[0]"
-          ".container_status.network_infos[0].ip_address"));
+          ".container_status.network_infos[0]"
+          ".ip_addresses[0].ip_address"));
 
   // Now test for explicit reconciliation.
   Future<TaskStatus> explicitReconciliationStatus;
@@ -3569,8 +3664,12 @@ TEST_F(MasterTest, TaskStatusContainerStatus)
 
   containerStatus = explicitReconciliationStatus->container_status();
   EXPECT_EQ(1, containerStatus.network_infos().size());
-  EXPECT_TRUE(containerStatus.network_infos(0).has_ip_address());
-  EXPECT_EQ(slaveIPAddress, containerStatus.network_infos(0).ip_address());
+  EXPECT_EQ(1, containerStatus.network_infos(0).ip_addresses().size());
+
+  ipAddress = containerStatus.network_infos(0).ip_addresses(0);
+
+  ASSERT_TRUE(ipAddress.has_ip_address());
+  EXPECT_EQ(slaveIPAddress, ipAddress.ip_address());
 
   Future<TaskStatus> implicitReconciliationStatus;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -3585,8 +3684,12 @@ TEST_F(MasterTest, TaskStatusContainerStatus)
 
   containerStatus = implicitReconciliationStatus->container_status();
   EXPECT_EQ(1, containerStatus.network_infos().size());
-  EXPECT_TRUE(containerStatus.network_infos(0).has_ip_address());
-  EXPECT_EQ(slaveIPAddress, containerStatus.network_infos(0).ip_address());
+  EXPECT_EQ(1, containerStatus.network_infos(0).ip_addresses().size());
+
+  ipAddress = containerStatus.network_infos(0).ip_addresses(0);
+
+  ASSERT_TRUE(ipAddress.has_ip_address());
+  EXPECT_EQ(slaveIPAddress, ipAddress.ip_address());
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));

@@ -16,6 +16,7 @@
 
 #include <stdio.h>
 
+#include <map>
 #include <string>
 
 #include <mesos/mesos.hpp>
@@ -27,9 +28,14 @@
 #include <process/reap.hpp>
 #include <process/owned.hpp>
 
+#include <stout/error.hpp>
 #include <stout/flags.hpp>
-#include <stout/protobuf.hpp>
+#include <stout/json.hpp>
 #include <stout/os.hpp>
+#include <stout/protobuf.hpp>
+#include <stout/try.hpp>
+
+#include <stout/os/killtree.hpp>
 
 #include "common/status_utils.hpp"
 
@@ -49,6 +55,7 @@ using namespace process;
 using std::cerr;
 using std::cout;
 using std::endl;
+using std::map;
 using std::string;
 using std::vector;
 
@@ -73,7 +80,8 @@ public:
       const string& sandboxDirectory,
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
-      const string& healthCheckDir)
+      const string& healthCheckDir,
+      const map<string, string>& taskEnvironment)
     : killed(false),
       killedByHealthCheck(false),
       terminated(false),
@@ -84,6 +92,7 @@ public:
       sandboxDirectory(sandboxDirectory),
       mappedDirectory(mappedDirectory),
       shutdownGracePeriod(shutdownGracePeriod),
+      taskEnvironment(taskEnvironment),
       stop(Nothing()),
       inspect(Nothing()) {}
 
@@ -153,14 +162,17 @@ public:
         sandboxDirectory,
         mappedDirectory,
         task.resources() + task.executor().resources(),
-        None(),
+        taskEnvironment,
         Subprocess::FD(STDOUT_FILENO),
         Subprocess::FD(STDERR_FILENO));
 
-    run->onAny(defer(self(), &Self::reaped, driver, lambda::_1));
+    run->onAny(defer(self(), &Self::reaped, lambda::_1));
 
     // Delay sending TASK_RUNNING status update until we receive
-    // inspect output.
+    // inspect output. Note that we store a future that completes
+    // after the sending of the running update. This allows us to
+    // ensure that the terminal update is sent after the running
+    // update (see `reaped()`).
     inspect = docker->inspect(containerName, DOCKER_INSPECT_DELAY)
       .then(defer(self(), [=](const Docker::Container& container) {
         if (!killed) {
@@ -177,11 +189,15 @@ public:
             NetworkInfo* networkInfo =
               status.mutable_container_status()->add_network_infos();
 
-            // TODO(CD): Deprecated -- Remove after 0.27.0.
-            networkInfo->set_ip_address(container.ipAddress.get());
+            // Copy the NetworkInfo if it is specified in the
+            // ContainerInfo. A Docker container has at most one
+            // NetworkInfo, which is validated in containerizer.
+            if (task.container().network_infos().size() > 0) {
+              networkInfo->CopyFrom(task.container().network_infos(0));
+              networkInfo->clear_ip_addresses();
+            }
 
-            NetworkInfo::IPAddress* ipAddress =
-              networkInfo->add_ip_addresses();
+            NetworkInfo::IPAddress* ipAddress = networkInfo->add_ip_addresses();
             ipAddress->set_ip_address(container.ipAddress.get());
           }
           driver->sendStatusUpdate(status);
@@ -199,7 +215,7 @@ public:
     cout << "Received killTask for task " << taskId.value() << endl;
 
     // Using shutdown grace period as a default is backwards compatible
-    // with the `stop_timeout` flag, deprecated in 0.29.
+    // with the `stop_timeout` flag, deprecated in 1.0.
     Duration gracePeriod = shutdownGracePeriod;
 
     if (killPolicy.isSome() && killPolicy->has_grace_period()) {
@@ -290,30 +306,16 @@ private:
     // the grace period if a new one is provided.
 
     // Issue the kill signal if the container is running
-    // and this is the first time we've received the kill.
+    // and we haven't killed it yet.
     if (run.isSome() && !killed) {
-      // Send TASK_KILLING if the framework can handle it.
-      CHECK_SOME(frameworkInfo);
-      CHECK_SOME(taskId);
-      CHECK(taskId.get() == _taskId);
-
-      foreach (const FrameworkInfo::Capability& c,
-               frameworkInfo->capabilities()) {
-        if (c.type() == FrameworkInfo::Capability::TASK_KILLING_STATE) {
-          TaskStatus status;
-          status.mutable_task_id()->CopyFrom(taskId.get());
-          status.set_state(TASK_KILLING);
-          driver->sendStatusUpdate(status);
-          break;
-        }
-      }
-
-      // The docker daemon might still be in progress starting the
-      // container, therefore we kill both the docker run process
-      // and also ask the daemon to stop the container.
-      run->discard();
-      stop = docker->stop(containerName, gracePeriod);
-      killed = true;
+      // We have to issue the kill after 'docker inspect' has
+      // completed, otherwise we may race with 'docker run'
+      // and docker may not know about the container. Note
+      // that we postpone setting `killed` because we don't
+      // want to send TASK_KILLED without having actually
+      // issued the kill.
+      inspect
+        .onAny(defer(self(), &Self::_killTask, _taskId, gracePeriod));
     }
 
     // Cleanup health check process.
@@ -324,64 +326,124 @@ private:
     // task that takes 30 minutes to be cleanly killed).
     if (healthPid != -1) {
       os::killtree(healthPid, SIGKILL);
+      healthPid = -1;
     }
   }
 
-  void reaped(
-      ExecutorDriver* _driver,
-      const Future<Nothing>& run)
+  void _killTask(const TaskID& taskId_, const Duration& gracePeriod)
   {
-    // Wait for docker->stop to finish, and best effort wait for the
-    // inspect future to complete with a timeout.
-    stop.onAny(defer(self(), [=](const Future<Nothing>&) {
-      inspect
-        .after(DOCKER_INSPECT_TIMEOUT, [=](const Future<Nothing>&) {
-          inspect.discard();
-          return inspect;
-        })
-        .onAny(defer(self(), [=](const Future<Nothing>&) {
-          CHECK_SOME(driver);
+    CHECK_SOME(driver);
+    CHECK_SOME(frameworkInfo);
+    CHECK_SOME(taskId);
+    CHECK_EQ(taskId_, taskId.get());
 
-          terminated = true;
+    if (!terminated && !killed) {
+      // Because we rely on `killed` to determine whether
+      // to send TASK_KILLED, we set `killed` only once the
+      // kill is issued. If we set it earlier we're more
+      // likely to send a TASK_KILLED without having ever
+      // signaled the container. Note that in general it's
+      // a race between signaling and the container
+      // terminating with a non-zero exit status.
+      killed = true;
 
-          TaskState state;
-          string message;
-          if (!stop.isReady()) {
-            state = TASK_FAILED;
-            message = "Unable to stop docker container, error: " +
-                      (stop.isFailed() ? stop.failure() : "future discarded");
-          } else if (killed) {
-            state = TASK_KILLED;
-          } else if (!run.isReady()) {
-            state = TASK_FAILED;
-            message = "Docker container run error: " +
-                      (run.isFailed() ?
-                       run.failure() : "future discarded");
-          } else {
-            state = TASK_FINISHED;
-          }
+      // Send TASK_KILLING if the framework can handle it.
+      foreach (const FrameworkInfo::Capability& c,
+               frameworkInfo->capabilities()) {
+        if (c.type() == FrameworkInfo::Capability::TASK_KILLING_STATE) {
+          TaskStatus status;
+          status.mutable_task_id()->CopyFrom(taskId.get());
+          status.set_state(TASK_KILLING);
+          driver.get()->sendStatusUpdate(status);
+          break;
+        }
+      }
 
-          CHECK_SOME(taskId);
+      // TODO(bmahler): Replace this with 'docker kill' so
+      // that we can adjust the grace period in the case of
+      // a `KillPolicy` override.
+      stop = docker->stop(containerName, gracePeriod);
+    }
+  }
 
-          TaskStatus taskStatus;
-          taskStatus.mutable_task_id()->CopyFrom(taskId.get());
-          taskStatus.set_state(state);
-          taskStatus.set_message(message);
-          if (killed && killedByHealthCheck) {
-            taskStatus.set_healthy(false);
-          }
+  void reaped(const Future<Option<int>>& run)
+  {
+    terminated = true;
 
-          driver.get()->sendStatusUpdate(taskStatus);
+    // In case the stop is stuck, discard it.
+    stop.discard();
 
-          // A hack for now ... but we need to wait until the status update
-          // is sent to the slave before we shut ourselves down.
-          // TODO(tnachen): Remove this hack and also the same hack in the
-          // command executor when we have the new HTTP APIs to wait until
-          // an ack.
-          os::sleep(Seconds(1));
-          driver.get()->stop();
-        }));
-    }));
+    // We wait for inspect to finish in order to ensure we send
+    // the TASK_RUNNING status update.
+    inspect
+      .onAny(defer(self(), &Self::_reaped, run));
+
+    // If the inspect takes too long we discard it to ensure we
+    // don't wait forever, however in this case there may be no
+    // TASK_RUNNING update.
+    inspect
+      .after(DOCKER_INSPECT_TIMEOUT, [=](const Future<Nothing>&) {
+        inspect.discard();
+        return inspect;
+      });
+  }
+
+  void _reaped(const Future<Option<int>>& run)
+  {
+    TaskState state;
+    string message;
+
+    if (!run.isReady()) {
+      // TODO(bmahler): Include the run command in the message.
+      state = TASK_FAILED;
+      message = "Failed to run docker container: " +
+          (run.isFailed() ? run.failure() : "discarded");
+    } else if (run->isNone()) {
+      state = TASK_FAILED;
+      message = "Failed to get exit status of container";
+    } else {
+      int status = run->get();
+      CHECK(WIFEXITED(status) || WIFSIGNALED(status)) << status;
+
+      if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        state = TASK_FINISHED;
+      } else if (killed) {
+        // Send TASK_KILLED if the task was killed as a result of
+        // kill() or shutdown(). Note that in general there is a
+        // race between signaling the container and it terminating
+        // uncleanly on its own.
+        //
+        // TODO(bmahler): Consider using the exit status to
+        // determine whether the container was terminated via
+        // our signal or terminated on its own.
+        state = TASK_KILLED;
+      } else {
+        state = TASK_FAILED;
+      }
+
+      message = "Container " + WSTRINGIFY(status);
+    }
+
+    CHECK_SOME(taskId);
+
+    TaskStatus taskStatus;
+    taskStatus.mutable_task_id()->CopyFrom(taskId.get());
+    taskStatus.set_state(state);
+    taskStatus.set_message(message);
+    if (killed && killedByHealthCheck) {
+      taskStatus.set_healthy(false);
+    }
+
+    CHECK_SOME(driver);
+    driver.get()->sendStatusUpdate(taskStatus);
+
+    // A hack for now ... but we need to wait until the status update
+    // is sent to the slave before we shut ourselves down.
+    // TODO(tnachen): Remove this hack and also the same hack in the
+    // command executor when we have the new HTTP APIs to wait until
+    // an ack.
+    os::sleep(Seconds(1));
+    driver.get()->stop();
   }
 
   void launchHealthCheck(const string& containerName, const TaskInfo& task)
@@ -495,8 +557,10 @@ private:
   string sandboxDirectory;
   string mappedDirectory;
   Duration shutdownGracePeriod;
+  map<string, string> taskEnvironment;
+
   Option<KillPolicy> killPolicy;
-  Option<Future<Nothing>> run;
+  Option<Future<Option<int>>> run;
   Future<Nothing> stop;
   Future<Nothing> inspect;
   Option<ExecutorDriver*> driver;
@@ -514,7 +578,8 @@ public:
       const string& sandboxDirectory,
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
-      const string& healthCheckDir)
+      const string& healthCheckDir,
+      const map<string, string>& taskEnvironment)
   {
     process = Owned<DockerExecutorProcess>(new DockerExecutorProcess(
         docker,
@@ -522,7 +587,8 @@ public:
         sandboxDirectory,
         mappedDirectory,
         shutdownGracePeriod,
-        healthCheckDir));
+        healthCheckDir,
+        taskEnvironment));
 
     spawn(process.get());
   }
@@ -650,6 +716,36 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
+  map<string, string> taskEnvironment;
+  if (flags.task_environment.isSome()) {
+    // Parse the string as JSON.
+    Try<JSON::Object> json =
+      JSON::parse<JSON::Object>(flags.task_environment.get());
+
+    if (json.isError()) {
+      cerr << flags.usage("Failed to parse --task_environment: " + json.error())
+           << endl;
+      return EXIT_FAILURE;
+    }
+
+    // Convert from JSON to map.
+    foreachpair (
+        const std::string& key,
+        const JSON::Value& value,
+        json->values) {
+      if (!value.is<JSON::String>()) {
+        cerr << flags.usage(
+            "Value of key '" + key +
+            "' in --task_environment is not a string")
+             << endl;
+        return EXIT_FAILURE;
+      }
+
+      // Save the parsed and validated key/value.
+      taskEnvironment[key] = value.as<JSON::String>().value;
+    }
+  }
+
   // Get executor shutdown grace period from the environment.
   //
   // NOTE: We avoided introducing a docker executor flag for this
@@ -672,7 +768,7 @@ int main(int argc, char** argv)
 
   // If the deprecated flag is set, respect it and choose the bigger value.
   //
-  // TODO(alexr): Remove this after the deprecation cycle (started in 0.29).
+  // TODO(alexr): Remove this after the deprecation cycle (started in 1.0).
   if (flags.stop_timeout.isSome() &&
       flags.stop_timeout.get() > shutdownGracePeriod) {
     shutdownGracePeriod = flags.stop_timeout.get();
@@ -702,7 +798,8 @@ int main(int argc, char** argv)
       flags.sandbox_directory.get(),
       flags.mapped_directory.get(),
       shutdownGracePeriod,
-      flags.launcher_dir.get());
+      flags.launcher_dir.get(),
+      taskEnvironment);
 
   mesos::MesosExecutorDriver driver(&executor);
   return driver.run() == mesos::DRIVER_STOPPED ? EXIT_SUCCESS : EXIT_FAILURE;

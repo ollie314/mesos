@@ -30,9 +30,9 @@
 #include <mesos/docker/spec.hpp>
 
 #include "slave/containerizer/mesos/provisioner/docker/metadata_manager.hpp"
-#include "slave/containerizer/mesos/provisioner/docker/store.hpp"
 #include "slave/containerizer/mesos/provisioner/docker/paths.hpp"
 #include "slave/containerizer/mesos/provisioner/docker/puller.hpp"
+#include "slave/containerizer/mesos/provisioner/docker/store.hpp"
 
 #include "uri/fetcher.hpp"
 
@@ -93,7 +93,14 @@ Try<Owned<slave::Store>> Store::create(const Flags& flags)
 {
   // TODO(jieyu): We should inject URI fetcher from top level, instead
   // of creating it here.
-  Try<Owned<uri::Fetcher>> fetcher = uri::fetcher::create();
+  uri::fetcher::Flags _flags;
+
+  // TODO(dpravat): Remove after resolving MESOS-5473.
+#ifndef __WINDOWS__
+  _flags.docker_config = flags.docker_config;
+#endif
+
+  Try<Owned<uri::Fetcher>> fetcher = uri::fetcher::create(_flags);
   if (fetcher.isError()) {
     return Error("Failed to create the URI fetcher: " + fetcher.error());
   }
@@ -185,7 +192,7 @@ Future<ImageInfo> StoreProcess::get(const mesos::Image& image)
                    "': " + reference.error());
   }
 
-  return metadataManager->get(reference.get())
+  return metadataManager->get(reference.get(), image.cached())
     .then(defer(self(), &Self::_get, reference.get(), lambda::_1))
     .then(defer(self(), &Self::__get, lambda::_1));
 }

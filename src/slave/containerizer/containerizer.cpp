@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include <map>
+#include <set>
 #include <vector>
 
 #include <process/dispatch.hpp>
@@ -44,7 +45,13 @@
 #include "slave/containerizer/mesos/linux_launcher.hpp"
 #endif // __linux__
 
+#ifdef __linux__
+#include "slave/containerizer/mesos/isolators/gpu/allocator.hpp"
+#include "slave/containerizer/mesos/isolators/gpu/nvml.hpp"
+#endif // __linux__
+
 using std::map;
+using std::set;
 using std::string;
 using std::vector;
 
@@ -93,36 +100,21 @@ Try<Resources> Containerizer::resources(const Flags& flags)
         flags.default_role).get();
   }
 
+#ifdef __linux__
   // GPU resource.
-  // We currently do not support GPU discovery, so we require that
-  // GPUs are explicitly specified in `--resources`. When Nvidia GPU
-  // support is enabled, we also require the GPU devices to be
-  // specified in `--nvidia_gpu_devices`.
-  if (strings::contains(flags.resources.getOrElse(""), "gpus")) {
-    // Make sure that the value of `gpus` is actually an integer and
-    // not a fractional amount. We take advantage of the fact that we
-    // know the value of `gpus` is only precise up to 3 decimals.
-    long long millis = static_cast<long long>(resources.gpus().get() * 1000);
-    if ((millis % 1000) != 0) {
-      return Error("The `gpus` resource must specified as an unsigned integer");
-    }
-
-#ifdef ENABLE_NVIDIA_GPU_SUPPORT
-    // Verify that the number of GPUs in `--nvidia_gpu_devices`
-    // matches the number of GPUs specified as a resource. In the
-    // future we will do discovery of GPUs, which will make the
-    // `--nvidia_gpu_devices` flag optional.
-    if (!flags.nvidia_gpu_devices.isSome()) {
-      return Error("When specifying the `gpus` resource, you must also specify"
-                   " a list of GPUs via the `--nvidia_gpu_devices` flag");
-    }
-
-    if (flags.nvidia_gpu_devices->size() != resources.gpus().get())
-      return Error("The number of GPUs passed in the '--nvidia_gpu_devices'"
-                   " flag must match the number of GPUs specified in the 'gpus'"
-                   " resource");
-#endif // ENABLE_NVIDIA_GPU_SUPPORT
+  Try<Resources> gpus = NvidiaGpuAllocator::resources(flags);
+  if (gpus.isError()) {
+    return Error("Failed to obtain GPU resources: " + gpus.error());
   }
+
+  // When adding in the GPU resources, make sure that we filter out
+  // the existing GPU resources (if any) so that we do not double
+  // allocate GPUs.
+  resources = gpus.get() + resources.filter(
+      [](const Resource& resource) {
+        return resource.name() != "gpus";
+      });
+#endif
 
   // Memory resource.
   if (!strings::contains(flags.resources.getOrElse(""), "mem")) {
@@ -289,8 +281,7 @@ map<string, string> executorEnvironment(
     const SlaveID& slaveId,
     const PID<Slave>& slavePid,
     bool checkpoint,
-    const Flags& flags,
-    bool includeOsEnvironment)
+    const Flags& flags)
 {
   map<string, string> environment;
 
@@ -313,8 +304,12 @@ map<string, string> executorEnvironment(
       CHECK(value.is<JSON::String>());
       environment[key] = value.as<JSON::String>().value;
     }
-  } else if (includeOsEnvironment) {
-    environment = os::environment();
+  }
+
+  // Include a default $PATH if there isn't.
+  if (environment.count("PATH") == 0) {
+    environment["PATH"] =
+      "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
   }
 
   // Set LIBPROCESS_PORT so that we bind to a random free port (since
@@ -361,6 +356,8 @@ map<string, string> executorEnvironment(
   environment["MESOS_SLAVE_PID"] = stringify(slavePid);
   environment["MESOS_AGENT_ENDPOINT"] = stringify(slavePid.address);
   environment["MESOS_CHECKPOINT"] = checkpoint ? "1" : "0";
+  environment["MESOS_HTTP_COMMAND_EXECUTOR"] =
+    flags.http_command_executor ? "1" : "0";
 
   // Set executor's shutdown grace period. If set, the customized value
   // from `ExecutorInfo` overrides the default from agent flags.

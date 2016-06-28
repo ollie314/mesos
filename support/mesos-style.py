@@ -11,7 +11,8 @@ import sys
 # Root source paths (will be traversed recursively).
 source_dirs = ['src',
                'include',
-               os.path.join('3rdparty', 'libprocess')]
+               os.path.join('3rdparty', 'libprocess'),
+               os.path.join('3rdparty', 'stout')]
 
 # Add file paths and patterns which should not be checked
 # This should include 3rdparty libraries, includes and machine generated
@@ -44,6 +45,7 @@ def run_lint(source_paths):
         'build/class',
         'build/deprecated',
         'build/endif_comment',
+        'build/nullptr',
         'readability/todo',
         'readability/namespace',
         'runtime/vlog',

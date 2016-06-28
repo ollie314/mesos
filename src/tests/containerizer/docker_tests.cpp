@@ -89,7 +89,7 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
   }
 
   Try<string> directory = environment->mkdtemp();
-  CHECK_SOME(directory) << "Failed to create temporary directory";
+  ASSERT_SOME(directory);
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::DOCKER);
@@ -102,7 +102,7 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
   commandInfo.set_value("sleep 120");
 
   // Start the container.
-  Future<Nothing> status = docker->run(
+  Future<Option<int>> status = docker->run(
       containerInfo,
       commandInfo,
       containerName,
@@ -133,8 +133,13 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
   EXPECT_SOME(inspect.get().pid);
 
   // Stop the container.
-  status = docker->stop(containerName);
+  Future<Nothing> stop = docker->stop(containerName);
+  AWAIT_READY(stop);
+
   AWAIT_READY(status);
+  ASSERT_SOME(status.get());
+  EXPECT_TRUE(WIFEXITED(status->get())) << status->get();
+  EXPECT_EQ(128 + SIGKILL, WEXITSTATUS(status->get())) << status->get();
 
   // Now, the container should not appear in the result of ps().
   // But it should appear in the result of ps(true).
@@ -166,8 +171,8 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
   EXPECT_NONE(inspect.get().pid);
 
   // Remove the container.
-  status = docker->rm(containerName);
-  AWAIT_READY(status);
+  Future<Nothing> rm = docker->rm(containerName);
+  AWAIT_READY(rm);
 
   // Should not be able to inspect the container.
   inspect = docker->inspect(containerName);
@@ -207,8 +212,13 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
   EXPECT_TRUE(found);
 
   // Then do a "rm -f".
-  status = docker->rm(containerName, true);
+  rm = docker->rm(containerName, true);
+  AWAIT_READY(rm);
+
   AWAIT_READY(status);
+  ASSERT_SOME(status.get());
+  EXPECT_TRUE(WIFEXITED(status->get())) << status->get();
+  EXPECT_EQ(128 + SIGKILL, WEXITSTATUS(status->get())) << status->get();
 
   // Verify that the container is totally removed, that is we can't
   // find it by ps() or ps(true).
@@ -225,35 +235,86 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
 }
 
 
-// This test tests parsing docker version output.
-TEST_F(DockerTest, ROOT_DOCKER_parsing_version)
+// This tests our 'docker kill' wrapper.
+TEST_F(DockerTest, ROOT_DOCKER_kill)
 {
-  Owned<Docker> docker1 = Docker::create(
+  const string containerName = NAME_PREFIX + "-test";
+  Resources resources = Resources::parse("cpus:1;mem:512").get();
+
+  Owned<Docker> docker = Docker::create(
+      tests::flags.docker,
+      tests::flags.docker_socket,
+      false).get();
+
+  Try<string> directory = environment->mkdtemp();
+  ASSERT_SOME(directory);
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::DOCKER);
+
+  ContainerInfo::DockerInfo dockerInfo;
+  dockerInfo.set_image("alpine");
+  containerInfo.mutable_docker()->CopyFrom(dockerInfo);
+
+  CommandInfo commandInfo;
+  commandInfo.set_value("sleep 120");
+
+  // Start the container, kill it, and expect it to terminate.
+  Future<Option<int>> run = docker->run(
+      containerInfo,
+      commandInfo,
+      containerName,
+      directory.get(),
+      "/mnt/mesos/sandbox",
+      resources);
+
+  // Note that we cannot issue the kill until we know that the
+  // run has been processed. We check for this by waiting for
+  // a successful 'inspect' result.
+  Future<Docker::Container> inspect =
+    docker->inspect(containerName, Milliseconds(10));
+
+  AWAIT_READY(inspect);
+
+  Future<Nothing> kill = docker->kill(
+      containerName,
+      SIGKILL);
+
+  AWAIT_READY(kill);
+
+  AWAIT_READY(run);
+  ASSERT_SOME(run.get());
+  EXPECT_TRUE(WIFEXITED(run->get())) << run->get();
+  EXPECT_EQ(128 + SIGKILL, WEXITSTATUS(run->get())) << run->get();
+}
+
+
+// This test tests parsing docker version output.
+TEST_F(DockerTest, ROOT_DOCKER_Version)
+{
+  Try<Owned<Docker>> docker = Docker::create(
       "echo Docker version 1.7.1, build",
       tests::flags.docker_socket,
-      false).get();
+      false);
+  ASSERT_SOME(docker);
 
-  Future<Version> version1 = docker1->version();
-  AWAIT_READY(version1);
-  EXPECT_EQ(Version::parse("1.7.1").get(), version1.get());
+  AWAIT_EXPECT_EQ(Version(1, 7, 1), docker.get()->version());
 
-  Owned<Docker> docker2 = Docker::create(
+  docker = Docker::create(
       "echo Docker version 1.7.1.fc22, build",
       tests::flags.docker_socket,
-      false).get();
+      false);
+  ASSERT_SOME(docker);
 
-  Future<Version> version2 = docker2->version();
-  AWAIT_READY(version2);
-  EXPECT_EQ(Version::parse("1.7.1").get(), version2.get());
+  AWAIT_EXPECT_EQ(Version(1, 7, 1), docker.get()->version());
 
-  Owned<Docker> docker3 = Docker::create(
+  docker = Docker::create(
       "echo Docker version 1.7.1-fc22, build",
       tests::flags.docker_socket,
-      false).get();
+      false);
+  ASSERT_SOME(docker);
 
-  Future<Version> version3 = docker3->version();
-  AWAIT_READY(version3);
-  EXPECT_EQ(Version::parse("1.7.1").get(), version3.get());
+  AWAIT_EXPECT_EQ(Version(1, 7, 1), docker.get()->version());
 }
 
 
@@ -274,7 +335,7 @@ TEST_F(DockerTest, ROOT_DOCKER_CheckCommandWithShell)
   CommandInfo commandInfo;
   commandInfo.set_shell(true);
 
-  Future<Nothing> run = docker->run(
+  Future<Option<int>> run = docker->run(
       containerInfo,
       commandInfo,
       "testContainer",
@@ -320,7 +381,7 @@ TEST_F(DockerTest, ROOT_DOCKER_CheckPortResource)
   Resources resources =
     Resources::parse("ports:[9998-9999];ports:[10001-11000]").get();
 
-  Future<Nothing> run = docker->run(
+  Future<Option<int>> run = docker->run(
       containerInfo,
       commandInfo,
       containerName,
@@ -334,7 +395,7 @@ TEST_F(DockerTest, ROOT_DOCKER_CheckPortResource)
   resources = Resources::parse("ports:[9998-9999];ports:[10000-11000]").get();
 
   Try<string> directory = environment->mkdtemp();
-  CHECK_SOME(directory) << "Failed to create temporary directory";
+  ASSERT_SOME(directory);
 
   run = docker->run(
       containerInfo,
@@ -345,6 +406,9 @@ TEST_F(DockerTest, ROOT_DOCKER_CheckPortResource)
       resources);
 
   AWAIT_READY(run);
+  ASSERT_SOME(run.get());
+  EXPECT_TRUE(WIFEXITED(run->get())) << run->get();
+  EXPECT_EQ(0, WEXITSTATUS(run->get())) << run->get();
 }
 
 
@@ -368,8 +432,7 @@ TEST_F(DockerTest, ROOT_DOCKER_CancelPull)
       false).get();
 
   Try<string> directory = environment->mkdtemp();
-
-  CHECK_SOME(directory) << "Failed to create temporary directory";
+  ASSERT_SOME(directory);
 
   // Assume that pulling the very large image 'lingmann/1gb' will take
   // sufficiently long that we can start it and discard (i.e., cancel
@@ -410,12 +473,12 @@ TEST_F(DockerTest, ROOT_DOCKER_MountRelative)
   commandInfo.set_value("ls /tmp/test_file");
 
   Try<string> directory = environment->mkdtemp();
-  CHECK_SOME(directory) << "Failed to create temporary directory";
+  ASSERT_SOME(directory);
 
   const string testFile = path::join(directory.get(), "test_file");
   EXPECT_SOME(os::write(testFile, "data"));
 
-  Future<Nothing> run = docker->run(
+  Future<Option<int>> run = docker->run(
       containerInfo,
       commandInfo,
       NAME_PREFIX + "-mount-relative-test",
@@ -423,6 +486,9 @@ TEST_F(DockerTest, ROOT_DOCKER_MountRelative)
       directory.get());
 
   AWAIT_READY(run);
+  ASSERT_SOME(run.get());
+  EXPECT_TRUE(WIFEXITED(run->get())) << run->get();
+  EXPECT_EQ(0, WEXITSTATUS(run->get())) << run->get();
 }
 
 
@@ -439,7 +505,7 @@ TEST_F(DockerTest, ROOT_DOCKER_MountAbsolute)
   containerInfo.set_type(ContainerInfo::DOCKER);
 
   Try<string> directory = environment->mkdtemp();
-  CHECK_SOME(directory) << "Failed to create temporary directory";
+  ASSERT_SOME(directory);
 
   const string testFile = path::join(directory.get(), "test_file");
   EXPECT_SOME(os::write(testFile, "data"));
@@ -458,7 +524,7 @@ TEST_F(DockerTest, ROOT_DOCKER_MountAbsolute)
   commandInfo.set_shell(true);
   commandInfo.set_value("ls /tmp/test_file");
 
-  Future<Nothing> run = docker->run(
+  Future<Option<int>> run = docker->run(
       containerInfo,
       commandInfo,
       NAME_PREFIX + "-mount-absolute-test",
@@ -466,6 +532,9 @@ TEST_F(DockerTest, ROOT_DOCKER_MountAbsolute)
       directory.get());
 
   AWAIT_READY(run);
+  ASSERT_SOME(run.get());
+  EXPECT_TRUE(WIFEXITED(run->get())) << run->get();
+  EXPECT_EQ(0, WEXITSTATUS(run->get())) << run->get();
 }
 
 

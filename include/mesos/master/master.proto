@@ -1,0 +1,413 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+import "mesos/mesos.proto";
+
+import "mesos/maintenance/maintenance.proto";
+
+import "mesos/quota/quota.proto";
+
+package mesos.master;
+
+option java_package = "org.apache.mesos.master";
+option java_outer_classname = "Protos";
+
+/**
+ * Calls that can be sent to the master API.
+ *
+ * A call is described using the standard protocol buffer "union"
+ * trick, see
+ * https://developers.google.com/protocol-buffers/docs/techniques#union.
+ */
+message Call {
+  enum Type {
+   // If a call of type `Call::FOO` requires additional parameters they can be
+   // included in the corresponding `Call::Foo` message. Similarly, if a call
+   // receives a synchronous response it will be returned as a `Response`
+   // message of type `Response::FOO`. Currently all calls except
+   // `Call::SUBSCRIBE` receive synchronous responses; `Call::SUBSCRIBE` returns
+   // a streaming response of `Event`.
+    UNKNOWN = 0;
+
+    GET_HEALTH = 1;         // Retrieves the master's health status.
+    GET_FLAGS = 2;          // Retrieves the master's flag configuration.
+    GET_VERSION = 3;        // Retrieves the master's version information.
+    GET_METRICS = 4;        // See 'GetMetrics' below.
+
+    GET_LOGGING_LEVEL = 5;  // Retrieves the master's logging level.
+    SET_LOGGING_LEVEL = 6;  // See 'SetLoggingLevel' below.
+
+    LIST_FILES = 7;
+    READ_FILE = 8;
+
+    GET_STATE = 9;
+    GET_STATE_SUMMARY = 10;
+
+    GET_AGENTS = 11;
+    GET_FRAMEWORKS = 12;
+    GET_TASKS = 13;         // See 'GetTasks' below.
+    GET_ROLES = 14;         // Retrieves the information about roles.
+
+    GET_WEIGHTS = 15;       // Retrieves the information about role weights.
+    UPDATE_WEIGHTS = 16;
+
+    GET_LEADING_MASTER = 17; // Retrieves the leading master information.
+
+    SUBSCRIBE = 18;          // Subscribes the master to receive events.
+
+    RESERVE_RESOURCES = 19;
+    UNRESERVE_RESOURCES = 20;
+
+    CREATE_VOLUMES = 21;     // See 'CreateVolumes' below.
+    DESTROY_VOLUMES = 22;    // See 'DestroyVolumes' below.
+
+    // Retrieves the cluster's maintenance status.
+    GET_MAINTENANCE_STATUS = 23;
+    // Retrieves the cluster's maintenance schedule.
+    GET_MAINTENANCE_SCHEDULE = 24;
+    UPDATE_MAINTENANCE_SCHEDULE = 25; // See 'UpdateMaintenanceSchedule' below.
+    START_MAINTENANCE = 26;           // See 'StartMaintenance' below.
+    STOP_MAINTENANCE = 27;            // See 'StopMaintenance' below.
+
+    GET_QUOTA = 28;
+    SET_QUOTA = 29;          // See 'SetQuota' below.
+    REMOVE_QUOTA = 30;
+  }
+
+  // Provides a snapshot of the current metrics tracked by the master.
+  message GetMetrics {
+    // If set, `timeout` would be used to determines the maximum amount of time
+    // the API will take to respond. If the timeout is exceeded, some metrics
+    // may not be included in the response.
+    optional DurationInfo timeout = 1;
+  }
+
+  // Sets the logging verbosity level for a specified duration. Mesos uses
+  // [glog](https://github.com/google/glog) for logging. The library only uses
+  // verbose logging which means nothing will be output unless the verbosity
+  // level is set (by default it's 0, libprocess uses levels 1, 2, and 3).
+  message SetLoggingLevel {
+    // The verbosity level.
+    required uint32 level = 1;
+    // The duration to keep verbosity level toggled. After this duration, the
+    // verbosity level of log would revert to the original level.
+    required DurationInfo duration = 2;
+  }
+
+  message ListFiles {
+    required string path = 1;
+  }
+
+  message ReadFile {
+    required string path = 1;
+    optional string offset = 2;
+    optional string length = 3;
+  }
+
+  // Call::GetTasks requests 'limit' number of tasks starting
+  // from 'offset'. Tasks are sorted in 'order', either ascending
+  // or descending based on timestamp. If 'limit' is not set,
+  // default value 100 will be used.
+  message GetTasks {
+    optional uint32 limit = 1 [default = 100];
+    optional uint32 offset = 2;
+    optional string order = 3;
+  }
+
+  message UpdateWeights {
+    repeated WeightInfo weight_infos = 1;
+  }
+
+  // Reserve resources dynamically on a specific agent.
+  message ReserveResources {
+    required SlaveID agent_id = 1;
+    repeated Resource resources = 2;
+  }
+
+  // Unreserve resources dynamically on a specific agent.
+  message UnreserveResources {
+    required SlaveID agent_id = 1;
+    repeated Resource resources = 2;
+  }
+
+  // Create persistent volumes on reserved resources. The request is forwarded
+  // asynchronously to the Mesos agent where the reserved resources are located.
+  // That asynchronous message may not be delivered or creating the volumes at
+  // the agent might fail. Volume creation can be verified by sending a
+  // `GET_VOLUMES` call.
+  message CreateVolumes {
+    required SlaveID agent_id = 1;
+    repeated Resource volumes = 2;
+  }
+
+  // Destroy persistent volumes. The request is forwarded asynchronously to the
+  // Mesos agent where the reserved resources are located. That asynchronous
+  // message may not be delivered or destroying the volumes at the agent might
+  // fail. Volume deletion can be verified by sending a `GET_VOLUMES` call.
+  message DestroyVolumes {
+    required SlaveID agent_id = 1;
+    repeated Resource volumes = 2;
+  }
+
+  // Updates the cluster's maintenance schedule.
+  message UpdateMaintenanceSchedule {
+    required maintenance.Schedule schedule = 1;
+  }
+
+  // Starts the maintenance of the cluster, this would bring a set of machines
+  // down.
+  message StartMaintenance {
+    repeated MachineID machines = 1;
+  }
+
+  // Stops the maintenance of the cluster, this would bring a set of machines
+  // back up.
+  message StopMaintenance {
+    repeated MachineID machines = 1;
+  }
+
+  message SetQuota {
+    required quota.QuotaRequest quota_request = 1;
+  }
+
+  message RemoveQuota {
+    required string role = 1;
+  }
+
+  optional Type type = 1;
+
+  optional GetMetrics get_metrics = 2;
+  optional SetLoggingLevel set_logging_level = 3;
+  optional ListFiles list_files = 4;
+  optional ReadFile read_file = 5;
+  optional GetTasks get_tasks = 6;
+  optional ReserveResources reserve_resources = 7;
+  optional UnreserveResources unreserve_resources = 8;
+  optional CreateVolumes create_volumes = 9;
+  optional DestroyVolumes destroy_volumes = 10;
+  optional UpdateMaintenanceSchedule update_maintenance_schedule = 11;
+  optional StartMaintenance start_maintenance = 12;
+  optional StopMaintenance stop_maintenance  = 13;
+  optional SetQuota set_quota = 14;
+  optional RemoveQuota remove_quota = 15;
+}
+
+
+/**
+ * Synchronous responses for all calls (except Call::SUBSCRIBE) made to
+ * the master API.
+ */
+message Response {
+  // Each of the responses of type `FOO` corresponds to `Foo` message below.
+  enum Type {
+    UNKNOWN = 0;
+
+    GET_HEALTH = 1;                // See 'GetHealth' below.
+    GET_FLAGS = 2;                 // See 'GetFlags' below.
+    GET_VERSION = 3;               // See 'GetVersion' below.
+    GET_METRICS = 4;               // See 'GetMetrics' below.
+
+    GET_LOGGING_LEVEL = 5;         // See 'GetLoggingLevel' below.
+
+    LIST_FILES = 6;
+    READ_FILE = 7;
+
+    GET_STATE = 8;
+    GET_STATE_SUMMARY = 9;
+
+    GET_AGENTS = 10;
+    GET_FRAMEWORKS = 11;
+    GET_TASKS = 12;                // See 'GetTasks' below.
+    GET_ROLES = 13;                // See 'GetRoles' below.
+
+    GET_WEIGHTS = 14;              // See 'GetWeights' below.
+
+    GET_LEADING_MASTER = 15;       // See 'GetLeadingMaster' below.
+
+    GET_MAINTENANCE_STATUS = 16;   // See 'GetMaintenanceStatus' below.
+    GET_MAINTENANCE_SCHEDULE = 17; // See 'GetMaintenanceSchedule' below.
+
+    GET_QUOTA = 18;
+  }
+
+  // `healthy` would be true if the master is healthy. Delayed responses are
+  // also indicative of the poor health of the master.
+  message GetHealth {
+    required bool healthy = 1;
+  }
+
+  // Contains the flag configuration of the master.
+  message GetFlags {
+    repeated Flag flags = 1;
+  }
+
+  // Contains the version information of the master.
+  message GetVersion {
+    required VersionInfo version_info = 1;
+  }
+
+  // Contains a snapshot of the current metrics.
+  message GetMetrics {
+    repeated Metric metrics = 1;
+  }
+
+  // Contains the logging level of the master.
+  message GetLoggingLevel {
+    required uint32 level = 1;
+  }
+
+  message ListFiles {
+    repeated string files = 1;
+  }
+
+  message GetFileContents {
+    repeated bytes data = 1;
+  }
+
+  message GetState {
+    // TODO(vinod): Fill in the fields.
+  }
+
+  message GetStateSummary {
+    // TODO(vinod): Fill in the fields.
+  }
+
+  message GetAgents {
+    message Agent {
+      required SlaveInfo agent_info = 1;
+      required bool active = 2;
+      required string version = 3;
+
+      optional string pid = 4;
+      optional TimeInfo registered_time = 5;
+      optional TimeInfo reregistered_time = 6;
+
+      // Total resources (including oversubscribed resources) the agent
+      // provides.
+      repeated Resource total_resources = 7;
+
+      repeated Resource allocated_resources = 8;
+      repeated Resource offered_resources = 9;
+    }
+
+    // Registered agents.
+    repeated Agent agents = 1;
+  }
+
+  message GetFrameworks {
+    message Framework {
+    // TODO(vinod): Fill in the fields.
+    }
+
+    repeated Framework frameworks = 1;
+  }
+
+  // Lists both running and completed tasks from all active and completed
+  // frameworks.
+  message GetTasks {
+    repeated Task tasks = 1;
+  }
+
+  // Provides information about every role that is on the role whitelist (if
+  // enabled), has one or more registered frameworks or has a non-default weight
+  // or quota.
+  message GetRoles {
+    repeated Role roles = 1;
+  }
+
+  // Provides the weight information about every role.
+  message GetWeights {
+    repeated WeightInfo weight_infos = 1;
+  }
+
+  // Contains the leading master information.
+  // NOTE: This is broken currently "on the cloud" (e.g. EC2) as it stores the
+  // private IP address, unless advertise_ip points to an externally accessible
+  // IP.
+  message GetLeadingMaster {
+    optional MasterInfo master_info = 1;
+  }
+
+  // Contains the cluster's maintenance status.
+  message GetMaintenanceStatus {
+    required maintenance.ClusterStatus status = 1;
+  }
+
+  // Contains the cluster's maintenance schedule.
+  message GetMaintenanceSchedule {
+    required maintenance.Schedule schedule = 1;
+  }
+
+  message GetQuota {
+    required quota.QuotaStatus status = 1;
+  }
+
+  optional Type type = 1;
+
+  optional GetHealth get_health = 2;
+  optional GetFlags get_flags = 3;
+  optional GetVersion get_version = 4;
+  optional GetMetrics get_metrics = 5;
+  optional GetLoggingLevel get_logging_level = 6;
+  optional ListFiles list_files = 7;
+  optional GetFileContents get_file_contents = 8;
+  optional GetState get_state = 9;
+  optional GetStateSummary get_state_summary = 10;
+  optional GetAgents get_agents = 11;
+  optional GetFrameworks get_frameworks = 12;
+  optional GetTasks get_tasks = 13;
+  optional GetRoles get_roles = 14;
+  optional GetWeights get_weights = 15;
+  optional GetLeadingMaster get_leading_master = 16;
+  optional GetMaintenanceStatus get_maintenance_status = 17;
+  optional GetMaintenanceSchedule get_maintenance_schedule = 18;
+  optional GetQuota get_quota = 19;
+}
+
+
+/**
+ * Streaming response to `Call::SUBSCRIBE` made to the master.
+ */
+message Event {
+  enum Type {
+    UNKNOWN = 0;
+    TASK_ADDED = 1; // See `TaskAdded` below.
+    TASK_UPDATED = 2; // See `TaskUpdated` below.
+
+    // TODO(vinod): Fill in more events.
+  }
+
+  // Forwarded by the master when a task becomes known to it. This can happen
+  // when a new task is launched by the scheduler or when the task becomes
+  // known to the master upon an agent (re-)registration after a failover.
+  message TaskAdded {
+    required Task task = 1;
+  }
+
+  // Forwarded by the master when an existing task transitions to a new state.
+  message TaskUpdated {
+    required TaskID task_id = 1;
+    required FrameworkID framework_id = 2;
+    required SlaveID slave_id = 3;
+    optional ExecutorID executor_id = 4;
+    required TaskState state = 5;
+  }
+
+  optional Type type = 1;
+
+  optional TaskAdded task_added = 2;
+  optional TaskUpdated task_updated = 3;
+}

@@ -27,6 +27,7 @@
 
 #include <boost/shared_array.hpp>
 
+#include <process/defer.hpp>
 #include <process/deferred.hpp> // TODO(benh): This is required by Clang.
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
@@ -50,6 +51,8 @@
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
 
+#include <stout/os/constants.hpp>
+
 #include "files/files.hpp"
 
 #include "logging/logging.hpp"
@@ -57,12 +60,14 @@
 using namespace process;
 
 using process::AUTHENTICATION;
+using process::AUTHORIZATION;
 using process::DESCRIPTION;
 using process::HELP;
 using process::TLDR;
 using process::wait; // Necessary on some OS's to disambiguate.
 
 using process::http::BadRequest;
+using process::http::Forbidden;
 using process::http::InternalServerError;
 using process::http::NotFound;
 using process::http::OK;
@@ -83,7 +88,12 @@ public:
   FilesProcess(const Option<string>& _authenticationRealm);
 
   // Files implementation.
-  Future<Nothing> attach(const string& path, const string& name);
+  Future<Nothing> attach(
+      const string& path,
+      const string& name,
+      const Option<lambda::function<Future<bool>(const Option<string>&)>>&
+          authorized);
+
   void detach(const string& name);
 
 protected:
@@ -97,6 +107,8 @@ private:
   // out of the chroot.
   Result<string> resolve(const string& path);
 
+  Future<bool> authorize(string requestedPath, const Option<string>& principal);
+
   // HTTP endpoints.
 
   // Returns a file listing for a directory.
@@ -108,11 +120,21 @@ private:
       const Request& request,
       const Option<string>& principal);
 
+  Future<Response> _browse(
+      const string& path,
+      const Option<string>& jsonp);
+
   // Reads data from a file at a given offset and for a given length.
   // See the jquery pailer for the expected behavior.
   Future<Response> read(
       const Request& request,
       const Option<string>& principal);
+
+  Future<Response> _read(
+      off_t offset,
+      Option<size_t> length,
+      const string& path,
+      const Option<string>& jsonp);
 
   // Returns the raw file contents for a given path.
   // Requests have the following parameters:
@@ -120,6 +142,8 @@ private:
   Future<Response> download(
       const Request& request,
       const Option<string>& principal);
+
+  Future<Response> _download(const string& path);
 
   // Returns the internal virtual path mapping.
   Future<Response> debug(
@@ -132,6 +156,12 @@ private:
   const static string DEBUG_HELP;
 
   hashmap<string, string> paths;
+
+  // Set of authorization functions. They will be called whenever
+  // access to the path used as key is requested, and will pass
+  // as parameter the principal returned by the HTTP authenticator.
+  hashmap<string, lambda::function<Future<bool>(const Option<string>&)>>
+      authorizations;
 
   // The authentication realm, if any, into which this process'
   // endpoints will be installed.
@@ -214,7 +244,11 @@ void FilesProcess::initialize()
 }
 
 
-Future<Nothing> FilesProcess::attach(const string& path, const string& name)
+Future<Nothing> FilesProcess::attach(
+    const string& path,
+    const string& name,
+    const Option<lambda::function<Future<bool>(const Option<string>&)>>&
+        authorized)
 {
   Result<string> result = os::realpath(path);
 
@@ -240,6 +274,10 @@ Future<Nothing> FilesProcess::attach(const string& path, const string& name)
   // TODO(bmahler): Do we want to always wipe out the previous path?
   paths[cleanedName] = result.get();
 
+  if (authorized.isSome()) {
+    authorizations[cleanedName] = authorized.get();
+  }
+
   return Nothing();
 }
 
@@ -247,6 +285,7 @@ Future<Nothing> FilesProcess::attach(const string& path, const string& name)
 void FilesProcess::detach(const string& name)
 {
   paths.erase(name);
+  authorizations.erase(name);
 }
 
 
@@ -260,12 +299,46 @@ const string FilesProcess::BROWSE_HELP = HELP(
         "Query parameters:",
         "",
         ">        path=VALUE          The path of directory to browse."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Browsing files requires that the request principal is",
+        "authorized to do so for the target virtual file path.",
+        "",
+        "Authorizers may categorize different virtual paths into",
+        "different ACLs, e.g. logs in one and task sandboxes in",
+        "another.",
+        "",
+        "See authorization documentation for details."));
 
+
+Future<bool> FilesProcess::authorize(
+    string requestedPath,
+    const Option<string>& principal)
+{
+  // The path may contain a trailing forward slash. Since we store the
+  // authorization callbacks without the trailing slash, we must remove it here,
+  // if present.
+  string trimmedPath = strings::remove(requestedPath, "/", strings::SUFFIX);
+
+  if (authorizations.count(trimmedPath) > 0) {
+    return authorizations[trimmedPath](principal);
+  }
+
+  do {
+    requestedPath = Path(requestedPath).dirname();
+
+    if (authorizations.count(requestedPath) > 0) {
+      return authorizations[requestedPath](principal);
+    }
+  } while (Path(requestedPath).dirname() != requestedPath);
+
+  // requestedPath does not require authorization.
+  return true;
+}
 
 Future<Response> FilesProcess::browse(
     const Request& request,
-    const Option<string>& /* principal */)
+    const Option<string>& principal)
 {
   Option<string> path = request.url.query.get("path");
 
@@ -273,7 +346,26 @@ Future<Response> FilesProcess::browse(
     return BadRequest("Expecting 'path=value' in query.\n");
   }
 
-  Result<string> resolvedPath = resolve(path.get());
+  string requestedPath = path.get();
+  Option<string> jsonp = request.url.query.get("jsonp");
+
+  return authorize(requestedPath, principal)
+    .then(defer(self(),
+        [this, path, jsonp](bool authorized) -> Future<Response> {
+      if (authorized) {
+        return _browse(path.get(), jsonp);
+      }
+
+      return Forbidden();
+    }));
+}
+
+
+Future<Response> FilesProcess::_browse(
+    const string& path,
+    const Option<string>& jsonp)
+{
+  Result<string> resolvedPath = resolve(path);
 
   if (resolvedPath.isError()) {
     return InternalServerError(resolvedPath.error() + ".\n");
@@ -295,7 +387,7 @@ Future<Response> FilesProcess::browse(
         continue;
       }
 
-      files[fullPath] = jsonFileInfo(path::join(path.get(), entry), s);
+      files[fullPath] = jsonFileInfo(path::join(path, entry), s);
     }
   }
 
@@ -304,12 +396,12 @@ Future<Response> FilesProcess::browse(
     listing.values.push_back(file);
   }
 
-  return OK(listing, request.url.query.get("jsonp"));
+  return OK(listing, jsonp);
 }
 
 
 // TODO(benh): Remove 'const &' from size after fixing libprocess.
-Future<Response> _read(int fd,
+Future<Response> __read(int fd,
                        const size_t& size,
                        off_t offset,
                        const boost::shared_array<char>& data,
@@ -336,12 +428,21 @@ const string FilesProcess::READ_HELP = HELP(
         ">        offset=VALUE        Value added to base address to obtain "
         "a second address",
         ">        length=VALUE        Length of file to read."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Reading files requires that the request principal is",
+        "authorized to do so for the target virtual file path.",
+        "",
+        "Authorizers may categorize different virtual paths into",
+        "different ACLs, e.g. logs in one and task sandboxes in",
+        "another.",
+        "",
+        "See authorization documentation for details."));
 
 
 Future<Response> FilesProcess::read(
     const Request& request,
-    const Option<string>& /* principal */)
+    const Option<string>& principal)
 {
   Option<string> path = request.url.query.get("path");
 
@@ -361,7 +462,7 @@ Future<Response> FilesProcess::read(
     offset = result.get();
   }
 
-  ssize_t length = -1;
+  Option<size_t> length;
 
   if (request.url.query.get("length").isSome()) {
     Try<ssize_t> result = numify<ssize_t>(
@@ -371,10 +472,44 @@ Future<Response> FilesProcess::read(
       return BadRequest("Failed to parse length: " + result.error() + ".\n");
     }
 
-    length = result.get();
+    // TODO(tomxing): The pailer in the webui sends `length=-1` at first to
+    // determine the length of the file, so we allow a length of -1.
+    // Setting `length=-1` has the same effect as not providing a length: we
+    // read to the end of the file, up to the maximum read length.
+    // Will change this logic in MESOS-5334.
+    if (result.get() < -1) {
+      return BadRequest(
+        strings::format("Negative length provided: %d.\n", result.get()).get());
+    }
+
+    if (result.get() > -1){
+      length = result.get();
+    }
   }
 
-  Result<string> resolvedPath = resolve(path.get());
+  string requestedPath = path.get();
+  Option<string> jsonp = request.url.query.get("jsonp");
+
+  return authorize(requestedPath, principal)
+    .then(defer(self(),
+        [this, offset, length, path, jsonp](bool authorized)
+          -> Future<Response> {
+      if (authorized) {
+        return _read(offset, length, path.get(), jsonp);
+      }
+
+      return Forbidden();
+    }));
+}
+
+
+Future<Response> FilesProcess::_read(
+    off_t offset,
+    Option<size_t> length,
+    const string& path,
+    const Option<string>& jsonp)
+{
+  Result<string> resolvedPath = resolve(path);
 
   if (resolvedPath.isError()) {
     return BadRequest(resolvedPath.error() + ".\n");
@@ -417,12 +552,12 @@ Future<Response> FilesProcess::read(
     offset = size;
   }
 
-  if (length == -1) {
+  if (length.isNone()) {
     length = size - offset;
   }
 
   // Cap the read length at 16 pages.
-  length = std::min<ssize_t>(length, os::pagesize() * 16);
+  length = std::min<size_t>(length.get(), os::pagesize() * 16);
 
   if (offset >= size) {
     os::close(fd.get());
@@ -430,7 +565,7 @@ Future<Response> FilesProcess::read(
     JSON::Object object;
     object.values["offset"] = size;
     object.values["data"] = "";
-    return OK(object, request.url.query.get("jsonp"));
+    return OK(object, jsonp);
   }
 
   // Seek to the offset we want to read from.
@@ -455,17 +590,17 @@ Future<Response> FilesProcess::read(
   }
 
   // Read 'length' bytes (or to EOF).
-  boost::shared_array<char> data(new char[length]);
+  boost::shared_array<char> data(new char[length.get()]);
 
-  return io::read(fd.get(), data.get(), static_cast<size_t>(length))
+  return io::read(fd.get(), data.get(), length.get())
     .then(lambda::bind(
-        _read,
+        __read,
         fd.get(),
         lambda::_1,
         offset,
         data,
-        request.url.query.get("jsonp")))
-    .onAny(lambda::bind(&os::close, fd.get()));
+        jsonp))
+    .onAny([fd]() { os::close(fd.get()); });
 }
 
 
@@ -479,12 +614,21 @@ const string FilesProcess::DOWNLOAD_HELP = HELP(
         "Query parameters:",
         "",
         ">        path=VALUE          The path of directory to browse."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Downloading files requires that the request principal is",
+        "authorized to do so for the target virtual file path.",
+        "",
+        "Authorizers may categorize different virtual paths into",
+        "different ACLs, e.g. logs in one and task sandboxes in",
+        "another.",
+        "",
+        "See authorization documentation for details."));
 
 
 Future<Response> FilesProcess::download(
     const Request& request,
-    const Option<string>& /* principal */)
+    const Option<string>& principal)
 {
   Option<string> path = request.url.query.get("path");
 
@@ -492,7 +636,23 @@ Future<Response> FilesProcess::download(
     return BadRequest("Expecting 'path=value' in query.\n");
   }
 
-  Result<string> resolvedPath = resolve(path.get());
+  string requestedPath = path.get();
+
+  return authorize(requestedPath, principal)
+    .then(defer(self(),
+        [this, path](bool authorized) -> Future<Response> {
+      if (authorized) {
+        return _download(path.get());
+      }
+
+      return Forbidden();
+    }));
+}
+
+
+Future<Response> FilesProcess::_download(const string& path)
+{
+  Result<string> resolvedPath = resolve(path);
 
   if (resolvedPath.isError()) {
     return BadRequest(resolvedPath.error() + ".\n");
@@ -559,7 +719,8 @@ Result<string> FilesProcess::resolve(const string& path)
   // longest possible prefix match and if found append any suffix to
   // the attached path (provided the path is to a directory).
   vector<string> tokens = strings::split(
-      strings::remove(path, "/", strings::SUFFIX), "/");
+      strings::remove(path, stringify(os::PATH_SEPARATOR), strings::SUFFIX),
+      stringify(os::PATH_SEPARATOR));
 
   string suffix;
   while (!tokens.empty()) {
@@ -581,7 +742,7 @@ Result<string> FilesProcess::resolve(const string& path)
     // 'Not Found'.
     string path = paths[prefix];
     if (os::stat::isdir(path)) {
-      path = path::join(path, suffix);
+      path = path::join(path, suffix, os::PATH_SEPARATOR);
 
       // Canonicalize the absolute path.
       Result<string> realpath = os::realpath(path);
@@ -628,9 +789,13 @@ Files::~Files()
 }
 
 
-Future<Nothing> Files::attach(const string& path, const string& name)
+Future<Nothing> Files::attach(
+    const string& path,
+    const string& name,
+    const Option<lambda::function<Future<bool>(const Option<string>&)>>&
+        authorized)
 {
-  return dispatch(process, &FilesProcess::attach, path, name);
+  return dispatch(process, &FilesProcess::attach, path, name, authorized);
 }
 
 

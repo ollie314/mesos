@@ -25,7 +25,7 @@
 #include <mesos/executor.hpp>
 #include <mesos/scheduler.hpp>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 
 #include <process/clock.hpp>
 #include <process/future.hpp>
@@ -1132,8 +1132,13 @@ TEST_F(ReservationTest, CompatibleCheckpointedResourcesWithPersistentVolumes)
       createReservationInfo(frameworkInfo.principal()));
 
   Resource volume = reservedDisk;
-  volume.mutable_disk()->CopyFrom(
-      createDiskInfo("persistence_id", "container_path"));
+  volume.mutable_disk()->CopyFrom(createDiskInfo(
+      "persistence_id",
+      "container_path",
+      None(),
+      None(),
+      None(),
+      DEFAULT_CREDENTIAL.principal()));
 
   // We use this to capture offers from 'resourceOffers'.
   Future<vector<Offer>> offers;

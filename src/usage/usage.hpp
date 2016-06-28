@@ -17,7 +17,9 @@
 #ifndef __USAGE_HPP__
 #define __USAGE_HPP__
 
+#ifndef __WINDOWS__
 #include <unistd.h> // For pid_t.
+#endif // __WINDOWS__
 
 #include "mesos/mesos.hpp"
 

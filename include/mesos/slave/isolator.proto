@@ -27,8 +27,7 @@ import "mesos/docker/v1.proto";
  * where the Linux kernel may invoke the OOM killer, killing some/all
  * of a container's processes.
  */
-message ContainerLimitation
-{
+message ContainerLimitation {
   // Resources that triggered the limitation.
   // NOTE: 'Resources' is used here because the resource may span
   // multiple roles (e.g. `"mem(*):1;mem(role):2"`).
@@ -51,8 +50,7 @@ message ContainerLimitation
  * containers. The reason for not using RunState instead is to avoid
  * any dependency on RunState and in turn on internal protobufs.
  */
-message ContainerState
-{
+message ContainerState {
   required ExecutorInfo executor_info = 1;
 
   // Container id of the last executor run.
@@ -91,12 +89,6 @@ message ContainerConfig {
   optional Docker docker = 7;
 
   // TODO(gilbert): Add appc image manifest.
-
-  // The following two fields are deprecated. Please do NOT use them
-  // in your isolator. Use 'executor_info' and 'task_info' instead.
-  // TODO(gilbert): Remove them in 0.29.
-  required ExecutorInfo executorInfo = 1;
-  optional TaskInfo taskInfo = 2;
 }
 
 
@@ -107,8 +99,7 @@ message ContainerConfig {
  * ignored; only the command value is used. Further, we only accept
  * shell commands for the preparation commands.
  */
-message ContainerLaunchInfo
-{
+message ContainerLaunchInfo {
   repeated CommandInfo commands = 1;
   optional Environment environment = 2;
 

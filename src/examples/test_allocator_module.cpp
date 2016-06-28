@@ -17,7 +17,7 @@
 #include <mesos/mesos.hpp>
 #include <mesos/module.hpp>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 
 #include <mesos/module/allocator.hpp>
 
@@ -29,7 +29,7 @@
 
 using namespace mesos;
 
-using mesos::master::allocator::Allocator;
+using mesos::allocator::Allocator;
 using mesos::internal::master::allocator::HierarchicalDRFAllocator;
 
 
@@ -37,7 +37,7 @@ static Allocator* createDRFAllocator(const Parameters& parameters)
 {
   Try<Allocator*> allocator = HierarchicalDRFAllocator::create();
   if (allocator.isError()) {
-    return NULL;
+    return nullptr;
   }
 
   return allocator.get();
@@ -52,5 +52,5 @@ mesos::modules::Module<Allocator> org_apache_mesos_TestDRFAllocator(
     "Apache Mesos",
     "modules@mesos.apache.org",
     "Test DRFAllocator module.",
-    NULL,
+    nullptr,
     createDRFAllocator);

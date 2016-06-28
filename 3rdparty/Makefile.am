@@ -30,14 +30,12 @@ SUBDIRS = . stout libprocess
 #  '--srcdir=...' when configuring.
 CONFIGURE_ARGS = @CONFIGURE_ARGS@ --enable-shared=no --with-pic --srcdir=.
 
-if INSTALL_MODULE_DEPENDENCIES
 # The reason we use '/' prefix is to allow ourselves to install these packages
 # in build/3rdparty directory as well. To do that, we can simply call
 #   `make install DESTDIR=/path/to/builddir/ install`
 # Similarly, when doing system-wide installation, we can do:
 #   `make install DESTDIR=${MESOS-PREFIX}/lib/mesos/3rdparty install`
 CONFIGURE_ARGS += --prefix=/
-endif
 
 # Directory where bundled 3rdparty module dependencies are installed.
 pkg3rdpartydir = $(pkglibdir)/3rdparty
@@ -52,6 +50,7 @@ GTEST = $(GMOCK)/gtest
 HTTP_PARSER = http-parser-$(HTTP_PARSER_VERSION)
 LEVELDB = leveldb-$(LEVELDB_VERSION)
 LIBEV = libev-$(LIBEV_VERSION)
+NVML = nvml-$(NVML_VERSION)
 PIP = pip-$(PIP_VERSION)
 PROTOBUF = protobuf-$(PROTOBUF_VERSION)
 PICOJSON = picojson-$(PICOJSON_VERSION)
@@ -67,6 +66,7 @@ EXTRA_DIST =		\
   $(HTTP_PARSER).tar.gz	\
   $(LEVELDB).tar.gz	\
   $(LIBEV).tar.gz	\
+  $(NVML).tar.gz	\
   $(PIP).tar.gz		\
   $(PROTOBUF).tar.gz	\
   $(PICOJSON).tar.gz	\
@@ -109,6 +109,7 @@ CLEAN_EXTRACTED =	\
   $(HTTP_PARSER)	\
   $(LEVELDB)		\
   $(LIBEV)		\
+  $(NVML)		\
   $(PIP)		\
   $(PICOJSON)		\
   $(PROTOBUF)		\
@@ -193,6 +194,11 @@ $(LIBEV)/libev.la: $(LIBEV)-stamp
 	cd $(LIBEV) && ./configure $(CONFIGURE_ARGS) && \
           $(MAKE) $(AM_MAKEFLAGS)
 ALL_LOCAL += $(LIBEV)/libev.la
+endif
+
+if WITH_BUNDLED_NVML
+$(NVML)/nvidia/gdk/nvml.h: $(NVML)-stamp
+ALL_LOCAL += $(NVML)-stamp
 endif
 
 if WITH_BUNDLED_PICOJSON
@@ -300,5 +306,9 @@ if WITH_BUNDLED_PICOJSON
 endif
 if WITH_BUNDLED_PROTOBUF
 	cd $(PROTOBUF) && \
+	  $(MAKE) $(AM_MAKEFLAGS) DESTDIR=$(INSTALLDIR) install
+endif
+if WITH_BUNDLED_ZOOKEEPER
+	cd $(ZOOKEEPER)/src/c && \
 	  $(MAKE) $(AM_MAKEFLAGS) DESTDIR=$(INSTALLDIR) install
 endif

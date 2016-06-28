@@ -22,6 +22,7 @@ nobase_include_HEADERS =			\
   stout/check.hpp				\
   stout/duration.hpp				\
   stout/dynamiclibrary.hpp			\
+  stout/elf.hpp					\
   stout/error.hpp				\
   stout/errorbase.hpp				\
   stout/exit.hpp				\
@@ -57,6 +58,7 @@ nobase_include_HEADERS =			\
   stout/numify.hpp				\
   stout/option.hpp				\
   stout/os.hpp					\
+  stout/os/access.hpp				\
   stout/os/bootid.hpp				\
   stout/os/chdir.hpp				\
   stout/os/chroot.hpp				\
@@ -69,6 +71,7 @@ nobase_include_HEADERS =			\
   stout/os/find.hpp				\
   stout/os/fork.hpp				\
   stout/os/freebsd.hpp				\
+  stout/os/fsync.hpp				\
   stout/os/ftruncate.hpp			\
   stout/os/getcwd.hpp				\
   stout/os/kill.hpp				\
@@ -109,6 +112,7 @@ nobase_include_HEADERS =			\
   stout/os/posix/exists.hpp			\
   stout/os/posix/fcntl.hpp			\
   stout/os/posix/fork.hpp			\
+  stout/os/posix/fsync.hpp			\
   stout/os/posix/ftruncate.hpp			\
   stout/os/posix/kill.hpp			\
   stout/os/posix/killtree.hpp			\
@@ -133,6 +137,7 @@ nobase_include_HEADERS =			\
   stout/os/windows/exists.hpp			\
   stout/os/windows/fcntl.hpp			\
   stout/os/windows/fork.hpp			\
+  stout/os/windows/fsync.hpp			\
   stout/os/windows/ftruncate.hpp		\
   stout/os/windows/kill.hpp			\
   stout/os/windows/killtree.hpp			\
@@ -155,6 +160,7 @@ nobase_include_HEADERS =			\
   stout/protobuf.hpp				\
   stout/posix/dynamiclibrary.hpp		\
   stout/posix/fs.hpp				\
+  stout/posix/net.hpp				\
   stout/posix/os.hpp				\
   stout/recordio.hpp				\
   stout/representation.hpp			\
@@ -181,4 +187,5 @@ nobase_include_HEADERS =			\
   stout/windows/error.hpp			\
   stout/windows/format.hpp			\
   stout/windows/fs.hpp				\
+  stout/windows/net.hpp				\
   stout/windows/os.hpp

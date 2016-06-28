@@ -78,12 +78,12 @@ private:
 
 
 LevelDBStorageProcess::LevelDBStorageProcess(const string& _path)
-  : path(_path), db(NULL) {}
+  : path(_path), db(nullptr) {}
 
 
 LevelDBStorageProcess::~LevelDBStorageProcess()
 {
-  delete db; // NULL if open failed in LevelDBStorageProcess::initialize.
+  delete db; // nullptr if open failed in LevelDBStorageProcess::initialize.
 }
 
 
@@ -99,7 +99,7 @@ void LevelDBStorageProcess::initialize()
     error = status.ToString();
   } else {
     // TODO(benh): Conditionally compact to avoid long recovery times?
-    db->CompactRange(NULL, NULL);
+    db->CompactRange(nullptr, nullptr);
   }
 }
 
@@ -159,7 +159,7 @@ Future<bool> LevelDBStorageProcess::set(const Entry& entry, const UUID& uuid)
   }
 
   if (option.get().isSome()) {
-    if (UUID::fromBytes(option.get().get().uuid()) != uuid) {
+    if (UUID::fromBytes(option.get().get().uuid()).get() != uuid) {
       return false;
     }
   }
@@ -197,8 +197,8 @@ Future<bool> LevelDBStorageProcess::expunge(const Entry& entry)
     return false;
   }
 
-  if (UUID::fromBytes(option.get().get().uuid()) !=
-      UUID::fromBytes(entry.uuid())) {
+  if (UUID::fromBytes(option.get().get().uuid()).get() !=
+      UUID::fromBytes(entry.uuid()).get()) {
     return false;
   }
 

@@ -69,7 +69,7 @@ Try<Owned<Backend>> OverlayBackend::create(const Flags&)
       "but is running as user " + user.get());
   }
 
-  Try<bool> supported = fs::overlay::supported();
+  Try<bool> supported = fs::supported("overlayfs");
   if (supported.isError()) {
     return Error(supported.error());
   }
@@ -179,7 +179,7 @@ Future<Nothing> OverlayBackendProcess::provision(
       rootfs,
       None(),
       MS_SLAVE,
-      NULL);
+      nullptr);
 
   if (mount.isError()) {
     return Failure(
@@ -192,7 +192,7 @@ Future<Nothing> OverlayBackendProcess::provision(
       rootfs,
       None(),
       MS_SHARED,
-      NULL);
+      nullptr);
 
   if (mount.isError()) {
     return Failure(

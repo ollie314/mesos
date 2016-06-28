@@ -24,6 +24,7 @@ EXTERNAL("http_parser" ${HTTP_PARSER_VERSION} "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("libev"       ${LIBEV_VERSION}       "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("libevent"    ${LIBEVENT_VERSION}    "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("libapr"      ${LIBAPR_VERSION}      "${MESOS_3RDPARTY_BIN}")
+EXTERNAL("nvml"        ${NVML_VERSION}        "${MESOS_3RDPARTY_BIN}")
 EXTERNAL("protobuf"    ${PROTOBUF_VERSION}    "${MESOS_3RDPARTY_BIN}")
 
 if (NOT WIN32)
@@ -55,6 +56,7 @@ set(BOOST_INCLUDE_DIR       ${BOOST_ROOT})
 set(GPERFTOOLS_INCLUDE_DIR  ${GPERFTOOLS}/src)
 set(HTTP_PARSER_INCLUDE_DIR ${HTTP_PARSER_ROOT})
 set(LIBEV_INCLUDE_DIR       ${LIBEV_ROOT})
+set(NVML_INCLUDE_DIR        ${NVML_ROOT})
 set(PICOJSON_INCLUDE_DIR    ${PICOJSON_ROOT})
 
 if (WIN32)
@@ -125,8 +127,45 @@ endif (NOT WIN32)
 include(StoutConfigure)
 include(ProcessConfigure)
 
-# Define target for AGENT.
-##########################
+# DEFINE MESOS BUILD TARGETS.
+#############################
+
+# Define target for agent.
 set(
   AGENT_TARGET mesos-agent
   CACHE STRING "Target we use to refer to agent executable")
+
+# Define target for containerizer.
+set(
+  MESOS_CONTAINERIZER mesos-containerizer
+  CACHE STRING "Target for containerizer")
+
+# Define target for executor.
+set(
+  MESOS_EXECUTOR mesos-executor
+  CACHE STRING "Target for executor")
+
+# Define target for fetcher.
+set(
+  MESOS_FETCHER mesos-fetcher
+  CACHE STRING "Target for fetcher")
+
+# Define target for health-check.
+set(
+  MESOS_HEALTH_CHECK mesos-health-check
+  CACHE STRING "Target for healt-check")
+
+# Define target for health-master.
+set(
+  MESOS_MASTER mesos-master
+  CACHE STRING "Target for master")
+
+# Define target for usage.
+set(
+  MESOS_USAGE mesos-usage
+  CACHE STRING "Target for usage")
+
+# Define target for docker.
+set(
+  MESOS_DOCKER_EXECUTOR mesos-docker-executor
+  CACHE STRING "Target for docker executor")

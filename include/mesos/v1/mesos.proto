@@ -274,6 +274,20 @@ message FrameworkInfo {
       // killed by an executor. The executor will examine this
       // capability to determine whether it can send TASK_KILLING.
       TASK_KILLING_STATE = 2;
+
+      // Indicates whether the framework is aware of GPU resources.
+      // Frameworks that are aware of GPU resources are expected to
+      // avoid placing non-GPU workloads on GPU agents, in order
+      // to avoid occupying a GPU agent and preventing GPU workloads
+      // from running! Currently, if a framework is unaware of GPU
+      // resources, it will not be offered *any* of the resources on
+      // an agent with GPUs. This restriction is in place because we
+      // do not have a revocation mechanism that ensures GPU workloads
+      // can evict GPU agent occupants if necessary.
+      //
+      // TODO(bmahler): As we add revocation we can relax the
+      // restriction here. See MESOS-5634 for more information.
+      GPU_RESOURCES = 3;
     }
 
     // Enum fields should be optional, see: MESOS-4997.
@@ -478,9 +492,9 @@ message ExecutorInfo {
   // executor via JSON on the agent. This allows users to import usage
   // information into a time series database for monitoring.
   //
-  // This field is deprecated since 0.29.0. Please use labels for
+  // This field is deprecated since 1.0. Please use labels for
   // free-form metadata instead.
-  optional string source = 10 [deprecated = true]; // Since 0.29.0.
+  optional string source = 10 [deprecated = true]; // Since 1.0.
 
   optional bytes data = 4;
 
@@ -1300,6 +1314,55 @@ message TaskInfo {
 }
 
 
+// TODO(bmahler): Add executor_uuid here, and send it to the master. This will
+// allow us to expose executor work directories for tasks in the webui when
+// looking from the master level. Currently only the agent knows which run the
+// task belongs to.
+/**
+ * Describes a task, similar to `TaskInfo`.
+ *
+ * `Task` is used in some of the Mesos messages found below.
+ * `Task` is used instead of `TaskInfo` if:
+ *   1) we need additional IDs, such as a specific
+ *      framework, executor, or agent; or
+ *   2) we do not need the additional data, such as the command run by the
+ *      task or the health checks.  These additional fields may be large and
+ *      unnecessary for some Mesos messages.
+ *
+ * `Task` is generally constructed from a `TaskInfo`.  See protobuf::createTask.
+ */
+message Task {
+  required string name = 1;
+  required TaskID task_id = 2;
+  required FrameworkID framework_id = 3;
+  optional ExecutorID executor_id = 4;
+  required AgentID agent_id = 5;
+  required TaskState state = 6; // Latest state of the task.
+  repeated Resource resources = 7;
+  repeated TaskStatus statuses = 8;
+
+  // These fields correspond to the state and uuid of the latest
+  // status update forwarded to the master.
+  // NOTE: Either both the fields must be set or both must be unset.
+  optional TaskState status_update_state = 9;
+  optional bytes status_update_uuid = 10;
+
+  optional Labels labels = 11;
+
+  // Service discovery information for the task. It is not interpreted
+  // or acted upon by Mesos. It is up to a service discovery system
+  // to use this information as needed and to handle tasks without
+  // service discovery information.
+  optional DiscoveryInfo discovery = 12;
+
+  // Container information for the task.
+  optional ContainerInfo container = 13;
+
+  // Specific user under which task is running.
+  optional string user = 14;
+}
+
+
 /**
  * Describes possible task states. IMPORTANT: Mesos assumes tasks that
  * enter terminal states (see below) imply the task is no longer
@@ -1572,6 +1635,11 @@ message Image {
   // the type.
   optional Appc appc = 2;
   optional Docker docker = 3;
+
+  // With this flag set to false, the mesos containerizer will pull
+  // the docker/appc image from the registry even if the image is
+  // already downloaded on the agent.
+  optional bool cached = 4 [default = true];
 }
 
 
@@ -1585,7 +1653,7 @@ message Volume {
     RO = 2; // read-only.
   }
 
-  // TODO(gyliu513): Make this as `optional` after deprecation cycle of 0.29.
+  // TODO(gyliu513): Make this as `optional` after deprecation cycle of 1.0.
   required Mode mode = 3;
 
   // Path pointing to a directory or file in the container. If the
@@ -1620,7 +1688,7 @@ message Volume {
 
     message DockerVolume {
       // Driver of the volume, it can be flocker, convoy, raxrey etc.
-      required string driver = 1;
+      optional string driver = 1;
 
       // Name of the volume.
       required string name = 2;
@@ -1707,19 +1775,6 @@ message NetworkInfo {
   // to decide how to interpret this field.
   optional string name = 6;
 
-  // Specify IP address requirement. Set protocol to the desired value to
-  // request the network isolator on the Agent to assign an IP address to the
-  // container being launched. If a specific IP address is specified in
-  // ip_address, this field should not be set.
-  optional Protocol protocol = 1 [deprecated = true]; // Since 0.26.0
-
-  // Statically assigned IP provided by the Framework. This IP will be assigned
-  // to the container by the network isolator module on the Agent. This field
-  // should not be used with the protocol field above.
-  // NOTE: It is up to the networking 'provider' (IPAM/Isolator) to interpret
-  // this either as a hint of as a requirement for assigning the IP.
-  optional string ip_address = 2 [deprecated = true]; // Since 0.26.0
-
   // A group is the name given to a set of logically-related interfaces that
   // are allowed to communicate among themselves. Network traffic is allowed
   // between two container interfaces that share at least one network group.
@@ -1780,7 +1835,7 @@ message ContainerInfo {
     optional bool force_pull_image = 6;
 
     // The name of volume driver plugin.
-    optional string volume_driver = 7;
+    optional string volume_driver = 7 [deprecated = true]; // Since 1.0
   }
 
   message MesosInfo {
@@ -1924,4 +1979,76 @@ message WeightInfo {
 
   // Related role name.
   optional string role = 2;
+}
+
+
+/**
+ * Version information of a component.
+ */
+message VersionInfo {
+  required string version = 1;
+  required string build_date = 2;
+  required double build_time = 3;
+  required string build_user = 4;
+  optional string git_sha = 5;
+  optional string git_branch = 6;
+  optional string git_tag = 7;
+}
+
+
+/**
+ * Flag consists of a name and optionally its value.
+ */
+message Flag {
+  required string name = 1;
+  optional string value = 2;
+}
+
+
+/**
+ * Describes a Role. Roles can be used to specify that certain resources are
+ * reserved for the use of one or more frameworks.
+ */
+message Role {
+  required string name = 1;
+  required double weight = 2;
+  repeated FrameworkID frameworks = 3;
+  repeated Resource resources = 4;
+}
+
+
+/**
+ * Metric consists of a name and optionally its value.
+ */
+message Metric {
+  required string name = 1;
+  optional double value = 2;
+}
+
+
+/**
+ * Describes a File.
+ */
+message FileInfo {
+  // Absolute path to the file.
+  required string path = 1;
+
+  // Number of hard links.
+  optional int32 nlink = 2;
+
+  // Total size in bytes.
+  optional uint64 size = 3;
+
+  // Last modification time.
+  optional TimeInfo mtime = 4;
+
+  // Represents a file's mode and permission bits. The bits have the same
+  // definition on all systems and is portable.
+  optional uint32 mode = 5;
+
+  // User ID of owner.
+  optional string uid = 6;
+
+  // Group ID of owner.
+  optional string gid = 7;
 }

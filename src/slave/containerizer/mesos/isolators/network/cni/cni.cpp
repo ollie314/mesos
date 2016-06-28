@@ -22,6 +22,7 @@
 #include <process/pid.hpp>
 #include <process/subprocess.hpp>
 
+#include <stout/adaptor.hpp>
 #include <stout/os.hpp>
 #include <stout/net.hpp>
 
@@ -225,78 +226,107 @@ Try<Isolator*> NetworkCniIsolatorProcess::create(const Flags& flags)
         (rootDir.isError() ? rootDir.error() : "No such file or directory"));
   }
 
-  LOG(INFO) << "Making '" << rootDir.get() << "' a shared mount";
-
   Try<fs::MountInfoTable> table = fs::MountInfoTable::read();
   if (table.isError()) {
     return Error("Failed to get mount table: " + table.error());
   }
 
+  // Trying to find the mount entry that contains the CNI network
+  // information root directory. We achieve that by doing a reverse
+  // traverse of the mount table to find the first entry whose target
+  // is a prefix of the CNI network information root directory.
   Option<fs::MountInfoTable::Entry> rootDirMount;
-  foreach (const fs::MountInfoTable::Entry& entry, table.get().entries) {
-    if (entry.target == rootDir.get()) {
+  foreach (const fs::MountInfoTable::Entry& entry,
+           adaptor::reverse(table->entries)) {
+    if (strings::startsWith(rootDir.get(), entry.target)) {
       rootDirMount = entry;
       break;
     }
   }
 
-  // Do a self bind mount if needed. If the mount already exists, make
-  // sure it is a shared mount of its own peer group.
+  // It's unlikely that we cannot find 'rootDirMount' because '/' is
+  // always mounted and will be the 'rootDirMount' if no other mounts
+  // found in between.
   if (rootDirMount.isNone()) {
-    Try<string> mount = os::shell(
-        "mount --bind %s %s && "
-        "mount --make-slave %s && "
-        "mount --make-shared %s",
-        rootDir.get().c_str(),
-        rootDir.get().c_str(),
-        rootDir.get().c_str(),
-        rootDir.get().c_str());
+    return Error(
+        "Cannot find the mount containing CNI network information"
+        " root directory");
+  }
 
-    if (mount.isError()) {
-      return Error(
-          "Failed to self bind mount '" + rootDir.get() +
-          "' and make it a shared mount: " + mount.error());
-    }
+  // If 'rootDirMount' is a shared mount in its own peer group, then
+  // we don't need to do anything. Otherwise, we need to do a self
+  // bind mount of CNI network information root directory to make sure
+  // it's a shared mount in its own peer group.
+  bool bindMountNeeded = false;
+
+  if (rootDirMount->shared().isNone()) {
+    bindMountNeeded = true;
   } else {
-    if (rootDirMount.get().shared().isNone()) {
-      // This is the case where the CNI network information root directory
-      // mount is not a shared mount yet (possibly due to agent crash while
-      // preparing the directory mount). It's safe to re-do the following.
+    foreach (const fs::MountInfoTable::Entry& entry, table->entries) {
+      // Skip 'rootDirMount' and any mount underneath it. Also, we
+      // skip those mounts whose targets are not the parent of the CNI
+      // network information root directory because even if they are
+      // in the same peer group as the CNI network information root
+      // directory mount, it won't affect it.
+      if (entry.id != rootDirMount->id &&
+          !strings::startsWith(entry.target, rootDir.get()) &&
+          entry.shared() == rootDirMount->shared() &&
+          strings::startsWith(rootDir.get(), entry.target)) {
+        bindMountNeeded = true;
+        break;
+      }
+    }
+  }
+
+  if (bindMountNeeded) {
+    if (rootDirMount->target != rootDir.get()) {
+      // This is the case where the CNI network information root
+      // directory mount does not exist in the mount table (e.g., a
+      // new host running Mesos agent for the first time).
+      LOG(INFO) << "Bind mounting '" << rootDir.get()
+                << "' and making it a shared mount";
+
+      // NOTE: Instead of using fs::mount to perform the bind mount,
+      // we use the shell command here because the syscall 'mount'
+      // does not update the mount table (i.e., /etc/mtab). In other
+      // words, the mount will not be visible if the operator types
+      // command 'mount'. Since this mount will still be presented
+      // after all containers and the slave are stopped, it's better
+      // to make it visible. It's OK to use the blocking os::shell
+      // here because 'create' will only be invoked during
+      // initialization.
       Try<string> mount = os::shell(
-          "mount --make-slave %s && "
+          "mount --bind %s %s && "
+          "mount --make-private %s && "
           "mount --make-shared %s",
-          rootDir.get().c_str(),
-          rootDir.get().c_str());
+          rootDir->c_str(),
+          rootDir->c_str(),
+          rootDir->c_str(),
+          rootDir->c_str());
 
       if (mount.isError()) {
         return Error(
-            "Failed to self bind mount '" + rootDir.get() +
+            "Failed to bind mount '" + rootDir.get() +
             "' and make it a shared mount: " + mount.error());
       }
     } else {
-      // We need to make sure that the shared mount is in its own peer
-      // group. To check that, we need to get the parent mount.
-      foreach (const fs::MountInfoTable::Entry& entry, table.get().entries) {
-        if (entry.id == rootDirMount.get().parent) {
-          // If the CNI network information root directory mount and its
-          // parent mount are in the same peer group, we need to re-do the
-          // following commands so that they are in different peer groups.
-          if (entry.shared() == rootDirMount.get().shared()) {
-            Try<string> mount = os::shell(
-                "mount --make-slave %s && "
-                "mount --make-shared %s",
-                rootDir.get().c_str(),
-                rootDir.get().c_str());
+      // This is the case where the CNI network information root
+      // directory mount is in the mount table, but it's not a shared
+      // mount in its own peer group (possibly due to agent crash
+      // while preparing the CNI network information root directory
+      // mount). It's safe to re-do the following.
+      LOG(INFO) << "Making '" << rootDir.get() << "' a shared mount";
 
-            if (mount.isError()) {
-              return Error(
-                  "Failed to self bind mount '" + rootDir.get() +
-                  "' and make it a shared mount: " + mount.error());
-            }
-          }
+      Try<string> mount = os::shell(
+          "mount --make-private %s && "
+          "mount --make-shared %s",
+          rootDir->c_str(),
+          rootDir->c_str());
 
-          break;
-        }
+      if (mount.isError()) {
+        return Error(
+            "Failed to make '" + rootDir.get() +
+            "' a shared mount: " + mount.error());
       }
     }
   }
@@ -643,7 +673,7 @@ Future<Nothing> NetworkCniIsolatorProcess::isolate(
     return Failure("Failed to create the bind mount point: " + touch.error());
   }
 
-  Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, NULL);
+  Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, nullptr);
   if (mount.isError()) {
     return Failure(
         "Failed to mount the network namespace handle from '" +
@@ -890,15 +920,82 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
   }
 
+  // Inject Mesos metadata to the network configuration JSON that will
+  // be passed to the plugin. Currently, we only pass in NetworkInfo
+  // for the given network.
   const NetworkConfigInfo& networkConfig =
     networkConfigs[containerNetwork.networkName];
 
+  Try<string> read = os::read(networkConfig.path);
+  if (read.isError()) {
+    return Failure(
+        "Failed to read CNI network configuration file: '" +
+        networkConfig.path + "': " + read.error());
+  }
+
+  Try<JSON::Object> parse = JSON::parse<JSON::Object>(read.get());
+  if (parse.isError()) {
+    return Failure(
+        "Failed to parse CNI network configuration file: '" +
+        networkConfig.path + "': " + parse.error());
+  }
+
+  JSON::Object networkConfigJson = parse.get();
+
+  // Note that 'args' might or might not be specified in the network
+  // configuration file. We need to deal with both cases.
+  Result<JSON::Object> _args = networkConfigJson.at<JSON::Object>("args");
+  if (_args.isError()) {
+    return Failure(
+        "Invalid 'args' found in CNI network configuration file '" +
+        networkConfig.path + "': " + _args.error());
+  }
+
+  JSON::Object args = _args.isSome() ? _args.get() : JSON::Object();
+
+  // Make sure 'org.apache.mesos' is not set. It is reserved by Mesos.
+  if (args.values.count("org.apache.mesos") > 0) {
+    return Failure(
+        "'org.apache.mesos' in 'args' should not be set in CNI network "
+        "configuration file. It is reserved by Mesos");
+  }
+
+  CHECK_SOME(containerNetwork.networkInfo);
+  mesos::NetworkInfo networkInfo = containerNetwork.networkInfo.get();
+
+  JSON::Object mesos;
+  mesos.values["network_info"] = JSON::protobuf(networkInfo);
+  args.values["org.apache.mesos"] = mesos;
+  networkConfigJson.values["args"] = args;
+
+  // Checkpoint the network configuration JSON. We will use
+  // the same JSON during cleanup.
+  const string networkConfigPath = paths::getNetworkConfigPath(
+      rootDir.get(),
+      containerId.value(),
+      networkName);
+
+  Try<Nothing> write =
+    os::write(networkConfigPath, stringify(networkConfigJson));
+
+  if (write.isError()) {
+    return Failure(
+        "Failed to checkpoint the CNI network configuration '" +
+        stringify(networkConfigJson) + "': " + write.error());
+  }
+
   // Invoke the CNI plugin.
   const string& plugin = networkConfig.config.type();
+
+  VLOG(1) << "Invoking CNI plugin '" << plugin
+          << "' with network configuration '" << stringify(networkConfigJson)
+          << "' to attach container " << containerId << " to network '"
+          << networkName << "'";
+
   Try<Subprocess> s = subprocess(
       path::join(pluginDir.get(), plugin),
       {plugin},
-      Subprocess::PATH(networkConfig.path),
+      Subprocess::PATH(networkConfigPath),
       Subprocess::PIPE(),
       Subprocess::PATH("/dev/null"),
       NO_SETSID,
@@ -996,34 +1093,13 @@ Future<Nothing> NetworkCniIsolatorProcess::_attach(
   Try<Nothing> write = os::write(networkInfoPath, output.get());
   if (write.isError()) {
     return Failure(
-        "Failed to checkpoint the output of CNI plugin'" +
+        "Failed to checkpoint the output of CNI plugin '" +
         output.get() + "': " + write.error());
   }
 
   containerNetwork.cniNetworkInfo = parse.get();
 
   return Nothing();
-}
-
-
-Future<ContainerLimitation> NetworkCniIsolatorProcess::watch(
-    const ContainerID& containerId)
-{
-  return Future<ContainerLimitation>();
-}
-
-
-Future<Nothing> NetworkCniIsolatorProcess::update(
-    const ContainerID& containerId,
-    const Resources& resources)
-{
-  return Nothing();
-}
-
-
-Future<ResourceStatistics> NetworkCniIsolatorProcess::usage(
-    const ContainerID& containerId) {
-  return ResourceStatistics();
 }
 
 
@@ -1053,15 +1129,28 @@ Future<ContainerStatus> NetworkCniIsolatorProcess::status(
     networkInfo->clear_ip_addresses();
 
     if (containerNetwork.cniNetworkInfo->has_ip4()) {
-      mesos::NetworkInfo::IPAddress* ip = networkInfo->add_ip_addresses();
-      ip->set_protocol(mesos::NetworkInfo::IPv4);
-      ip->set_ip_address(containerNetwork.cniNetworkInfo->ip4().ip());
+      // Remove prefix length from IP address.
+      Try<net::IPNetwork> ip = net::IPNetwork::parse(
+          containerNetwork.cniNetworkInfo->ip4().ip(), AF_INET);
+
+      if (ip.isError()) {
+        return Failure(
+            "Unable to parse the IP address " +
+            containerNetwork.cniNetworkInfo->ip4().ip() +
+            " for the container: " + ip.error());
+      }
+
+      mesos::NetworkInfo::IPAddress* ipAddress =
+        networkInfo->add_ip_addresses();
+      ipAddress->set_protocol(mesos::NetworkInfo::IPv4);
+      ipAddress->set_ip_address(stringify(ip->address()));
     }
 
     if (containerNetwork.cniNetworkInfo->has_ip6()) {
       mesos::NetworkInfo::IPAddress* ip = networkInfo->add_ip_addresses();
       ip->set_protocol(mesos::NetworkInfo::IPv6);
       ip->set_ip_address(containerNetwork.cniNetworkInfo->ip6().ip());
+      // TODO(djosborne): Perform subnet strip on ipv6 addresses.
     }
   }
 
@@ -1075,7 +1164,7 @@ Future<Nothing> NetworkCniIsolatorProcess::cleanup(
   // NOTE: We don't keep an Info struct if the container is on the host network,
   // or if during recovery, we found that the cleanup for this container is not
   // required anymore (e.g., cleanup is done already, but the slave crashed and
-  // didn't realize that it's done.
+  // didn't realize that it's done).
   if (!infos.contains(containerId)) {
     return Nothing();
   }
@@ -1177,14 +1266,25 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
   }
 
-  const NetworkConfigInfo& networkConfig = networkConfigs[networkName];
+  // Use the checkpointed CNI network configuration to call the
+  // CNI plugin to detach the container from the CNI network.
+  const string networkConfigPath = paths::getNetworkConfigPath(
+      rootDir.get(),
+      containerId.value(),
+      networkName);
 
   // Invoke the CNI plugin.
-  const string& plugin = networkConfig.config.type();
+  const string& plugin = networkConfigs[networkName].config.type();
+
+  VLOG(1) << "Invoking CNI plugin '" << plugin
+          << "' with network configuration '" << networkConfigPath
+          << "' to detach container " << containerId << " from network '"
+          << networkName << "'";
+
   Try<Subprocess> s = subprocess(
       path::join(pluginDir.get(), plugin),
       {plugin},
-      Subprocess::PATH(networkConfig.path),
+      Subprocess::PATH(networkConfigPath),
       Subprocess::PIPE(),
       Subprocess::PATH("/dev/null"),
       NO_SETSID,
@@ -1378,7 +1478,7 @@ int NetworkCniIsolatorSetup::execute()
       "/",
       None(),
       MS_SLAVE | MS_REC,
-      NULL);
+      nullptr);
 
   if (mount.isError()) {
     cerr << "Failed to mark `/` as a SLAVE mount: " << mount.error() << endl;
@@ -1400,25 +1500,30 @@ int NetworkCniIsolatorSetup::execute()
     // rootfs of host filesystem and will later pivot to the rootfs of
     // the container filesystem, when launching the task.
     if (!os::exists(file)) {
-      // NOTE: We just fail if the mount point does not exist on the
-      // host filesystem because we don't want to pollute the host
-      // filesystem.
-      cerr << "Mount point '" << file << "' does not exist "
-           << "on the host filesystem"<< endl;
-      return EXIT_FAILURE;
-    }
+      // Make an exception for `/etc/hostname`, because it may not
+      // exist on every system but hostname is still accessible by
+      // `getHostname()`.
+      if (file != "/etc/hostname") {
+        // NOTE: We just fail if the mount point does not exist on the
+        // host filesystem because we don't want to pollute the host
+        // filesystem.
+        cerr << "Mount point '" << file << "' does not exist "
+             << "on the host filesystem" << endl;
+        return EXIT_FAILURE;
+      }
+    } else {
+      mount = fs::mount(
+          source,
+          file,
+          None(),
+          MS_BIND,
+          nullptr);
 
-    mount = fs::mount(
-        source,
-        file,
-        None(),
-        MS_BIND,
-        NULL);
-
-    if (mount.isError()) {
-      cerr << "Failed to bind mount from '" << source << "' to '"
-           << file << "': " << mount.error() << endl;
-      return EXIT_FAILURE;
+      if (mount.isError()) {
+        cerr << "Failed to bind mount from '" << source << "' to '"
+             << file << "': " << mount.error() << endl;
+        return EXIT_FAILURE;
+      }
     }
 
     // Do the bind mount in the container filesystem.
@@ -1439,7 +1544,7 @@ int NetworkCniIsolatorSetup::execute()
           target,
           None(),
           MS_BIND,
-          NULL);
+          nullptr);
 
       if (mount.isError()) {
         cerr << "Failed to bind mount from '" << source << "' to '"

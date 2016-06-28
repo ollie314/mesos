@@ -14,6 +14,7 @@ and authorized __frameworks__ to dynamically reserve resources in the cluster.
 In both types of reservations, resources are reserved for a [__role__](roles.md).
 
 
+<a name="static-reservation"></a>
 ## Static Reservation
 
 An operator can configure a slave with resources reserved for a role.
@@ -40,7 +41,7 @@ __NOTE:__ This feature is supported for backwards compatibility.
 
 ## Dynamic Reservation
 
-As mentioned in [Static Reservation](#static-reservation-since-0140), specifying
+As mentioned in [Static Reservation](#static-reservation), specifying
 the reserved resources via the `--resources` flag makes the reservation static.
 That is, statically reserved resources cannot be reserved for another role nor
 be unreserved. Dynamic reservation enables operators and authorized frameworks
@@ -91,6 +92,7 @@ same slave and use the same role.
 
 ### Framework Scheduler API
 
+<a name="offer-operation-reserve"></a>
 #### `Offer::Operation::Reserve`
 
 A framework can reserve resources through the resource offer cycle.  Suppose we
@@ -119,8 +121,15 @@ receive a resource offer with 12 CPUs and 6144 MB of RAM unreserved.
 
 We can reserve 8 CPUs and 4096 MB of RAM by sending the following
 `Offer::Operation` message. `Offer::Operation::Reserve` has a `resources` field
-which we specify with the resources to be reserved. We need to explicitly set
-the `role` and `principal` fields with the framework's role and principal.
+which we specify with the resources to be reserved. We must explicitly set the
+resources' `role` field with the framework's role. The required value of the
+`principal` field depends on whether or not the framework provided a principal
+when it registered with the master. If a principal was provided, then the
+resources' `principal` field must be equal to the framework's principal. If no
+principal was provided during registration, then the resources' `principal`
+field can take any value, or can be left unset. Note that the `principal` field
+determines the "reserver principal" when [authorization](authorization.md) is
+enabled, even if authentication is disabled.
 
         {
           "type": Offer::Operation::RESERVE,
@@ -182,7 +191,7 @@ following reserved resources:
 #### `Offer::Operation::Unreserve`
 
 A framework can unreserve resources through the resource offer cycle.
-In [Offer::Operation::Reserve](#offeroperationreserve), we reserved 8 CPUs
+In [Offer::Operation::Reserve](#offer-operation-reserve), we reserved 8 CPUs
 and 4096 MB of RAM on a particular slave for our `role`. The master will
 continue to only offer these resources to our `role`. Suppose we would like to
 unreserve these resources. First, we receive a resource offer (copy/pasted
@@ -261,10 +270,17 @@ Suppose we want to reserve 8 CPUs and 4096 MB of RAM for the `ads` role on a
 slave with id=`<slave_id>` (note that it is up to the user to find the ID of the
 slave that hosts the desired resources; the request will fail if sufficient
 unreserved resources cannot be found on the slave). In this case, the principal
-included in the request will be the principal of an authorized operator rather
-than the principal of a framework registered under the `ads` role. We send an
-HTTP POST request to the master's [/reserve](endpoints/master/reserve.md)
-endpoint like so:
+that must be included in the `reservation` field of the reserved resources
+depends on the status of HTTP authentication on the master. If HTTP
+authentication is enabled, then the principal in the reservation should match
+the authenticated principal provided in the request's HTTP headers. If HTTP
+authentication is disabled, then the principal in the reservation can take any
+value, or can be left unset. Note that the `principal` field determines the
+"reserver principal" when [authorization](authorization.md) is enabled, even if
+HTTP authentication is disabled.
+
+We send an HTTP POST request to the master's
+[/reserve](endpoints/master/reserve.md) endpoint like so:
 
         $ curl -i \
           -u <operator_principal>:<password> \

@@ -19,8 +19,8 @@
 cmake_minimum_required(VERSION 2.8)
 
 project(Mesos)
-set(MESOS_MAJOR_VERSION 0)
-set(MESOS_MINOR_VERSION 29)
+set(MESOS_MAJOR_VERSION 1)
+set(MESOS_MINOR_VERSION 0)
 set(MESOS_PATCH_VERSION 0)
 set(PACKAGE_VERSION
   ${MESOS_MAJOR_VERSION}.${MESOS_MINOR_VERSION}.${MESOS_PATCH_VERSION})
@@ -88,6 +88,7 @@ list(
   CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/3rdparty/libprocess/cmake/macros)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/cmake)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/slave/cmake)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/src/tests/cmake)
 
 # Macros.
 include(Common)

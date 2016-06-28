@@ -177,6 +177,13 @@ private:
       const ContainerID& containerId,
       pid_t pid);
 
+  process::Future<bool> _launch(
+      const ContainerID& containerId,
+      const Option<TaskInfo>& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const std::string& directory,
+      const SlaveID& slaveId);
+
   process::Future<Nothing> _recover(
       const Option<state::SlaveState>& state,
       const std::list<Docker::Container>& containers);
@@ -351,8 +358,7 @@ private:
             slaveId,
             slavePid,
             checkpoint,
-            flags,
-            false);
+            flags);
       }
     }
 
@@ -435,6 +441,10 @@ private:
     ContainerInfo container;
     CommandInfo command;
     std::map<std::string, std::string> environment;
+
+    // Environment variables that the command executor should pass
+    // onto a docker-ized task. This is set by a hook.
+    Option<std::map<std::string, std::string>> taskEnvironment;
 
     // The sandbox directory for the container. This holds the
     // symlinked path if symlinked boolean is true.

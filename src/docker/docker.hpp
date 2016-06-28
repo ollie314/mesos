@@ -111,8 +111,18 @@ public:
         environment(_environment) {}
   };
 
-  // Performs 'docker run IMAGE'.
-  virtual process::Future<Nothing> run(
+  // Performs 'docker run IMAGE'. Returns the exit status of the
+  // container. Note that currently the exit status may correspond
+  // to the exit code from a failure of the docker client or daemon
+  // rather than the container. Docker >= 1.10 [1] uses the following
+  // exit statuses inherited from 'chroot':
+  //     125 if the error is with Docker daemon itself.
+  //     126 if the contained command cannot be invoked.
+  //     127 if the contained command cannot be found.
+  //     Exit code of contained command otherwise.
+  //
+  // [1]: https://github.com/docker/docker/pull/14012
+  virtual process::Future<Option<int>> run(
       const mesos::ContainerInfo& containerInfo,
       const mesos::CommandInfo& commandInfo,
       const std::string& containerName,
@@ -120,8 +130,8 @@ public:
       const std::string& mappedDirectory,
       const Option<mesos::Resources>& resources = None(),
       const Option<std::map<std::string, std::string>>& env = None(),
-      const process::Subprocess::IO& stdout = process::Subprocess::PIPE(),
-      const process::Subprocess::IO& stderr = process::Subprocess::PIPE())
+      const process::Subprocess::IO& _stdout = process::Subprocess::PIPE(),
+      const process::Subprocess::IO& _stderr = process::Subprocess::PIPE())
     const;
 
   // Returns the current docker version.
@@ -137,6 +147,11 @@ public:
       const std::string& containerName,
       const Duration& timeout = Seconds(0),
       bool remove = false) const;
+
+  // Performs 'docker kill --signal=<signal> CONTAINER'.
+  virtual process::Future<Nothing> kill(
+      const std::string& containerName,
+      int signal) const;
 
   // Performs 'docker rm (-f) CONTAINER'.
   virtual process::Future<Nothing> rm(
@@ -178,9 +193,6 @@ protected:
          config(_config) {}
 
 private:
-  static process::Future<Nothing> _run(
-      const Option<int>& status);
-
   static process::Future<Version> _version(
       const std::string& cmd,
       const process::Subprocess& s);

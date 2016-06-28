@@ -177,10 +177,10 @@ protected:
 
       switch (event.type()) {
         case Event::SUBSCRIBED: {
-          LOG(INFO) << "Subscribed with ID '" << framework.id();
-
           framework.mutable_id()->
             CopyFrom(event.subscribed().framework_id());
+
+          LOG(INFO) << "Subscribed with ID '" << framework.id() << "'";
 
           state = SUBSCRIBED;
           break;
@@ -213,12 +213,14 @@ protected:
         }
 
         case Event::ERROR: {
-          LOG(ERROR) << "Error: " << event.error().message();
+          EXIT(EXIT_FAILURE) << "Error: " << event.error().message();
           break;
         }
 
         case Event::HEARTBEAT:
+        case Event::INVERSE_OFFERS:
         case Event::RESCIND:
+        case Event::RESCIND_INVERSE_OFFER:
         case Event::MESSAGE: {
           break;
         }

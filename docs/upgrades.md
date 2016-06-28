@@ -43,21 +43,41 @@ We categorize the changes as follows:
   </thead>
 <tr>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Version-->
-  0.29.x
+  1.0.x
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Mesos Core-->
     <ul style="padding-left:10px;">
-      <li>CD <a href="#0-29-x-allocator-metrics">Allocator Metrics</a></li>
-      <li>D <a href="#0-29-x-credentials">--credential(s) (plain text format)</a></li>
+      <li>CD <a href="#1-0-x-allocator-metrics">Allocator Metrics</a></li>
+      <li>C <a href="#1-0-x-persistent-volume">Destruction of persistent volumes</a></li>
+      <li>C <a href="#1-0-x-slave">Slave to Agent rename</a></li>
+      <li>C <a href="#1-0-x-quota-acls">Quota ACLs</a></li>
+      <li>R <a href="#1-0-x-executor-environment-variables">Executor environment variables inheritance</a></li>
+      <li>R <a href="#1-0-x-deprecated-fields-in-container-config">Deprecated fields in ContainerConfig</a></li>
+      <li>C <a href="#1-0-x-persistent-volume-ownership">Persistent volume ownership</a></li>
     </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Flags-->
+    <ul style="padding-left:10px;">
+      <li>D <a href="#1-0-x-docker-timeout-flag">docker_stop_timeout</a></li>
+      <li>D <a href="#1-0-x-credentials-file">credential(s) (plain text format)</a></li>
+      <li>C <a href="#1-0-x-slave">Slave to Agent rename</a></li>
+      <li>R <a href="#1-0-x-workdir">work_dir default value</a></li>
+    </ul>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Framework API-->
+      <li>DC <a href="#1-0-x-executorinfo">ExecutorInfo.source</a></li>
+      <li>N <a href="#1-0-x-v1-commandinfo">CommandInfo.URI output_file</a></li>
+      <li>C <a href="#1-0-x-scheduler-proto">scheduler.proto optional fields</a></li>
+      <li>C <a href="#1-0-x-executor-proto">executor.proto optional fields</a></li>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Module API-->
+    <li>C <a href="#1-0-x-authorizer">Authorizer</a></li>
+    <li>C <a href="#1-0-x-allocator">Allocator</a></li>
   </td>
   <td style="word-wrap: break-word; overflow-wrap: break-word;"><!--Endpoints-->
+    <li>C <a href="#1-0-x-status-code">HTTP return codes</a></li>
+    <li>R <a href="#1-0-x-status-code">/observe</a></li>
+    <li>C <a href="#1-0-x-endpoint-authorization">Added authorization</a></li>
   </td>
 </tr>
 <tr>
@@ -153,22 +173,112 @@ We categorize the changes as follows:
 </tr>
 </table>
 
-## Upgrading from 0.28.x to 0.29.x ##
 
-<a name="0-29-x-allocator-metrics"></a>
+## Upgrading from 0.28.x to 1.0.x ##
 
-* The allocator metric named <code>allocator/event_queue_dispatches</code> is now deprecated and will be removed with 0.30. The new name is <code>allocator/mesos/event_queue_dispatches</code> to better support metrics for alternative allocator implementations.
+<a name="1-0-x-persistent-volume-ownership"</a>
 
-<a name="0-29-x-credentials"></a>
-* Mesos 0.29 deprecates the use of plain text credential files in favor of JSON-formatted credential files.
+* Prior to Mesos 1.0, Mesos agent recursively changes the ownership of the persistent volumes every time they are mounted to a container. From Mesos 1.0, this behavior has been changed. Mesos agent will do a _non-recursive_ change of ownership of the persistent volumes.
+
+<a name="1-0-x-deprecated-fields-in-container-config"</a>
+
+* Mesos 1.0 removed the camel cased protobuf fields in `ContainerConfig` (see `include/mesos/slave/isolator.proto`):
+  * `required ExecutorInfo executorInfo = 1;`
+  * `optional TaskInfo taskInfo = 2;`
+
+<a name="1-0-x-executor-environment-variables"</a>
+
+* By default, executors will no longer inherit environment variables from the agent. The operator can still use the `--executor-environment-variables` flag on the agent to explicitly specify what environment variables the executors will get. Mesos generated environment variables (i.e., `$MESOS_`, `$LIBPROCESS_`) will not be affected. If `$PATH` is not specified for an executor, a default value `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` will be used.
+
+<a name="1-0-x-allocator-metrics"></a>
+
+* The allocator metric named <code>allocator/event_queue_dispatches</code> is now deprecated. The new name is <code>allocator/mesos/event_queue_dispatches</code> to better support metrics for alternative allocator implementations.
+
+<a name="1-0-x-docker-timeout-flag"></a>
+
+* The `--docker_stop_timeout` agent flag is deprecated.
+
+<a name="1-0-x-executorinfo"></a>
+
+* The ExecutorInfo.source field is deprecated in favor of ExecutorInfo.labels.
+
+<a name="1-0-x-slave"></a>
+
+* Mesos 1.0 deprecates the 'slave' keyword in favor of 'agent' in a number of places
+  * Deprecated flags with keyword 'slave' in favor of 'agent'.
+  * Deprecated sandbox links with 'slave' keyword in the WebUI.
+  * Deprecated `slave` subcommand for mesos-cli.
+
+<a name="1-0-x-workdir"></a>
+
+* Mesos 1.0 removes the default value for the agent's `work_dir` command-line flag. This flag is now required; the agent will exit immediately if it is not provided.
+
+<a name="1-0-x-credentials-file"></a>
+
+* Mesos 1.0 deprecates the use of plain text credential files in favor of JSON-formatted credential files.
+
+<a name="1-0-x-persistent-volume"></a>
 
 * When a persistent volume is destroyed, Mesos will now remove any data that was stored on the volume from the filesystem of the appropriate agent. In prior versions of Mesos, destroying a volume would not delete data (this was a known missing feature that has now been implemented).
 
-* Mesos 0.29 changes the HTTP status code of the following endpoints from `200 OK` to `202 Accepted`:
+<a name="1-0-x-status-code"></a>
+
+* Mesos 1.0 changes the HTTP status code of the following endpoints from `200 OK` to `202 Accepted`:
   * `/reserve`
   * `/unreserve`
   * `/create-volumes`
   * `/destroy-volumes`
+
+<a name="1-0-x-v1-commandinfo"></a>
+
+* Added `output_file` field to CommandInfo.URI in Scheduler API and v1 Scheduler HTTP API.
+
+<a name="1-0-x-scheduler-proto"></a>
+
+* Changed Call and Event Type enums in scheduler.proto from required to optional for the purpose of backwards compatibility.
+
+<a name="1-0-x-executor-proto"></a>
+
+* Changed Call and Event Type enums in executor.proto from required to optional for the purpose of backwards compatibility.
+
+<a name="1-0-x-nonterminal"></a>
+
+* Added non-terminal task metadata to the container resource usage information.
+
+<a name="1-0-x-observe-endpoint"></a>
+
+* Deleted the /observe HTTP endpoint.
+
+<a name="1-0-x-quota-acls"></a>
+
+* The `SetQuota` and `RemoveQuota` ACLs have been deprecated. To replace these, a new ACL `UpdateQuota` have been introduced. In addition, a new ACL `GetQuota` have been added; these control which principals are allowed to query quota information for which roles. These changes affect the `--acls` flag for the local authorizer in the following ways:
+  * The `update_quotas` ACL cannot be used in combination with either the `set_quotas` or `remove_quotas` ACL. The local authorizor will produce an error in such a case;
+  * When upgrading a Mesos cluster that uses the `set_quotas` or `remove_quotas` ACLs, the operator should first upgrade the Mesos binaries. At this point, the deprecated ACLs will still be enforced. After the upgrade has been verified, the operator should replace deprecated values for `set_quotas` and `remove_quotas` with equivalent values for `update_quotas`;
+  * If desired, the operator can use the `get_quotas` ACL after the upgrade to control which principals are allowed to query quota information.
+
+<a name="1-0-x-authorizer"></a>
+
+* Mesos 1.0 contains a number of authorizer changes that particularly effect custom authorizer modules:
+  * The authorizer interface has been refactored in order to decouple the ACL definition language from the interface. It additionally includes the option of retrieving `ObjectApprover`. An `ObjectApprover` can be used to synchronously check authorizations for a given object and is hence useful when authorizing a large number of objects and/or large objects (which need to be copied using request-based authorization). NOTE: This is a **breaking change** for authorizer modules.
+  * Authorization-based HTTP endpoint filtering enables operators to restrict which parts of the cluster state a user is authorized to see. Consider for example the `/state` master endpoint: an operator can now authorize users to only see a subset of the running frameworks, tasks, or executors.
+  * The ``subject` and `object` fields in the authorization::Request protobuf message have been changed to be optional. If these fields are not set, the request should only be allowed for ACLs with `ANY` semantics. NOTE: This is a semantic change for authorizer modules.
+
+<a name="1-0-x-allocator"></a>
+
+* Namespace and header file of `Allocator` has been moved to be consistent with other packages.
+
+<a name="1-0-x-endpoint-authorization"></a>
+
+* Mesos 1.0 introduces authorization support for several HTTP endpoints. Note that some of these endpoints are used by the web UI, and thus using the web UI in a cluster with authorization enabled will require that ACLs be set appropriately. Please refer to the [authorization documentation](authorization.md) for details.
+
+In order to upgrade a running cluster:
+
+1. Rebuild and install any modules so that upgraded masters/agents can use them.
+2. Install the new master binaries and restart the masters.
+3. Install the new agent binaries and restart the agents.
+4. Upgrade the schedulers by linking the latest native library / jar / egg (if necessary).
+5. Restart the schedulers.
+6. Upgrade the executors by linking the latest native library / jar / egg (if necessary).
 
 ## Upgrading from 0.27.x to 0.28.x ##
 

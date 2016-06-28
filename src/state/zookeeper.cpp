@@ -186,8 +186,8 @@ ZooKeeperStorageProcess::ZooKeeperStorageProcess(
     acl(_auth.isSome()
         ? zookeeper::EVERYONE_READ_CREATOR_ALL
         : ZOO_OPEN_ACL_UNSAFE),
-    watcher(NULL),
-    zk(NULL),
+    watcher(nullptr),
+    zk(nullptr),
     state(DISCONNECTED)
 {}
 
@@ -508,7 +508,7 @@ Result<bool> ZooKeeperStorageProcess::doSet(const Entry& entry,
       string prefix = znode.substr(0, index);
 
       // Create the znode (even if it already exists).
-      code = zk->create(prefix, "", acl, 0, NULL);
+      code = zk->create(prefix, "", acl, 0, nullptr);
 
       if (code == ZINVALIDSTATE || (code != ZOK && zk->retryable(code))) {
         CHECK(zk->getState() != ZOO_AUTH_FAILED_STATE);
@@ -520,7 +520,7 @@ Result<bool> ZooKeeperStorageProcess::doSet(const Entry& entry,
       }
     }
 
-    code = zk->create(znode + "/" + entry.name(), data, acl, 0, NULL);
+    code = zk->create(znode + "/" + entry.name(), data, acl, 0, nullptr);
 
     if (code == ZNODEEXISTS) {
       return false; // Lost a race with someone else.
@@ -551,7 +551,7 @@ Result<bool> ZooKeeperStorageProcess::doSet(const Entry& entry,
     return Error("Failed to deserialize Entry");
   }
 
-  if (UUID::fromBytes(current.uuid()) != uuid) {
+  if (UUID::fromBytes(current.uuid()).get() != uuid) {
     return false;
   }
 
@@ -602,7 +602,8 @@ Result<bool> ZooKeeperStorageProcess::doExpunge(const Entry& entry)
     return Error("Failed to deserialize Entry");
   }
 
-  if (UUID::fromBytes(current.uuid()) != UUID::fromBytes(entry.uuid())) {
+  if (UUID::fromBytes(current.uuid()).get() !=
+      UUID::fromBytes(entry.uuid()).get()) {
     return false;
   }
 

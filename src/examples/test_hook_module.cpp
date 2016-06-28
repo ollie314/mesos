@@ -35,6 +35,7 @@ using namespace mesos;
 using std::map;
 using std::string;
 
+using process::Failure;
 using process::Future;
 
 // Must be kept in sync with variables of the same name in
@@ -42,6 +43,7 @@ using process::Future;
 const char* testLabelKey = "MESOS_Test_Label";
 const char* testLabelValue = "ApacheMesos";
 const char* testRemoveLabelKey = "MESOS_Test_Remove_Label";
+const char* testErrorLabelKey = "MESOS_Test_Error_Label";
 
 class HookProcess : public ProtobufProcess<HookProcess>
 {
@@ -182,6 +184,36 @@ public:
   }
 
 
+  // In this hook, look for the existence of a specific label.
+  // If found, return a `Failure`.
+  // Otherwise, add an environment variable to the task.
+  virtual Future<Option<Environment>> slavePreLaunchDockerEnvironmentDecorator(
+      const Option<TaskInfo>& taskInfo,
+      const ExecutorInfo& executorInfo,
+      const string& name,
+      const string& sandboxDirectory,
+      const string& mappedDirectory,
+      const Option<map<string, string>>& env)
+  {
+    LOG(INFO) << "Executing 'slavePreLaunchDockerEnvironmentDecorator' hook";
+
+    if (taskInfo.isSome()) {
+      foreach (const Label& label, taskInfo->labels().labels()) {
+        if (label.key() == testErrorLabelKey) {
+          return Failure("Spotted error label");
+        }
+      }
+    }
+
+    Environment environment;
+    Environment::Variable* variable = environment.add_variables();
+    variable->set_name("FOO_DOCKER");
+    variable->set_value("docker_bar");
+
+    return environment;
+  }
+
+
   virtual Try<Nothing> slavePreLaunchDockerHook(
       const ContainerInfo& containerInfo,
       const CommandInfo& commandInfo,
@@ -272,10 +304,8 @@ public:
     // 'HookTest.VerifySlaveTaskStatusDecorator' test.
     NetworkInfo* networkInfo =
       result.mutable_container_status()->add_network_infos();
-    // TODO(CD): Deprecated -- remove after 0.27.0.
-    networkInfo->set_ip_address("4.3.2.1");
-    NetworkInfo::IPAddress* ipAddress =
-      networkInfo->add_ip_addresses();
+
+    NetworkInfo::IPAddress* ipAddress = networkInfo->add_ip_addresses();
     ipAddress->set_ip_address("4.3.2.1");
     networkInfo->add_groups("public");
 
@@ -335,5 +365,5 @@ mesos::modules::Module<Hook> org_apache_mesos_TestHook(
     "Apache Mesos",
     "modules@mesos.apache.org",
     "Test Hook module.",
-    NULL,
+    nullptr,
     createHook);

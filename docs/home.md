@@ -19,6 +19,8 @@ layout: documentation
 * [Containerizer](containerizer.md) for containerizer overview and use cases.
   * [Containerizer Internals](containerizer-internals.md) for implementation details of containerizers.
   * [Mesos Containerizer](mesos-containerizer.md) default containerizer, supports both Linux and POSIX systems.
+    * [Docker Volume Support](docker-volume.md)
+    * [CNI support](cni.md)
   * [Docker Containerizer](docker-containerizer.md) for launching a Docker image as a Task, or as an Executor.
   * [External Containerizer](external-containerizer.md) for custom containerization implementations (deprecated).
 * [Roles](roles.md)
@@ -30,7 +32,6 @@ layout: documentation
 * [High Availability](high-availability.md) for running multiple masters simultaneously.
 * [Operational Guide](operational-guide.md)
 * [Monitoring](monitoring.md)
-* [Network Monitoring and Isolation](network-monitoring.md)
 * [Agent Recovery](agent-recovery.md) for doing seamless agent upgrades and allowing executors to survive `mesos-agent` crashes.
 * [Maintenance](maintenance.md) for performing maintenance on a Mesos cluster.
 * [Tools](tools.md) for setting up and running a Mesos cluster.
@@ -41,7 +42,9 @@ layout: documentation
 
 * [Attributes and Resources](attributes-resources.md) for how to describe the agents that comprise a cluster.
 * [Fetcher Cache](fetcher.md) for how to configure the Mesos fetcher cache.
-* [Networking for Mesos-managed Containers](networking-for-mesos-managed-containers.md)
+* [Networking](networking.md)
+  * [Container Network Interface (CNI)](cni.md)
+  * [Port Mapping Isolator](port-mapping-isolator.md)
 * [Oversubscription](oversubscription.md) for how to configure Mesos to take advantage of unused resources to launch "best-effort" tasks.
 * [Persistent Volume](persistent-volume.md) for how to allow tasks to access persistent storage resources.
 * [Multiple Disks](multiple-disk.md) for how to to allow tasks to use multiple isolated disk resources.
@@ -80,6 +83,7 @@ layout: documentation
 * [Engineering Principles and Practices](engineering-principles-and-practices.md) to serve as a shared set of project-level values for the community.
 * [Committing](committing.md) guidelines for committing changes.
 * [Committers and Maintainers](committers.md) a listing of project committers and component maintainers; useful when seeking feedback.
+* [Working groups](working-groups.md) a listing of groups working on different components.
 * [Doxygen](/api/latest/c++/) documents the internal Mesos APIs.
 * [Documentation Guide](documentation-guide.md)
   * [C++ Style Guide](c++-style-guide.md)
@@ -92,3 +96,4 @@ layout: documentation
 
 * [Powered by Mesos](powered-by-mesos.md) lists organizations and software that are powered by Apache Mesos.
 * [Academic Papers and Project History](https://www.usenix.org/conference/nsdi11/mesos-platform-fine-grained-resource-sharing-data-center)
+* [Design docs](design-docs.md) list of design documents for various Mesos features

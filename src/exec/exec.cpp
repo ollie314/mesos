@@ -68,6 +68,7 @@ using std::string;
 using process::Latch;
 using process::wait; // Necessary on some OS's to disambiguate.
 
+using mesos::Executor; // Necessary on some OS's to disambiguate.
 
 namespace mesos {
 namespace internal {
@@ -99,7 +100,17 @@ protected:
 
     // TODO(vinod): Invoke killtree without killing ourselves.
     // Kill the process group (including ourself).
+#ifndef __WINDOWS__
     killpg(0, SIGKILL);
+#else
+    LOG(WARNING) << "Shutting down process group. Windows does not support "
+                    "`killpg`, so we simply call `exit` on the assumption "
+                    "that the process was generated with the "
+                    "`WindowsContainerizer`, which uses the 'close on exit' "
+                    "feature of job objects to make sure all child processes "
+                    "are killed when a parent process exits";
+    exit(0);
+#endif // __WINDOWS__
 
     // The signal might not get delivered immediately, so sleep for a
     // few seconds. Worst case scenario, exit abnormally.
@@ -347,20 +358,23 @@ protected:
       const TaskID& taskId,
       const string& uuid)
   {
+    Try<UUID> uuid_ = UUID::fromBytes(uuid);
+    CHECK_SOME(uuid_);
+
     if (aborted.load()) {
       VLOG(1) << "Ignoring status update acknowledgement "
-              << UUID::fromBytes(uuid) << " for task " << taskId
+              << uuid_.get() << " for task " << taskId
               << " of framework " << frameworkId
               << " because the driver is aborted!";
       return;
     }
 
     VLOG(1) << "Executor received status update acknowledgement "
-            << UUID::fromBytes(uuid) << " for task " << taskId
+            << uuid_.get() << " for task " << taskId
             << " of framework " << frameworkId;
 
     // Remove the corresponding update.
-    updates.erase(UUID::fromBytes(uuid));
+    updates.erase(uuid_.get());
 
     // Remove the corresponding task.
     tasks.erase(taskId);
@@ -586,9 +600,9 @@ private:
 // Implementation of C++ API.
 
 
-MesosExecutorDriver::MesosExecutorDriver(Executor* _executor)
+MesosExecutorDriver::MesosExecutorDriver(mesos::Executor* _executor)
   : executor(_executor),
-    process(NULL),
+    process(nullptr),
     status(DRIVER_NOT_STARTED)
 {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
@@ -648,9 +662,18 @@ Status MesosExecutorDriver::start()
 
     // Set stream buffering mode to flush on newlines so that we
     // capture logs from user processes even when output is redirected
-    // to a file.
-    setvbuf(stdout, 0, _IOLBF, 0);
-    setvbuf(stderr, 0, _IOLBF, 0);
+    // to a file. On POSIX, the buffer size is determined by the system
+    // when the `buf` parameter is null. On Windows we have to specify
+    // the size, so we use 1024 bytes, a number that is arbitrary, but
+    // large enough to not affect performance.
+    const size_t bufferSize =
+#ifdef __WINDOWS__
+      1024;
+#else // __WINDOWS__
+      0;
+#endif // __WINDOWS__
+    setvbuf(stdout, nullptr, _IOLBF, bufferSize);
+    setvbuf(stderr, nullptr, _IOLBF, bufferSize);
 
     bool local;
 
@@ -750,7 +773,7 @@ Status MesosExecutorDriver::start()
       }
     }
 
-    CHECK(process == NULL);
+    CHECK(process == nullptr);
 
     process = new ExecutorProcess(
         slave,
@@ -781,7 +804,7 @@ Status MesosExecutorDriver::stop()
       return status;
     }
 
-    CHECK(process != NULL);
+    CHECK(process != nullptr);
 
     dispatch(process, &ExecutorProcess::stop);
 
@@ -801,7 +824,7 @@ Status MesosExecutorDriver::abort()
       return status;
     }
 
-    CHECK(process != NULL);
+    CHECK(process != nullptr);
 
     // We set the atomic aborted to true here to prevent any further
     // messages from being processed in the ExecutorProcess. However,
@@ -856,7 +879,7 @@ Status MesosExecutorDriver::sendStatusUpdate(const TaskStatus& taskStatus)
       return status;
     }
 
-    CHECK(process != NULL);
+    CHECK(process != nullptr);
 
     dispatch(process, &ExecutorProcess::sendStatusUpdate, taskStatus);
 
@@ -872,7 +895,7 @@ Status MesosExecutorDriver::sendFrameworkMessage(const string& data)
       return status;
     }
 
-    CHECK(process != NULL);
+    CHECK(process != nullptr);
 
     dispatch(process, &ExecutorProcess::sendFrameworkMessage, data);
 

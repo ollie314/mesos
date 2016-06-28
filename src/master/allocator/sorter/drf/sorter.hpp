@@ -20,9 +20,11 @@
 #include <set>
 #include <string>
 
+#include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
 
 #include <stout/hashmap.hpp>
+#include <stout/option.hpp>
 
 #include "master/allocator/sorter/drf/metrics.hpp"
 
@@ -135,7 +137,7 @@ private:
   std::set<Client, DRFComparator>::iterator find(const std::string& name);
 
   // If true, sort() will recalculate all shares.
-  bool dirty;
+  bool dirty = false;
 
   // A set of Clients (names and shares) sorted by share.
   std::set<Client, DRFComparator> clients;

@@ -55,8 +55,11 @@ mesos::internal::master::Flags::Flags()
 
   add(&Flags::work_dir,
       "work_dir",
-      "Directory path to store the persistent information stored in the \n"
-      "Registry. (example: `/var/lib/mesos/master`)");
+      "Path of the master work directory. This is where the persistent\n"
+      "information of the cluster will be stored. Note that locations like\n"
+      "`/tmp` which are cleaned automatically are not suitable for the work\n"
+      "directory when running in production, since long-running masters could\n"
+      "lose data when cleanup occurs. (Example: `/var/lib/mesos/master`)");
 
   // TODO(bmahler): Consider removing `in_memory` as it was only
   // used before `replicated_log` was implemented.
@@ -357,7 +360,7 @@ mesos::internal::master::Flags::Flags()
       "If not set, offers do not timeout.");
 
   // This help message for --modules flag is the same for
-  // {master,slave,tests}/flags.hpp and should always be kept in
+  // {master,slave,sched,tests}/flags.[ch]pp and should always be kept in
   // sync.
   // TODO(karya): Remove the JSON example and add reference to the
   // doc file explaining the --modules flag.
@@ -401,7 +404,18 @@ mesos::internal::master::Flags::Flags()
       "      ]\n"
       "    }\n"
       "  ]\n"
-      "}");
+      "}\n\n"
+      "Cannot be used in conjunction with --modules_dir.\n");
+
+  // This help message for --modules_dir flag is the same for
+  // {master,slave,sched,tests}/flags.[ch]pp and should always be kept in
+  // sync.
+  add(&Flags::modulesDir,
+      "modules_dir",
+      "Directory path of the module manifest files.\n"
+      "The manifest files are processed in alphabetical order.\n"
+      "(See --modules for more information on module manifest files)\n"
+      "Cannot be used in conjunction with --modules.\n");
 
   add(&Flags::authenticators,
       "authenticators",

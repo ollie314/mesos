@@ -88,7 +88,7 @@ TEST_F(OsTest, Environment)
 
   hashmap<string, string> environment = os::environment();
 
-  for (size_t index = 0; environ[index] != NULL; index++) {
+  for (size_t index = 0; environ[index] != nullptr; index++) {
     string entry(environ[index]);
     size_t position = entry.find_first_of('=');
     if (position == string::npos) {
@@ -209,7 +209,7 @@ TEST_F(OsTest, BootId)
   ASSERT_SOME(numified);
 
   timeval time;
-  gettimeofday(&time, NULL);
+  gettimeofday(&time, nullptr);
   EXPECT_GT(Seconds(numified.get()), Seconds(0));
   EXPECT_LT(Seconds(numified.get()), Seconds(time.tv_sec));
 #endif
@@ -272,7 +272,7 @@ TEST_F(OsTest, Sysctl)
   ASSERT_SOME(bootTime);
 
   timeval time;
-  gettimeofday(&time, NULL);
+  gettimeofday(&time, nullptr);
 
   EXPECT_GT(Seconds(bootTime.get().tv_sec), Seconds(0));
   EXPECT_LT(Seconds(bootTime.get().tv_sec), Seconds(time.tv_sec));
@@ -326,7 +326,7 @@ TEST_F(OsTest, Children)
   EXPECT_EQ(0, kill(child, SIGKILL));
 
   // We have to reap the child for running the tests in repetition.
-  ASSERT_EQ(child, waitpid(child, NULL, 0));
+  ASSERT_EQ(child, waitpid(child, nullptr, 0));
 }
 
 
@@ -457,7 +457,7 @@ TEST_F(OsTest, Killtree)
   EXPECT_TRUE(os::process(child).get().zombie);
 
   // We have to reap the child for running the tests in repetition.
-  ASSERT_EQ(child, waitpid(child, NULL, 0));
+  ASSERT_EQ(child, waitpid(child, nullptr, 0));
 }
 
 
@@ -519,7 +519,7 @@ TEST_F(OsTest, KilltreeNoRoot)
   // Ensure we reap our child now.
   EXPECT_SOME(os::process(child));
   EXPECT_TRUE(os::process(child).get().zombie);
-  ASSERT_EQ(child, waitpid(child, NULL, 0));
+  ASSERT_EQ(child, waitpid(child, nullptr, 0));
 
   // Check the grandchild and great grandchild are still running.
   ASSERT_TRUE(os::exists(grandchild));
@@ -663,6 +663,31 @@ TEST_F(OsTest, User)
 
   EXPECT_SOME(os::su(user.get()));
   EXPECT_ERROR(os::su(UUID::random().toString()));
+
+  Try<string> gids_ = os::shell("id -G " + user.get());
+  EXPECT_SOME(gids_);
+
+  Try<vector<string>> tokens =
+    strings::split(strings::trim(gids_.get(), strings::ANY, "\n"), " ");
+
+  ASSERT_SOME(tokens);
+
+  Try<vector<gid_t>> gids = os::getgrouplist(user.get());
+  EXPECT_SOME(gids);
+
+  for (int i = 0; i < gids.get().size(); i++) {
+    EXPECT_EQ(tokens.get()[i], stringify(gids.get()[i]));
+  }
+
+  EXPECT_SOME(os::setgid(gid.get()));
+
+  // 'setgroups' requires root permission.
+  if (user.get() != "root") {
+    return;
+  }
+
+  EXPECT_SOME(os::setgroups(gids.get(), uid.get()));
+  EXPECT_SOME(os::setuid(uid.get()));
 }
 
 

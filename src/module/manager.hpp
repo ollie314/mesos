@@ -34,7 +34,9 @@
 #include <stout/check.hpp>
 #include <stout/dynamiclibrary.hpp>
 #include <stout/hashmap.hpp>
+#include <stout/nothing.hpp>
 #include <stout/synchronized.hpp>
+#include <stout/try.hpp>
 
 #include "messages/messages.hpp"
 
@@ -62,7 +64,14 @@ public:
   //
   // NOTE: If loading fails at a particular library we don't unload
   // all of the already loaded libraries.
-  static Try<Nothing> load(const Modules& modules);
+  static Try<Nothing> load(const Modules& modules)
+  {
+    return loadManifest(modules);
+  }
+
+  // NOTE: If loading fails at a particular library we don't unload
+  // all of the already loaded libraries.
+  static Try<Nothing> load(const std::string& modulesDir);
 
   // create() should be called only after load().
   template <typename T>
@@ -77,7 +86,7 @@ public:
       }
 
       Module<T>* module = (Module<T>*) moduleBases[moduleName];
-      if (module->create == NULL) {
+      if (module->create == nullptr) {
         return Error(
             "Error creating module instance for '" + moduleName + "': "
             "create() method not found");
@@ -94,7 +103,7 @@ public:
       T* instance =
         module->create(
             params.isSome() ? params.get() : moduleParameters[moduleName]);
-      if (instance == NULL) {
+      if (instance == nullptr) {
         return Error("Error creating Module instance for '" + moduleName + "'");
       }
       return instance;
@@ -139,6 +148,8 @@ public:
 
 private:
   static void initialize();
+
+  static Try<Nothing> loadManifest(const Modules& modules);
 
   static Try<Nothing> verifyModule(
       const std::string& moduleName,

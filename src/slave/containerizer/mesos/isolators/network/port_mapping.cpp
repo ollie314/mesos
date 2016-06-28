@@ -1877,24 +1877,25 @@ Try<Isolator*> PortMappingIsolatorProcess::create(const Flags& flags)
   // each container. This is important because when we unmount the
   // network namespace handles on the host, those handles will be
   // unmounted in the containers as well, but NOT vice versa.
+  const string portMappingBindMountRoot = PORT_MAPPING_BIND_MOUNT_ROOT();
+
+  // We create the bind mount directory if it does not exist.
+  Try<Nothing> mkdir = os::mkdir(portMappingBindMountRoot);
+  if (mkdir.isError()) {
+    return Error(
+        "Failed to create the bind mount root directory at '" +
+        portMappingBindMountRoot + "': " + mkdir.error());
+  }
 
   // We need to get the realpath for the bind mount root since on some
   // Linux distribution, The bind mount root (i.e., /var/run/netns)
   // might contain symlink.
-  Result<string> bindMountRoot = os::realpath(PORT_MAPPING_BIND_MOUNT_ROOT());
+  Result<string> bindMountRoot = os::realpath(portMappingBindMountRoot);
   if (!bindMountRoot.isSome()) {
     return Error(
         "Failed to get realpath for bind mount root '" +
         PORT_MAPPING_BIND_MOUNT_ROOT() + "': " +
         (bindMountRoot.isError() ? bindMountRoot.error() : "Not found"));
-  }
-
-  // We first create the bind mount directory if it does not exist.
-  Try<Nothing> mkdir = os::mkdir(bindMountRoot.get());
-  if (mkdir.isError()) {
-    return Error(
-        "Failed to create the bind mount root directory at " +
-        bindMountRoot.get() + ": " + mkdir.error());
   }
 
   // Now, check '/proc/self/mounts' to see if the bind mount root has
@@ -2418,7 +2419,7 @@ PortMappingIsolatorProcess::_recover(pid_t pid)
     }
   }
 
-  Info* info = NULL;
+  Info* info = nullptr;
 
   if (ephemeralPorts.empty()) {
     // NOTE: This is possible because the slave may crash while
@@ -2564,7 +2565,7 @@ Future<Nothing> PortMappingIsolatorProcess::isolate(
     return Failure("Failed to create the bind mount point: " + touch.error());
   }
 
-  Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, NULL);
+  Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, nullptr);
   if (mount.isError()) {
     return Failure(
         "Failed to mount the network namespace handle from '" +
@@ -3923,8 +3924,10 @@ string PortMappingIsolatorProcess::scripts(Info* info)
   // the host.
   script << "mount --make-rslave " << bindMountRoot << "\n";
 
-  // Disable IPv6 as IPv6 packets won't be forwarded anyway.
-  script << "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6\n";
+  // Disable IPv6 when IPv6 module is loaded as IPv6 packets won't be
+  // forwarded anyway.
+  script << "test -f /proc/sys/net/ipv6/conf/all/disable_ipv6 &&"
+         << " echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6\n";
 
   // Configure lo and eth0.
   script << "ip link set " << lo << " address " << hostMAC

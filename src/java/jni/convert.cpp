@@ -50,17 +50,17 @@ using std::string;
 // http://android.git.kernel.org/?p=platform/frameworks/base.git;a=blob;f=core/jni/AndroidRuntime.cpp;h=f61e2476c71191aa6eabc93bcb26b3c15ccf6136;hb=HEAD
 namespace {
 
-jweak mesosClassLoader = NULL; // Initialized in JNI_OnLoad later in this file.
+jweak mesosClassLoader = nullptr; // Initialized in JNI_OnLoad later in this file.
 
 jclass FindMesosClass(JNIEnv* env, const char* className)
 {
   if (env->ExceptionCheck()) {
       fprintf(stderr, "ERROR: exception pending on entry to "
                       "FindMesosClass()\n");
-      return NULL;
+      return nullptr;
   }
 
-  if (mesosClassLoader == NULL) {
+  if (mesosClassLoader == nullptr) {
     return env->FindClass(className);
   }
 
@@ -74,19 +74,19 @@ jclass FindMesosClass(JNIEnv* env, const char* className)
   }
 
   jclass javaLangClassLoader = env->FindClass("java/lang/ClassLoader");
-  assert(javaLangClassLoader != NULL);
+  assert(javaLangClassLoader != nullptr);
   jmethodID loadClass =
     env->GetMethodID(javaLangClassLoader,
                      "loadClass",
                      "(Ljava/lang/String;)Ljava/lang/Class;");
-  assert(loadClass != NULL);
+  assert(loadClass != nullptr);
 
   // Create an object for the class name string; alloc could fail.
   jstring strClassName = env->NewStringUTF(convName.c_str());
   if (env->ExceptionCheck()) {
     fprintf(stderr, "ERROR: unable to convert '%s' to string\n",
             convName.c_str());
-    return NULL;
+    return nullptr;
   }
 
   // Try to find the named class.
@@ -98,7 +98,7 @@ jclass FindMesosClass(JNIEnv* env, const char* className)
     env->ExceptionDescribe();
     fprintf(stderr, "ERROR: unable to load class '%s' from %p\n",
             className, mesosClassLoader);
-    return NULL;
+    return nullptr;
   }
 
   return cls;
@@ -118,48 +118,26 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* jvm, void* reserved)
 
   // Find thread's context class loader.
   jclass javaLangThread = env->FindClass("java/lang/Thread");
-  assert(javaLangThread != NULL);
+  assert(javaLangThread != nullptr);
 
   jclass javaLangClassLoader = env->FindClass("java/lang/ClassLoader");
-  assert(javaLangClassLoader != NULL);
+  assert(javaLangClassLoader != nullptr);
 
   jmethodID currentThread = env->GetStaticMethodID(
       javaLangThread, "currentThread", "()Ljava/lang/Thread;");
-  assert(currentThread != NULL);
+  assert(currentThread != nullptr);
 
   jmethodID getContextClassLoader = env->GetMethodID(
       javaLangThread, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
-  assert(getContextClassLoader != NULL);
+  assert(getContextClassLoader != nullptr);
 
   jobject thread = env->CallStaticObjectMethod(javaLangThread, currentThread);
-  assert(thread != NULL);
+  assert(thread != nullptr);
 
   jobject classLoader = env->CallObjectMethod(thread, getContextClassLoader);
 
-  if (classLoader != NULL) {
+  if (classLoader != nullptr) {
     mesosClassLoader = env->NewWeakGlobalRef(classLoader);
-  }
-
-  // Check that we are loading the correct version of the native library.
-  jclass clazz = FindMesosClass(env, "org/apache/mesos/MesosNativeLibrary");
-  jobject jVERSION = env->GetStaticObjectField(
-      clazz, env->GetStaticFieldID(clazz, "VERSION", "Ljava/lang/String;"));
-
-  const string& jarVersion = construct<string>(env, jVERSION);
-
-  const string jarMajorVersion = strings::split(jarVersion, ".")[0];
-  const string nativeMajorVersion = strings::split(MESOS_VERSION, ".")[0];
-
-  if (jarMajorVersion != nativeMajorVersion) {
-    env->DeleteWeakGlobalRef(mesosClassLoader);
-    mesosClassLoader = NULL;
-    const string& error =
-      "Mesos JAR version " + jarVersion +
-      " is not backwards compatible with Mesos native library version " +
-      MESOS_VERSION;
-    clazz = env->FindClass("java/lang/UnsatisfiedLinkError");
-    env->ThrowNew(clazz, error.c_str());
-    return JNI_ERR;
   }
 
   // Set the 'loaded' property so we don't try and load it again. This
@@ -167,7 +145,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* jvm, void* reserved)
   // 'System.load' or 'System.loadLibrary' and while redundant calls
   // to 'System.loadLibrary' will be ignored one call of each could
   // cause an error.
-  clazz = FindMesosClass(env, "org/apache/mesos/MesosNativeLibrary");
+  jclass clazz = FindMesosClass(env, "org/apache/mesos/MesosNativeLibrary");
   jfieldID loaded = env->GetStaticFieldID(clazz, "loaded", "Z");
   env->SetStaticBooleanField(clazz, loaded, (jboolean) true);
 
@@ -185,9 +163,9 @@ JNIEXPORT void JNICALL JNI_OnUnLoad(JavaVM* jvm, void* reserved)
 
   // TODO(benh): Must we set 'MesosNativeLibrary.loaded' to false?
 
-  if (mesosClassLoader != NULL) {
+  if (mesosClassLoader != nullptr) {
     env->DeleteWeakGlobalRef(mesosClassLoader);
-    mesosClassLoader = NULL;
+    mesosClassLoader = nullptr;
   }
 }
 
@@ -522,7 +500,7 @@ Result<jfieldID> getFieldID(
 {
   jfieldID jfield = env->GetFieldID(clazz, name, signature);
   jthrowable jexception = env->ExceptionOccurred();
-  if (jexception != NULL) {
+  if (jexception != nullptr) {
     env->ExceptionClear(); // Clear the exception first before proceeding.
 
     jclass noSuchFieldError = env->FindClass("java/lang/NoSuchFieldError");

@@ -50,6 +50,164 @@ static bool invalidCharacter(char c)
 }
 
 
+namespace master {
+namespace call {
+
+Option<Error> validate(
+    const mesos::master::Call& call,
+    const Option<string>& principal)
+{
+  if (!call.IsInitialized()) {
+    return Error("Not initialized: " + call.InitializationErrorString());
+  }
+
+  if (!call.has_type()) {
+    return Error("Expecting 'type' to be present");
+  }
+
+  switch (call.type()) {
+    case mesos::master::Call::UNKNOWN:
+      return None();
+
+    case mesos::master::Call::GET_HEALTH:
+      return None();
+
+    case mesos::master::Call::GET_FLAGS:
+      return None();
+
+    case mesos::master::Call::GET_VERSION:
+      return None();
+
+    case mesos::master::Call::GET_METRICS:
+      if (!call.has_get_metrics()) {
+        return Error("Expecting 'get_metrics' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::GET_LOGGING_LEVEL:
+      return None();
+
+    case mesos::master::Call::SET_LOGGING_LEVEL:
+      if (!call.has_set_logging_level()) {
+        return Error("Expecting 'set_logging_level' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::LIST_FILES:
+      if (!call.has_list_files()) {
+        return Error("Expecting 'list_files' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::READ_FILE:
+      if (!call.has_read_file()) {
+        return Error("Expecting 'read_file' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::GET_STATE:
+      return None();
+
+    case mesos::master::Call::GET_STATE_SUMMARY:
+      return None();
+
+    case mesos::master::Call::GET_AGENTS:
+      return None();
+
+    case mesos::master::Call::GET_FRAMEWORKS:
+      return None();
+
+    case mesos::master::Call::GET_TASKS:
+      if (!call.has_get_tasks()) {
+        return Error("Expecting 'get_tasks' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::GET_ROLES:
+      return None();
+
+    case mesos::master::Call::GET_WEIGHTS:
+      return None();
+
+    case mesos::master::Call::UPDATE_WEIGHTS:
+      return None();
+
+    case mesos::master::Call::GET_LEADING_MASTER:
+      return None();
+
+    case mesos::master::Call::RESERVE_RESOURCES:
+      if (!call.has_reserve_resources()) {
+        return Error("Expecting 'reserve_resources' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::UNRESERVE_RESOURCES:
+      if (!call.has_unreserve_resources()) {
+        return Error("Expecting 'unreserve_resources' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::CREATE_VOLUMES:
+      if (!call.has_create_volumes()) {
+        return Error("Expecting 'create_volumes' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::DESTROY_VOLUMES:
+      if (!call.has_destroy_volumes()) {
+        return Error("Expecting 'destroy_volumes' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::GET_MAINTENANCE_STATUS:
+      return None();
+
+    case mesos::master::Call::GET_MAINTENANCE_SCHEDULE:
+      return None();
+
+    case mesos::master::Call::UPDATE_MAINTENANCE_SCHEDULE:
+      if (!call.has_update_maintenance_schedule()) {
+        return Error("Expecting 'update_maintenance_schedule' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::START_MAINTENANCE:
+      if (!call.has_start_maintenance()) {
+        return Error("Expecting 'start_maintenance' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::STOP_MAINTENANCE:
+      if (!call.has_stop_maintenance()) {
+        return Error("Expecting 'stop_maintenance' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::GET_QUOTA:
+      return None();
+
+    case mesos::master::Call::SET_QUOTA:
+      if (!call.has_set_quota()) {
+        return Error("Expecting 'set_quota' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::REMOVE_QUOTA:
+      if (!call.has_remove_quota()) {
+        return Error("Expecting 'remove_quota' to be present");
+      }
+      return None();
+
+    case mesos::master::Call::SUBSCRIBE:
+      return None();
+  }
+
+  UNREACHABLE();
+}
+
+} // namespace call {
+} // namespace master {
+
 namespace scheduler {
 namespace call {
 
@@ -113,6 +271,18 @@ Option<Error> validate(
       }
       return None();
 
+    case mesos::scheduler::Call::ACCEPT_INVERSE_OFFERS:
+      if (!call.has_accept_inverse_offers()) {
+        return Error("Expecting 'accept_inverse_offers' to be present");
+      }
+      return None();
+
+    case mesos::scheduler::Call::DECLINE_INVERSE_OFFERS:
+      if (!call.has_decline_inverse_offers()) {
+        return Error("Expecting 'decline_inverse_offers' to be present");
+      }
+      return None();
+
     case mesos::scheduler::Call::REVIVE:
       return None();
 
@@ -131,11 +301,17 @@ Option<Error> validate(
       }
       return None();
 
-    case mesos::scheduler::Call::ACKNOWLEDGE:
+    case mesos::scheduler::Call::ACKNOWLEDGE: {
       if (!call.has_acknowledge()) {
         return Error("Expecting 'acknowledge' to be present");
       }
+
+      Try<UUID> uuid = UUID::fromBytes(call.acknowledge().uuid());
+      if (uuid.isError()) {
+        return uuid.error();
+      }
       return None();
+    }
 
     case mesos::scheduler::Call::RECONCILE:
       if (!call.has_reconcile()) {
@@ -595,10 +771,82 @@ Offer* getOffer(Master* master, const OfferID& offerId)
 }
 
 
+InverseOffer* getInverseOffer(Master* master, const OfferID& offerId)
+{
+  CHECK_NOTNULL(master);
+  return master->getInverseOffer(offerId);
+}
+
+
 Slave* getSlave(Master* master, const SlaveID& slaveId)
 {
   CHECK_NOTNULL(master);
   return master->slaves.registered.get(slaveId);
+}
+
+
+Try<SlaveID> getSlaveId(Master* master, const OfferID& offerId)
+{
+  // Try as an offer.
+  Offer* offer = getOffer(master, offerId);
+  if (offer != nullptr) {
+    return offer->slave_id();
+  }
+
+  InverseOffer* inverseOffer = getInverseOffer(master, offerId);
+  if (inverseOffer != nullptr) {
+    return inverseOffer->slave_id();
+  }
+
+  return Error("Offer id no longer valid");
+}
+
+
+Try<FrameworkID> getFrameworkId(Master* master, const OfferID& offerId)
+{
+  // Try as an offer.
+  Offer* offer = getOffer(master, offerId);
+  if (offer != nullptr) {
+    return offer->framework_id();
+  }
+
+  InverseOffer* inverseOffer = getInverseOffer(master, offerId);
+  if (inverseOffer != nullptr) {
+    return inverseOffer->framework_id();
+  }
+
+  return Error("Offer id no longer valid");
+}
+
+
+Option<Error> validateOfferIds(
+    Master* master,
+    const RepeatedPtrField<OfferID>& offerIds)
+{
+  foreach (const OfferID& offerId, offerIds) {
+    Offer* offer = getOffer(master, offerId);
+    if (offer == nullptr) {
+      return Error("Offer " + stringify(offerId) + " is no longer valid");
+    }
+  }
+
+  return None();
+}
+
+
+Option<Error> validateInverseOfferIds(
+    Master* master,
+    const RepeatedPtrField<OfferID>& offerIds)
+{
+  foreach (const OfferID& offerId, offerIds) {
+    InverseOffer* inverseOffer = getInverseOffer(master, offerId);
+    if (inverseOffer == nullptr) {
+      return Error(
+          "Inverse offer " + stringify(offerId) + " is no longer valid");
+    }
+  }
+
+  return None();
 }
 
 
@@ -626,15 +874,15 @@ Option<Error> validateFramework(
     Framework* framework)
 {
   foreach (const OfferID& offerId, offerIds) {
-    Offer* offer = getOffer(master, offerId);
-    if (offer == NULL) {
-      return Error("Offer " + stringify(offerId) + " is no longer valid");
+    Try<FrameworkID> offerFrameworkId = getFrameworkId(master, offerId);
+    if (offerFrameworkId.isError()) {
+      return offerFrameworkId.error();
     }
 
-    if (framework->id() != offer->framework_id()) {
+    if (framework->id() != offerFrameworkId.get()) {
       return Error(
-          "Offer " + stringify(offer->id()) +
-          " has invalid framework " + stringify(offer->framework_id()) +
+          "Offer " + stringify(offerId) +
+          " has invalid framework " + stringify(offerFrameworkId.get()) +
           " while framework " + stringify(framework->id()) + " is expected");
     }
   }
@@ -650,17 +898,17 @@ Option<Error> validateSlave(
   Option<SlaveID> slaveId;
 
   foreach (const OfferID& offerId, offerIds) {
-    Offer* offer = getOffer(master, offerId);
-    if (offer == NULL) {
-      return Error("Offer " + stringify(offerId) + " is no longer valid");
+    Try<SlaveID> offerSlaveId = getSlaveId(master, offerId);
+    if (offerSlaveId.isError()) {
+      return offerSlaveId.error();
     }
 
-    Slave* slave = getSlave(master, offer->slave_id());
+    Slave* slave = getSlave(master, offerSlaveId.get());
 
     // This is not possible because the offer should've been removed.
-    CHECK(slave != NULL)
+    CHECK(slave != nullptr)
       << "Offer " << offerId
-      << " outlived agent " << offer->slave_id();
+      << " outlived agent " << offerSlaveId.get();
 
     // This is not possible because the offer should've been removed.
     CHECK(slave->connected)
@@ -695,6 +943,33 @@ Option<Error> validate(
 
   vector<lambda::function<Option<Error>()>> validators = {
     lambda::bind(validateUniqueOfferID, offerIds),
+    lambda::bind(validateOfferIds, master, offerIds),
+    lambda::bind(validateFramework, offerIds, master, framework),
+    lambda::bind(validateSlave, offerIds, master)
+  };
+
+  foreach (const lambda::function<Option<Error>()>& validator, validators) {
+    Option<Error> error = validator();
+    if (error.isSome()) {
+      return error;
+    }
+  }
+
+  return None();
+}
+
+
+Option<Error> validateInverseOffers(
+    const RepeatedPtrField<OfferID>& offerIds,
+    Master* master,
+    Framework* framework)
+{
+  CHECK_NOTNULL(master);
+  CHECK_NOTNULL(framework);
+
+  vector<lambda::function<Option<Error>()>> validators = {
+    lambda::bind(validateUniqueOfferID, offerIds),
+    lambda::bind(validateInverseOfferIds, master, offerIds),
     lambda::bind(validateFramework, offerIds, master, framework),
     lambda::bind(validateSlave, offerIds, master)
   };
@@ -794,7 +1069,8 @@ Option<Error> validate(const Offer::Operation::Unreserve& unreserve)
 
 Option<Error> validate(
     const Offer::Operation::Create& create,
-    const Resources& checkpointedResources)
+    const Resources& checkpointedResources,
+    const Option<string>& principal)
 {
   Option<Error> error = resource::validate(create.volumes());
   if (error.isSome()) {
@@ -811,6 +1087,27 @@ Option<Error> validate(
 
   if (error.isSome()) {
     return error;
+  }
+
+  // Ensure that the provided principals match. If `principal` is `None`, then
+  // we allow `volume.disk().persistence().principal()` to take any value.
+  foreach (const Resource& volume, create.volumes()) {
+    if (principal.isSome()) {
+      if (!volume.disk().persistence().has_principal()) {
+        return Error(
+            "Create volume operation has been attempted by principal '" +
+            principal.get() + "', but there is a volume in the operation with "
+            "no principal set in 'DiskInfo.Persistence'");
+      }
+
+      if (volume.disk().persistence().principal() != principal.get()) {
+        return Error(
+            "Create volume operation has been attempted by principal '" +
+            principal.get() + "', but there is a volume in the operation with "
+            "principal '" + volume.disk().persistence().principal() +
+            "' set in 'DiskInfo.Persistence'");
+      }
+    }
   }
 
   return None();

@@ -70,7 +70,7 @@ if (WIN32)
 
   # COFF/PE and friends are somewhat limited in the number of sections they
   # allow for an object file. We use this to avoid those problems.
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /bigobj -DGOOGLE_GLOG_DLL_DECL= -DCURL_STATICLIB -D_SCL_SECURE_NO_WARNINGS /MP")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /bigobj -DGOOGLE_GLOG_DLL_DECL= -DCURL_STATICLIB -D_SCL_SECURE_NO_WARNINGS /vd2 /MP")
 
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
@@ -108,10 +108,15 @@ if (NOT WIN32)
   set(PKG_LIBEXEC_INSTALL_DIR ${LIBEXEC_INSTALL_DIR}/mesos)
   set(LIB_INSTALL_DIR         ${EXEC_INSTALL_PREFIX}/libmesos)
 else (NOT WIN32)
+  # TODO(hausdorff): (MESOS-5455) These are placeholder values. Transition away
+  # from them.
   set(EXEC_INSTALL_PREFIX     "WARNINGDONOTUSEME")
   set(LIBEXEC_INSTALL_DIR     "WARNINGDONOTUSEME")
   set(PKG_LIBEXEC_INSTALL_DIR "WARNINGDONOTUSEME")
   set(LIB_INSTALL_DIR         "WARNINGDONOTUSEME")
+  set(TEST_LIB_EXEC_DIR       "WARNINGDONOTUSEME")
+  set(PKG_MODULE_DIR          "WARNINGDONOTUSEME")
+  set(S_BIN_DIR               "WARNINGDONOTUSEME")
 endif (NOT WIN32)
 
 # Add preprocessor definitions required to build third-party libraries.
@@ -128,6 +133,16 @@ if (WIN32)
   # [2] https://code.google.com/p/google-glog/source/browse/trunk/src/windows/glog/logging.h?r=113
   add_definitions(-DNOGDI)
   add_definitions(-DNOMINMAX)
+else (WIN32)
+  # TODO(hausdorff): Remove our hard dependency on SASL, as some platforms
+  # (namely Windows) will not support it in the forseeable future. As a
+  # stop-gap, we conditionally compile the code in libmesos that depends on
+  # SASL, by always setting `HAS_AUTHENTICATION` on non-Windows platforms, and
+  # never setting it on Windows platforms. This means that non-Windows builds
+  # of libmesos will still take a hard dependency on SASL, while Windows builds
+  # won't. Currently, the dependency is still assumed throughout the tests,
+  # though the plan is to remove this hard dependency as well. See MESOS-5450.
+  add_definitions(-DHAS_AUTHENTICATION=1)
 endif (WIN32)
 
 # Enable the INT64 support for PicoJSON.

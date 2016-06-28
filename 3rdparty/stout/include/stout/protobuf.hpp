@@ -84,6 +84,19 @@ inline Try<Nothing> write(int fd, const google::protobuf::Message& message)
 }
 
 
+#ifdef __WINDOWS__
+// NOTE: Ordinarily this would go in a Windows-specific header; we put it here
+// to avoid complex forward declarations.
+inline Try<Nothing> write(
+    HANDLE handle,
+    const google::protobuf::Message& message)
+{
+  return write(
+      _open_osfhandle(reinterpret_cast<intptr_t>(handle), O_WRONLY), message);
+}
+#endif // __WINDOWS__
+
+
 // Write out the given sequence of protobuf messages to the
 // specified file descriptor by repeatedly invoking write
 // on each of the messages.
@@ -107,9 +120,16 @@ Try<Nothing> write(
 template <typename T>
 Try<Nothing> write(const std::string& path, const T& t)
 {
+  int operation_flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+#ifdef __WINDOWS__
+  // NOTE: Windows does automatic linefeed conversions in I/O on text files.
+  // We include the `_O_BINARY` flag here to avoid this.
+  operation_flags |= _O_BINARY;
+#endif // __WINDOWS__
+
   Try<int> fd = os::open(
       path,
-      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+      operation_flags,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd.isError()) {
@@ -131,9 +151,16 @@ inline Try<Nothing> append(
     const std::string& path,
     const google::protobuf::Message& message)
 {
+  int operation_flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC;
+#ifdef __WINDOWS__
+  // NOTE: Windows does automatic linefeed conversions in I/O on text files.
+  // We include the `_O_BINARY` flag here to avoid this.
+  operation_flags |= _O_BINARY;
+#endif // __WINDOWS__
+
   Try<int> fd = os::open(
       path,
-      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+      operation_flags,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd.isError()) {
@@ -148,6 +175,33 @@ inline Try<Nothing> append(
   os::close(fd.get());
 
   return result;
+}
+
+
+template <typename T>
+Try<T> deserialize(const std::string& value)
+{
+  T t;
+  (void) static_cast<google::protobuf::Message*>(&t);
+
+  google::protobuf::io::ArrayInputStream stream(value.data(), value.size());
+  if (!t.ParseFromZeroCopyStream(&stream)) {
+    return Error("Failed to deserialize " + t.GetDescriptor()->full_name());
+  }
+  return t;
+}
+
+
+template <typename T>
+Try<std::string> serialize(const T& t)
+{
+  (void) static_cast<const google::protobuf::Message*>(&t);
+
+  std::string value;
+  if (!t.SerializeToString(&value)) {
+    return Error("Failed to serialize " + t.GetDescriptor()->full_name());
+  }
+  return value;
 }
 
 
@@ -289,14 +343,38 @@ Result<T> read(int fd, bool ignorePartial = false, bool undoFailed = false)
 }
 
 
+#ifdef __WINDOWS__
+// NOTE: Ordinarily this would go in a Windows-specific header; we put it here
+// to avoid complex forward declarations.
+template <typename T>
+Result<T> read(
+    HANDLE handle,
+    bool ignorePartial = false,
+    bool undoFailed = false)
+{
+  return read<T>(
+      _open_osfhandle(reinterpret_cast<intptr_t>(handle), O_RDONLY),
+      ignorePartial,
+      undoFailed);
+}
+#endif // __WINDOWS__
+
+
 // A wrapper function that wraps the above read() with open and
 // closing the file.
 template <typename T>
 Result<T> read(const std::string& path)
 {
+  int operation_flags = O_RDONLY | O_CLOEXEC;
+#ifdef __WINDOWS__
+  // NOTE: Windows does automatic linefeed conversions in I/O on text files.
+  // We include the `_O_BINARY` flag here to avoid this.
+  operation_flags |= _O_BINARY;
+#endif // __WINDOWS__
+
   Try<int> fd = os::open(
       path,
-      O_RDONLY | O_CLOEXEC,
+      operation_flags,
       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd.isError()) {
@@ -381,7 +459,7 @@ struct Parser : boost::static_visitor<Try<Nothing> >
         const google::protobuf::EnumValueDescriptor* descriptor =
           field->enum_type()->FindValueByName(string.value);
 
-        if (descriptor == NULL) {
+        if (descriptor == nullptr) {
           return Error("Failed to find enum for '" + string.value + "'");
         }
 
@@ -518,7 +596,7 @@ inline Try<Nothing> parse(
     const google::protobuf::FieldDescriptor* field =
       message->GetDescriptor()->FindFieldByName(name);
 
-    if (field != NULL) {
+    if (field != nullptr) {
       Try<Nothing> apply =
         boost::apply_visitor(Parser(message, field), value);
 
@@ -544,7 +622,7 @@ struct Parse
                   "T must be a protobuf message");
 
     const JSON::Object* object = boost::get<JSON::Object>(&value);
-    if (object == NULL) {
+    if (object == nullptr) {
       return Error("Expecting a JSON object");
     }
 
@@ -580,7 +658,7 @@ struct Parse<google::protobuf::RepeatedPtrField<T>>
                   "T must be a protobuf message");
 
     const JSON::Array* array = boost::get<JSON::Array>(&value);
-    if (array == NULL) {
+    if (array == nullptr) {
       return Error("Expecting a JSON array");
     }
 
@@ -708,7 +786,7 @@ inline void json(ObjectWriter* writer, const Protobuf& protobuf)
                   break;
                 case FieldDescriptor::CPPTYPE_STRING:
                   const std::string& s = reflection->GetRepeatedStringReference(
-                      message, field, i, NULL);
+                      message, field, i, nullptr);
                   if (field->type() == FieldDescriptor::TYPE_BYTES) {
                     writer->element(base64::encode(s));
                   } else {
@@ -751,7 +829,7 @@ inline void json(ObjectWriter* writer, const Protobuf& protobuf)
           break;
         case FieldDescriptor::CPPTYPE_STRING:
           const std::string& s = reflection->GetStringReference(
-              message, field, NULL);
+              message, field, nullptr);
           if (field->type() == FieldDescriptor::TYPE_BYTES) {
             writer->field(field->name(), base64::encode(s));
           } else {

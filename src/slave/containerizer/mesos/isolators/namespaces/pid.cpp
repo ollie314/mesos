@@ -199,7 +199,7 @@ Future<Nothing> NamespacesPidIsolatorProcess::isolate(
     return Failure("Failed to create bind mount target: " + touch.error());
   }
 
-  Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, NULL);
+  Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, nullptr);
   if (mount.isError()) {
     return Failure(
         "Failed to mount pid namespace handle from " +
@@ -207,28 +207,6 @@ Future<Nothing> NamespacesPidIsolatorProcess::isolate(
   }
 
   return Nothing();
-}
-
-
-Future<ContainerLimitation> NamespacesPidIsolatorProcess::watch(
-    const ContainerID& containerId)
-{
-  return Future<ContainerLimitation>();
-}
-
-
-Future<Nothing> NamespacesPidIsolatorProcess::update(
-    const ContainerID& containerId,
-    const Resources& resources)
-{
-  return Nothing();
-}
-
-
-Future<ResourceStatistics> NamespacesPidIsolatorProcess::usage(
-    const ContainerID& containerId)
-{
-  return ResourceStatistics();
 }
 
 

@@ -81,16 +81,18 @@ This guide describes the process of doing an official release of Mesos.
 
 3. If not already done, update and commit `configure.ac` for the release.
 
-4. Update and commit `docs/configuration.md` to reflect the current state of
+4. Run `support/generate-endpoint-help.py` and commit any resulting changes.
+
+5. Update and commit `docs/configuration.md` to reflect the current state of
    the master, agent, and configure flags.
 
-5. Update and commit `docs/upgrades.md` with instructions about how to upgrade
+6. Update and commit `docs/upgrades.md` with instructions about how to upgrade
    a live cluster from the previous release version to this release version.
 
-6. If this is a major release, please ensure that user documentation has been
+7. If this is a major release, please ensure that user documentation has been
    added for any new features.
 
-7. Make sure that for any updates of the API, specifically the scheduler API, the public mesos protobuf definitions are part of both, `include/mesos` as well as `include/mesos/v1`. NOTE: This might actually demand code updates if any omissions were identified.
+8. Make sure that for any updates of the API, specifically the scheduler API, the public mesos protobuf definitions are part of both, `include/mesos` as well as `include/mesos/v1`. NOTE: This might actually demand code updates if any omissions were identified.
 
 ## Tagging the release candidate
 
@@ -175,19 +177,18 @@ Update the wiki entry, [Mesos Release Planning](https://cwiki.apache.org/conflue
 
 ## Updating the website
 
-1. After a successful release, please update the website pointing to the new release.
-   See our [website README](https://github.com/apache/mesos/blob/master/site/README.md/) and
-   the general [Apache project website guide](https://www.apache.org/dev/project-site.html)
-   for details on how to build and publish the website.
+1. After a successful release, add the information associated with the release in `site/data/releases.yml`. It is used to generate the release information on the website.
+
+2. Update the [Getting Started](getting-started.md) guide to use the latest release link.
+
+3. Check out the website from svn.
 
         $ svn co https://svn.apache.org/repos/asf/mesos/site mesos-site
 
-2. Update doxygen and javadoc pages for the website. For more information, see
-   [website README](https://github.com/apache/mesos/blob/master/site/README.md/).
+   See our [website README](https://github.com/apache/mesos/blob/master/site/README.md/) for details on how to build the website.
+   See the general [Apache project website guide](https://www.apache.org/dev/project-site.html) for details on how to publish the website.
 
-3. Write a blog post announcing the new release and its features and major bug fixes.
-
-4. Update the Getting Started guide to use the latest release link.
+4. Write a blog post announcing the new release and its features and major bug fixes. Include a link to the updated website.
 
 ## Remove old releases from svn
 

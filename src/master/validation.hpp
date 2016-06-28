@@ -24,6 +24,8 @@
 
 #include <mesos/scheduler/scheduler.hpp>
 
+#include <mesos/master/master.hpp>
+
 #include <stout/error.hpp>
 #include <stout/option.hpp>
 
@@ -38,10 +40,22 @@ struct Slave;
 
 namespace validation {
 
+namespace master {
+namespace call {
+
+// Validates that a master:Call is well-formed.
+// TODO(bmahler): Add unit tests.
+Option<Error> validate(
+    const mesos::master::Call& call,
+    const Option<std::string>& principal = None());
+
+} // namespace call {
+} // namespace master {
+
 namespace scheduler {
 namespace call {
 
-// Validates that a scheduler call is well-formed.
+// Validates that a scheduler::Call is well-formed.
 // TODO(bmahler): Add unit tests.
 Option<Error> validate(
     const mesos::scheduler::Call& call,
@@ -94,11 +108,19 @@ namespace offer {
 // NOTE: These two functions are placed in the header file because we
 // need to declare them as friends of Master.
 Offer* getOffer(Master* master, const OfferID& offerId);
+InverseOffer* getInverseOffer(Master* master, const OfferID& offerId);
 Slave* getSlave(Master* master, const SlaveID& slaveId);
 
 
 // Validates the given offers.
 Option<Error> validate(
+    const google::protobuf::RepeatedPtrField<OfferID>& offerIds,
+    Master* master,
+    Framework* framework);
+
+
+// Validates the given inverse offers.
+Option<Error> validateInverseOffers(
     const google::protobuf::RepeatedPtrField<OfferID>& offerIds,
     Master* master,
     Framework* framework);
@@ -118,11 +140,13 @@ Option<Error> validate(
 Option<Error> validate(const Offer::Operation::Unreserve& unreserve);
 
 
-// Validates the CREATE operation. We need slave's checkpointed
-// resources so that we can validate persistence ID uniqueness.
+// Validates the CREATE operation. We need slave's checkpointed resources so
+// that we can validate persistence ID uniqueness, and we need the principal to
+// verify that it's equal to the one in `DiskInfo.Persistence.principal`.
 Option<Error> validate(
     const Offer::Operation::Create& create,
-    const Resources& checkpointedResources);
+    const Resources& checkpointedResources,
+    const Option<std::string>& principal);
 
 
 // Validates the DESTROY operation. We need slave's checkpointed

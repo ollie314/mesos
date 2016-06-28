@@ -20,6 +20,8 @@
 #include <stout/flags.hpp>
 #include <stout/json.hpp>
 #include <stout/option.hpp>
+#include <stout/os.hpp>
+#include <stout/path.hpp>
 
 #include <mesos/type_utils.hpp>
 
@@ -90,8 +92,7 @@ mesos::internal::slave::Flags::Flags()
       "Isolation mechanisms to use, e.g., `posix/cpu,posix/mem`, or\n"
       "`cgroups/cpu,cgroups/mem`, or network/port_mapping\n"
       "(configure with flag: `--with-network-isolator` to enable),\n"
-      "or `cgroups/devices/gpus/nvidia` for nvidia specific gpu isolation\n"
-      "(configure with flag: `--enable-nvidia-gpu-support` to enable),\n"
+      "or `gpu/nvidia` for nvidia specific gpu isolation,\n"
       "or `external`, or load an alternate isolator module using\n"
       "the `--modules` flag. Note that this flag is only relevant\n"
       "for the Mesos Containerizer.",
@@ -113,19 +114,19 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::image_provisioner_backend,
       "image_provisioner_backend",
       "Strategy for provisioning container rootfs from images,\n"
-      "e.g., `bind`, `copy`, `overlay`.",
+      "e.g., `aufs`, `bind`, `copy`, `overlay`.",
       "copy");
 
   add(&Flags::appc_simple_discovery_uri_prefix,
       "appc_simple_discovery_uri_prefix",
       "URI prefix to be used for simple discovery of appc images,\n"
-      "e.g., 'http://', 'https://', 'hdfs://<hostname>:9000/user/abc/cde'.",
+      "e.g., `http://`, `https://`, `hdfs://<hostname>:9000/user/abc/cde`.",
       "http://");
 
   add(&Flags::appc_store_dir,
       "appc_store_dir",
       "Directory the appc provisioner will store images in.\n",
-      "/tmp/mesos/store/appc");
+      path::join(os::temp(), "mesos", "store", "appc"));
 
   add(&Flags::docker_registry,
       "docker_registry",
@@ -138,7 +139,7 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::docker_store_dir,
       "docker_store_dir",
       "Directory the Docker provisioner will store images in",
-      "/tmp/mesos/store/docker");
+      path::join(os::temp(), "mesos", "store", "docker"));
 
   add(&Flags::docker_volume_checkpoint_dir,
       "docker_volume_checkpoint_dir",
@@ -177,11 +178,16 @@ mesos::internal::slave::Flags::Flags()
       "fetcher_cache_dir",
       "Parent directory for fetcher cache directories\n"
       "(one subdirectory per agent).",
-      "/tmp/mesos/fetch");
+      path::join(os::temp(), "mesos", "fetch"));
 
   add(&Flags::work_dir,
       "work_dir",
-      "Directory path to place framework work directories\n", "/tmp/mesos");
+      "Path of the agent work directory. This is where executor sandboxes\n"
+      "will be placed, as well as the agent's checkpointed state in case of\n"
+      "failover. Note that locations like `/tmp` which are cleaned\n"
+      "automatically are not suitable for the work directory when running in\n"
+      "production, since long-running agents could lose data when cleanup\n"
+      "occurs. (Example: `/var/lib/mesos/agent`)");
 
   add(&Flags::launcher_dir, // TODO(benh): This needs a better name.
       "launcher_dir",
@@ -231,8 +237,8 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::executor_environment_variables,
       "executor_environment_variables",
       "JSON object representing the environment variables that should be\n"
-      "passed to the executor, and thus subsequently task(s). By default the\n"
-      "executor will inherit the agent's environment variables.\n"
+      "passed to the executor, and thus subsequently task(s). By default this\n"
+      "flag is none. Users have to define executor environment explicitly.\n"
       "Example:\n"
       "{\n"
       "  \"PATH\": \"/bin:/usr/bin\",\n"
@@ -373,6 +379,16 @@ mesos::internal::slave::Flags::Flags()
       "Present functionality is intended for resource monitoring and\n"
       "no cgroup limits are set, they are inherited from the root mesos\n"
       "cgroup.");
+
+  add(&Flags::nvidia_gpu_devices,
+      "nvidia_gpu_devices",
+      "A comma-separated list of Nvidia GPU devices. When `gpus` is\n"
+      "specified in the `--resources` flag, this flag determines which GPU\n"
+      "devices will be made available. The devices should be listed as\n"
+      "numbers that correspond to Nvidia's NVML device enumeration (as\n"
+      "seen by running the command `nvidia-smi` on an Nvidia GPU\n"
+      "equipped system).  The GPUs listed will only be isolated if the\n"
+      "`--isolation` flag contains the string `gpu/nvidia`.");
 
   add(&Flags::perf_events,
       "perf_events",
@@ -564,32 +580,20 @@ mesos::internal::slave::Flags::Flags()
       "  \"type\": \"MESOS\",\n"
       "  \"volumes\": [\n"
       "    {\n"
-      "      \"host_path\": \"./.private/tmp\",\n"
+      "      \"host_path\": \".private/tmp\",\n"
       "      \"container_path\": \"/tmp\",\n"
       "      \"mode\": \"RW\"\n"
       "    }\n"
       "  ]\n"
       "}");
 
-  // TODO(alexr): Remove this after the deprecation cycle (started in 0.29).
+  // TODO(alexr): Remove this after the deprecation cycle (started in 1.0).
   add(&Flags::docker_stop_timeout,
       "docker_stop_timeout",
       "The time docker daemon waits after stopping a container before\n"
       "killing that container. This flag is deprecated; use task's kill\n"
       "policy instead.",
       Seconds(0));
-
-#ifdef ENABLE_NVIDIA_GPU_SUPPORT
-  add(&Flags::nvidia_gpu_devices,
-      "nvidia_gpu_devices",
-      "A comma-separated list of Nvidia GPU devices. When `gpus` is\n"
-      "specified in the `--resources` flag, this flag determines which GPU\n"
-      "devices will be made available. The devices should be listed as\n"
-      "numbers that correspond to Nvidia's NVML device enumeration (as\n"
-      "seen by running the command `nvidia-smi` on an Nvidia GPU\n"
-      "equipped system).  The GPUs listed will only be isolated if the\n"
-      "`--isolation` flag contains the string `cgroups/devices/gpus/nvidia`.");
-#endif // ENABLE_NVIDIA_GPU_SUPPORT
 
 #ifdef WITH_NETWORK_ISOLATOR
   add(&Flags::ephemeral_ports_per_container,
@@ -675,7 +679,7 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::container_disk_watch_interval,
       "container_disk_watch_interval",
       "The interval between disk quota checks for containers. This flag is\n"
-      "used for the `posix/disk` isolator.",
+      "used for the `disk/du` isolator.",
       Seconds(15));
 
   // TODO(jieyu): Consider enabling this flag by default. Remember
@@ -683,11 +687,11 @@ mesos::internal::slave::Flags::Flags()
   add(&Flags::enforce_container_disk_quota,
       "enforce_container_disk_quota",
       "Whether to enable disk quota enforcement for containers. This flag\n"
-      "is used for the `posix/disk` isolator.",
+      "is used for the `disk/du` isolator.",
       false);
 
   // This help message for --modules flag is the same for
-  // {master,slave,tests}/flags.hpp and should always be kept in
+  // {master,slave,sched,tests}/flags.[ch]pp and should always be kept in
   // sync.
   // TODO(karya): Remove the JSON example and add reference to the
   // doc file explaining the --modules flag.
@@ -732,6 +736,16 @@ mesos::internal::slave::Flags::Flags()
       "    }\n"
       "  ]\n"
       "}");
+
+  // This help message for --modules_dir flag is the same for
+  // {master,slave,sched,tests}/flags.[ch]pp and should always be kept in
+  // sync.
+  add(&Flags::modulesDir,
+      "modules_dir",
+      "Directory path of the module manifest files.\n"
+      "The manifest files are processed in alphabetical order.\n"
+      "(See --modules for more information on module manifest files)\n"
+      "Cannot be used in conjunction with --modules.\n");
 
   add(&Flags::authenticatee,
       "authenticatee",

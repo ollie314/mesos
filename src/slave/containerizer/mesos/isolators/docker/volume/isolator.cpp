@@ -244,8 +244,8 @@ Try<Nothing> DockerVolumeIsolatorProcess::_recover(
 
     if (volumes.contains(volume)) {
       return Error(
-          "Duplicate docker volume with driver '" + volume.driver() +
-          "' and name '" + volume.name() + "'");
+          "Duplicate docker volume with driver '" + volume.driver() + "' "
+          "and name '" + volume.name() + "'");
     }
 
     volumes.insert(volume);
@@ -301,8 +301,14 @@ Future<Option<ContainerLaunchInfo>> DockerVolumeIsolatorProcess::prepare(
       continue;
     }
 
-    const string& driver = _volume.source().docker_volume().driver();
     const string& name = _volume.source().docker_volume().name();
+
+    if (!_volume.source().docker_volume().has_driver()) {
+      return Failure("The volume driver is not specified for volume '" +
+                     name + "' with container " + stringify(containerId));
+    }
+
+    const string& driver = _volume.source().docker_volume().driver();
 
     DockerVolume volume;
     volume.set_driver(driver);
@@ -351,7 +357,8 @@ Future<Option<ContainerLaunchInfo>> DockerVolumeIsolatorProcess::prepare(
         target = _volume.container_path();
 
         if (!os::exists(target)) {
-          return Failure("Absolute container path does not exist");
+          return Failure("Absolute container path '" + target + "' "
+                         "does not exist");
         }
       }
     } else {
@@ -490,36 +497,6 @@ Future<Option<ContainerLaunchInfo>> DockerVolumeIsolatorProcess::_prepare(
   }
 
   return launchInfo;
-}
-
-
-Future<Nothing> DockerVolumeIsolatorProcess::isolate(
-    const ContainerID& containerId,
-    pid_t pid)
-{
-  return Nothing();
-}
-
-
-Future<ContainerLimitation> DockerVolumeIsolatorProcess::watch(
-    const ContainerID& containerId)
-{
-  return Future<ContainerLimitation>();
-}
-
-
-Future<Nothing> DockerVolumeIsolatorProcess::update(
-    const ContainerID& containerId,
-    const Resources& resources)
-{
-  return Nothing();
-}
-
-
-Future<ResourceStatistics> DockerVolumeIsolatorProcess::usage(
-    const ContainerID& containerId)
-{
-  return ResourceStatistics();
 }
 
 

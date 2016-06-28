@@ -168,6 +168,107 @@ TEST_F(DockerSpecTest, GetRegistrySpec)
 }
 
 
+// This test verifies docker::spec::parseAuthConfig works as expected
+// for new docker config file format (e.g., ~/.docker/config.json).
+TEST_F(DockerSpecTest, ParseDockerConfig)
+{
+  Try<JSON::Object> config = JSON::parse<JSON::Object>(
+      R"~(
+      {
+        "auths": {
+          "https://index.docker.io/v1/": {
+            "auth": "bWVzb3M6dGVzdA==",
+            "email": "user@example.com"
+          },
+          "localhost:5000": {
+            "auth": "dW5pZmllZDpjb250YWluZXJpemVy",
+            "email": "user@example.com"
+          }
+        },
+        "HttpHeaders": {
+          "User-Agent": "Docker-Client/1.10.2 (linux)"
+        }
+      })~");
+
+  ASSERT_SOME(config);
+
+  Try<hashmap<string, spec::Config::Auth>> map =
+    spec::parseAuthConfig(config.get());
+
+  EXPECT_EQ("bWVzb3M6dGVzdA==",
+            map.get()["https://index.docker.io/v1/"].auth());
+
+  EXPECT_EQ("user@example.com",
+            map.get()["https://index.docker.io/v1/"].email());
+
+  EXPECT_EQ("dW5pZmllZDpjb250YWluZXJpemVy", map.get()["localhost:5000"].auth());
+  EXPECT_EQ("user@example.com", map.get()["localhost:5000"].email());
+}
+
+
+// This test verifies docker::spec::parseAuthConfig works as expected
+// for old docker config file format (e.g., ~/.dockercfg).
+TEST_F(DockerSpecTest, ParseDockercfg)
+{
+  Try<JSON::Object> dockercfg = JSON::parse<JSON::Object>(
+      R"~(
+      {
+        "quay.io": {
+          "auth": "cXVheTp0ZXN0",
+          "email": "user@example.com"
+        },
+        "https://index.docker.io/v1/": {
+          "auth": "cHJpdmF0ZTpyZWdpc3RyeQ==",
+          "email": "user@example.com"
+        },
+        "https://192.168.0.1:5050": {
+          "auth": "aXA6YWRkcmVzcw==",
+          "email": "user@example.com"
+        }
+      })~");
+
+  ASSERT_SOME(dockercfg);
+
+  Try<hashmap<string, spec::Config::Auth>> map =
+    spec::parseAuthConfig(dockercfg.get());
+
+  EXPECT_EQ("cXVheTp0ZXN0", map.get()["quay.io"].auth());
+  EXPECT_EQ("user@example.com", map.get()["quay.io"].email());
+
+  EXPECT_EQ("cHJpdmF0ZTpyZWdpc3RyeQ==",
+            map.get()["https://index.docker.io/v1/"].auth());
+
+  EXPECT_EQ("user@example.com",
+            map.get()["https://index.docker.io/v1/"].email());
+
+  EXPECT_EQ("aXA6YWRkcmVzcw==", map.get()["https://192.168.0.1:5050"].auth());
+  EXPECT_EQ("user@example.com", map.get()["https://192.168.0.1:5050"].email());
+}
+
+
+TEST_F(DockerSpecTest, ParseAuthUrl)
+{
+  EXPECT_EQ("registry.example.com",
+            spec::parseAuthUrl("https://registry.example.com/v1/"));
+  EXPECT_EQ("registry.example.com",
+            spec::parseAuthUrl("http://registry.example.com/v1/"));
+  EXPECT_EQ("registry.example.com",
+            spec::parseAuthUrl("registry.example.com"));
+  EXPECT_EQ("registry.example.com",
+            spec::parseAuthUrl("registry.example.com/v1/"));
+
+  EXPECT_EQ("localhost:8000", spec::parseAuthUrl("https://localhost:8000/v1/"));
+  EXPECT_EQ("localhost:8000", spec::parseAuthUrl("http://localhost:8000/v1/"));
+  EXPECT_EQ("localhost:8000", spec::parseAuthUrl("localhost:8000"));
+  EXPECT_EQ("localhost:8000", spec::parseAuthUrl("localhost:8000/v1/"));
+
+  EXPECT_EQ("registry.com", spec::parseAuthUrl("https://registry.com/v1/"));
+  EXPECT_EQ("registry.com", spec::parseAuthUrl("http://registry.com/v1/"));
+  EXPECT_EQ("registry.com", spec::parseAuthUrl("registry.com"));
+  EXPECT_EQ("registry.com", spec::parseAuthUrl("registry.com/v1/"));
+}
+
+
 TEST_F(DockerSpecTest, ParseV1ImageManifest)
 {
   Try<JSON::Object> json = JSON::parse<JSON::Object>(
@@ -197,7 +298,10 @@ TEST_F(DockerSpecTest, ParseV1ImageManifest)
           "Tty": false,
           "Domainname": "",
           "Image": "cfa753dfea5e68a24366dfba16e6edf573daa447abf65bc11619c1a98a3aff54",
-          "Labels": null,
+          "Labels": {
+            "com.nvidia.cuda.version": "7.5",
+            "com.nvidia.volumes.needed": "nvidia_driver"
+          },
           "ExposedPorts": null
         },
         "container_config": {
@@ -230,7 +334,10 @@ TEST_F(DockerSpecTest, ParseV1ImageManifest)
           "Tty": false,
           "Domainname": "",
           "Image": "cfa753dfea5e68a24366dfba16e6edf573daa447abf65bc11619c1a98a3aff54",
-          "Labels": null,
+          "Labels": {
+            "com.nvidia.caffe.version": "0.14",
+            "com.nvidia.digits.version": "3.0"
+          },
           "ExposedPorts": null
         },
         "architecture": "amd64",
@@ -280,7 +387,39 @@ TEST_F(DockerSpecTest, ParseV1ImageManifest)
       "#(nop) CMD [\"sh\"]",
       manifest.get().container_config().cmd(2));
 
+  EXPECT_EQ(
+      "com.nvidia.caffe.version",
+      manifest.get().container_config().labels(0).key());
+
+  EXPECT_EQ(
+      "0.14",
+      manifest.get().container_config().labels(0).value());
+
+  EXPECT_EQ(
+      "com.nvidia.digits.version",
+      manifest.get().container_config().labels(1).key());
+
+  EXPECT_EQ(
+      "3.0",
+      manifest.get().container_config().labels(1).value());
+
   EXPECT_EQ("sh", manifest.get().config().cmd(0));
+
+  EXPECT_EQ(
+      "com.nvidia.cuda.version",
+      manifest.get().config().labels(0).key());
+
+  EXPECT_EQ(
+      "7.5",
+      manifest.get().config().labels(0).value());
+
+  EXPECT_EQ(
+      "com.nvidia.volumes.needed",
+      manifest.get().config().labels(1).key());
+
+  EXPECT_EQ(
+      "nvidia_driver",
+      manifest.get().config().labels(1).value());
 
   EXPECT_EQ("1.8.2", manifest.get().docker_version());
   EXPECT_EQ("amd64", manifest.get().architecture());

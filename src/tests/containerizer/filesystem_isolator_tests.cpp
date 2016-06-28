@@ -525,7 +525,10 @@ TEST_F(LinuxFilesystemIsolatorTest,
       Megabytes(64),
       "role1",
       "id1",
-      "path1");
+      "path1",
+      None(),
+      None(),
+      frameworkInfo.principal());
 
   // We use the filter explicitly here so that the resources will not
   // be filtered for 5 seconds (the default).
@@ -605,7 +608,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_RecoverOrphanedPersistentVolume)
   slave::Flags flags = CreateSlaveFlags();
   flags.image_provisioner_backend = "copy";
   flags.resources = "cpus:2;mem:1024;disk(role1):1024";
-  flags.isolation = "posix/disk,filesystem/linux";
+  flags.isolation = "disk/du,filesystem/linux";
 
   Try<Owned<MesosContainerizer>> containerizer = createContainerizer(
       flags,
@@ -655,7 +658,10 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_RecoverOrphanedPersistentVolume)
       Megabytes(64),
       "role1",
       "id1",
-      "path1");
+      "path1",
+      None(),
+      None(),
+      frameworkInfo.principal());
 
   // Create a task that does nothing for a long time.
   TaskInfo task = createTask(
@@ -1468,7 +1474,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeUsageExceedsSandboxQuota)
   ASSERT_SOME(master);
 
   slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/disk,filesystem/linux";
+  flags.isolation = "disk/du,filesystem/linux";
 
   // NOTE: We can't pause the clock because we need the reaper to reap
   // the 'du' subprocess.
@@ -1512,7 +1518,10 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeUsageExceedsSandboxQuota)
       Megabytes(4),
       "role1",
       "id1",
-      "volume_path");
+      "volume_path",
+      None(),
+      None(),
+      frameworkInfo.principal());
 
   Resources taskResources =
       Resources::parse("cpus:1;mem:64;disk(role1):1").get() + volume;

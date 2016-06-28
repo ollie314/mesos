@@ -13,7 +13,7 @@ role does not have a weight specified in the `--weights` flag, then the default
 value (1.0) will be used. Weights cannot be changed without updating the flag
 and restarting all Mesos masters.
 
-Mesos 0.29 contains a [/weights](endpoints/master/weights.md) operator endpoint
+Mesos 1.0 contains a [/weights](endpoints/master/weights.md) operator endpoint
 that allows weights to be changed at runtime. The `--weights` command-line flag
 is deprecated.
 
@@ -35,12 +35,12 @@ The operator can update the weights by sending an HTTP PUT request to the `/weig
 endpoint.
 
 An example request to the `/weights` endpoint could look like this (using the
-JSON definitions below):
+JSON file below):
 
-    $ curl -d jsonMessageBody -X PUT http://<master-ip>:<port>/weights
+    $ curl -d @weights.json -X PUT http://<master-ip>:<port>/weights
 
 For example, to set a weight of `2.0` for `role1` and set a weight of `3.5`
-for `role2`, the operator can use the following `jsonMessageBody`:
+for `role2`, the operator can use the following `weights.json`:
 
         [
           {

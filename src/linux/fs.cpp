@@ -47,6 +47,8 @@ namespace fs {
 
 Try<bool> supported(const std::string& fsname)
 {
+  hashset<string> overlayfs{"overlay", "overlayfs"};
+
   Try<string> lines = os::read("/proc/filesystems");
   if (lines.isError()) {
     return Error("Failed to read /proc/filesystems: " + lines.error());
@@ -60,29 +62,17 @@ Try<bool> supported(const std::string& fsname)
     if (tokens.size() != 1 && tokens.size() != 2) {
       return Error("Failed to parse /proc/filesystems: '" + line + "'");
     }
+
+    // The "overlayfs" was renamed to "overlay" in kernel 4.2, for overlay
+    // support check function, it should check both "overlay" and "overlayfs"
+    // in "/proc/filesystems".
+    if (overlayfs.contains(fsname) && overlayfs.contains(tokens.back())) {
+      return true;
+    }
+
     if (fsname == tokens.back()) {
       return true;
     }
-  }
-
-  return false;
-}
-
-
-Try<bool> overlay::supported()
-{
-  Try<bool> overlay = fs::supported("overlay");
-  if (overlay.isError()) {
-    return Error(overlay.error());
-  } else if (overlay.get() == true) {
-    return true;
-  }
-
-  Try<bool> overlayfs = fs::supported("overlayfs");
-  if (overlayfs.isError()) {
-    return Error(overlayfs.error());
-  } else if (overlayfs.get() == true) {
-    return true;
   }
 
   return false;
@@ -232,7 +222,7 @@ bool MountTable::Entry::hasOption(const string& option) const
   mntent.mnt_opts = const_cast<char*>(opts.c_str());
   mntent.mnt_freq = freq;
   mntent.mnt_passno = passno;
-  return ::hasmntopt(&mntent, option.c_str()) != NULL;
+  return ::hasmntopt(&mntent, option.c_str()) != nullptr;
 }
 
 
@@ -241,7 +231,7 @@ Try<MountTable> MountTable::read(const string& path)
   MountTable table;
 
   FILE* file = ::setmntent(path.c_str(), "r");
-  if (file == NULL) {
+  if (file == nullptr) {
     return Error("Failed to open '" + path + "'");
   }
 
@@ -252,8 +242,8 @@ Try<MountTable> MountTable::read(const string& path)
     char strBuffer[PATH_MAX];
     struct mntent* mntent =
       ::getmntent_r(file, &mntentBuffer, strBuffer, sizeof(strBuffer));
-    if (mntent == NULL) {
-      // NULL means the end of enties.
+    if (mntent == nullptr) {
+      // nullptr means the end of enties.
       break;
     }
 
@@ -272,8 +262,8 @@ Try<MountTable> MountTable::read(const string& path)
 
     synchronized (mutex) {
       struct mntent* mntent = ::getmntent(file);
-      if (mntent == NULL) {
-        // NULL means the end of enties.
+      if (mntent == nullptr) {
+        // nullptr means the end of enties.
         break;
       }
 
@@ -294,46 +284,6 @@ Try<MountTable> MountTable::read(const string& path)
 }
 
 
-Try<FileSystemTable> FileSystemTable::read()
-{
-  // Mutex for guarding calls into non-reentrant fstab functions. We
-  // use a static local variable to avoid unused variable warnings.
-  static std::mutex mutex;
-
-  FileSystemTable table;
-
-  // Use locks since fstab functions are not thread-safe.
-  synchronized (mutex) {
-    // Open file _PATH_FSTAB (/etc/fstab).
-    if (::setfsent() == 0) {
-      return Error("Failed to open file system table");
-    }
-
-    while (true) {
-      struct fstab* fstab = ::getfsent();
-      if (fstab == NULL) {
-        break; // NULL means the end of enties.
-      }
-
-      FileSystemTable::Entry entry(
-          fstab->fs_spec,
-          fstab->fs_file,
-          fstab->fs_vfstype,
-          fstab->fs_mntops,
-          fstab->fs_type,
-          fstab->fs_freq,
-          fstab->fs_passno);
-
-      table.entries.push_back(entry);
-    }
-
-    ::endfsent();
-  }
-
-  return table;
-}
-
-
 Try<Nothing> mount(const Option<string>& source,
                    const string& target,
                    const Option<string>& type,
@@ -347,9 +297,9 @@ Try<Nothing> mount(const Option<string>& source,
   //           unsigned long mountflags,
   //           const void *data);
   if (::mount(
-        (source.isSome() ? source.get().c_str() : NULL),
+        (source.isSome() ? source.get().c_str() : nullptr),
         target.c_str(),
-        (type.isSome() ? type.get().c_str() : NULL),
+        (type.isSome() ? type.get().c_str() : nullptr),
         flags,
         data) < 0) {
     return ErrnoError();
@@ -370,7 +320,7 @@ Try<Nothing> mount(const Option<string>& source,
       target,
       type,
       flags,
-      options.isSome() ? options.get().c_str() : NULL);
+      options.isSome() ? options.get().c_str() : nullptr);
 }
 
 
@@ -574,6 +524,7 @@ Try<Nothing> createStandardDevices(const string& root)
   }
 
   vector<SymLink> symlinks = {
+    {"/proc/self/fd",   path::join(root, "dev", "fd")},
     {"/proc/self/fd/0", path::join(root, "dev", "stdin")},
     {"/proc/self/fd/1", path::join(root, "dev", "stdout")},
     {"/proc/self/fd/2", path::join(root, "dev", "stderr")},
@@ -599,14 +550,16 @@ Try<Nothing> createStandardDevices(const string& root)
 Try<Nothing> enter(const string& root)
 {
   // Recursively mark current mounts as slaves to prevent propagation.
-  Try<Nothing> mount = fs::mount(None(), "/", None(), MS_REC | MS_SLAVE, NULL);
+  Try<Nothing> mount =
+    fs::mount(None(), "/", None(), MS_REC | MS_SLAVE, nullptr);
+
   if (mount.isError()) {
     return Error("Failed to make slave mounts: " + mount.error());
   }
 
   // Bind mount 'root' itself. This is because pivot_root requires
   // 'root' to be not on the same filesystem as process' current root.
-  mount = fs::mount(root, root, None(), MS_REC | MS_BIND, NULL);
+  mount = fs::mount(root, root, None(), MS_REC | MS_BIND, nullptr);
   if (mount.isError()) {
     return Error("Failed to bind mount root itself: " + mount.error());
   }

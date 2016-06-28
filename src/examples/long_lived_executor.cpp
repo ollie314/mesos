@@ -113,7 +113,7 @@ protected:
 
         case Event::ACKNOWLEDGED: {
           // Remove the corresponding update.
-          updates.erase(UUID::fromBytes(event.acknowledged().uuid()));
+          updates.erase(UUID::fromBytes(event.acknowledged().uuid()).get());
 
           // Remove the corresponding task.
           tasks.erase(event.acknowledged().task_id());
@@ -202,7 +202,7 @@ protected:
     std::thread thread([=]() {
       os::sleep(Seconds(random() % 10));
 
-      update(task, TaskState::TASK_FINISHED);
+      process::dispatch(self(), &Self::update, task, TaskState::TASK_FINISHED);
     });
 
     thread.detach();

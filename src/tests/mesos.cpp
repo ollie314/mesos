@@ -73,9 +73,25 @@ namespace internal {
 namespace tests {
 
 #ifdef MESOS_HAS_JAVA
-ZooKeeperTestServer* MesosZooKeeperTest::server = NULL;
+ZooKeeperTestServer* MesosZooKeeperTest::server = nullptr;
 Option<zookeeper::URL> MesosZooKeeperTest::url;
 #endif // MESOS_HAS_JAVA
+
+void MesosTest::SetUpTestCase()
+{
+  // We set the connection delay used by the scheduler library to 0.
+  // This is done to speed up the tests.
+  os::setenv("MESOS_CONNECTION_DELAY_MAX", "0ms");
+}
+
+
+void MesosTest::TearDownTestCase()
+{
+  os::unsetenv("MESOS_CONNECTION_DELAY_MAX");
+
+  SSLTemporaryDirectoryTest::TearDownTestCase();
+}
+
 
 MesosTest::MesosTest(const Option<zookeeper::URL>& _zookeeperUrl)
   : zookeeperUrl(_zookeeperUrl) {}
@@ -236,7 +252,7 @@ Try<Owned<cluster::Master>> MesosTest::StartMaster(
 
 
 Try<Owned<cluster::Master>> MesosTest::StartMaster(
-    mesos::master::allocator::Allocator* allocator,
+    mesos::allocator::Allocator* allocator,
     const Option<master::Flags>& flags)
 {
   return cluster::Master::start(
@@ -400,6 +416,25 @@ Try<Owned<cluster::Slave>> MesosTest::StartSlave(
       flags.isNone() ? CreateSlaveFlags() : flags.get(),
       None(),
       None(),
+      None(),
+      None(),
+      None(),
+      None(),
+      authorizer);
+}
+
+
+Try<Owned<cluster::Slave>> MesosTest::StartSlave(
+    mesos::master::detector::MasterDetector* detector,
+    slave::Containerizer* containerizer,
+    mesos::Authorizer* authorizer,
+    const Option<slave::Flags>& flags)
+{
+  return cluster::Slave::start(
+      detector,
+      flags.isNone() ? CreateSlaveFlags() : flags.get(),
+      None(),
+      containerizer,
       None(),
       None(),
       None(),
@@ -670,11 +705,25 @@ MockDockerContainerizerProcess::~MockDockerContainerizerProcess() {}
 
 MockAuthorizer::MockAuthorizer()
 {
+  // Implementation of the ObjectApprover interface authorizing all objects.
+  class ObjectApproverAll : public ObjectApprover
+  {
+  public:
+    virtual Try<bool> approved(
+        const Option<ObjectApprover::Object>& object) const noexcept override
+    {
+      return true;
+    }
+  };
+
   // NOTE: We use 'EXPECT_CALL' and 'WillRepeatedly' here instead of
   // 'ON_CALL' and 'WillByDefault'. See 'TestContainerizer::SetUp()'
   // for more details.
   EXPECT_CALL(*this, authorized(_))
     .WillRepeatedly(Return(true));
+
+  EXPECT_CALL(*this, getObjectApprover(_, _))
+    .WillRepeatedly(Return(Owned<ObjectApprover>(new ObjectApproverAll())));
 }
 
 

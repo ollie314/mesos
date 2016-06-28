@@ -111,6 +111,11 @@ public:
     slave::Flags flags;
     flags.launcher_dir = getLauncherDir();
 
+    string directory = "./work_dir";
+    Try<Nothing> mkdir = os::mkdir(directory);
+    CHECK_SOME(mkdir) << "Failed to create work directory";
+    flags.work_dir = directory;
+
     Try<Launcher*> launcher = PosixLauncher::create(flags);
     if (launcher.isError()) {
       return Error(launcher.error());
@@ -168,7 +173,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ScriptSucceeds)
   ASSERT_SOME(containerizer);
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
@@ -217,7 +222,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ScriptFails)
   ASSERT_SOME(containerizer);
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
@@ -279,7 +284,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, MultipleScripts)
   ASSERT_SOME(containerizer);
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
@@ -341,7 +346,7 @@ TEST_F(MesosContainerizerIsolatorPreparationTest, ExecutorEnvironmentVariable)
   ASSERT_SOME(containerizer);
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   // Ensure that LIBPROCESS_IP has been passed despite the explicit
   // specification of the environment. If so, then touch the test file.
@@ -396,6 +401,11 @@ TEST_F(MesosContainerizerExecuteTest, IoRedirection)
   slave::Flags flags;
   flags.launcher_dir = getLauncherDir();
 
+  string workDirectory = "./work_dir";
+  Try<Nothing> mkdir = os::mkdir(workDirectory);
+  CHECK_SOME(mkdir) << "Failed to create work directory";
+  flags.work_dir = workDirectory;
+
   Fetcher fetcher;
 
   // Use local=false so std{err,out} are redirected to files.
@@ -406,7 +416,7 @@ TEST_F(MesosContainerizerExecuteTest, IoRedirection)
   Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   string errMsg = "this is stderr";
   string outMsg = "this is stdout";
@@ -593,7 +603,7 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
   MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   TaskInfo taskInfo;
   CommandInfo commandInfo;
@@ -661,7 +671,7 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhilePreparing)
   MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   TaskInfo taskInfo;
   CommandInfo commandInfo;
@@ -766,7 +776,7 @@ TEST_F(MesosContainerizerProvisionerTest, ProvisionFailed)
   MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   TaskInfo taskInfo;
   CommandInfo commandInfo;
@@ -915,6 +925,209 @@ TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioning)
 }
 
 
+// This test verifies that there is no race (or leaked provisioned
+// directories) if the containerizer destroy a container while it
+// is provisioning a volume image in '_launch'.
+TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioningVolumeImage)
+{
+  slave::Flags flags = CreateSlaveFlags();
+
+  Try<Launcher*> launcher_ = PosixLauncher::create(flags);
+  ASSERT_SOME(launcher_);
+
+  TestLauncher* launcher = new TestLauncher(Owned<Launcher>(launcher_.get()));
+
+  MockProvisioner* provisioner = new MockProvisioner();
+
+  Future<Nothing> provision;
+  Promise<ProvisionInfo> promise;
+
+  EXPECT_CALL(*provisioner, provision(_, _))
+    .WillOnce(DoAll(FutureSatisfy(&provision),
+                    Return(promise.future())));
+
+  EXPECT_CALL(*provisioner, destroy(_))
+    .WillOnce(Return(true));
+
+  Fetcher fetcher;
+
+  Try<ContainerLogger*> logger =
+    ContainerLogger::create(flags.container_logger);
+
+  ASSERT_SOME(logger);
+
+  MesosContainerizerProcess* process = new MesosContainerizerProcess(
+      flags,
+      true,
+      &fetcher,
+      Owned<ContainerLogger>(logger.get()),
+      Owned<Launcher>(launcher),
+      Owned<Provisioner>(provisioner),
+      vector<Owned<Isolator>>());
+
+  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  TaskInfo taskInfo;
+  CommandInfo commandInfo;
+  taskInfo.mutable_command()->MergeFrom(commandInfo);
+
+  ContainerInfo::MesosInfo mesosInfo;
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::MESOS);
+  containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
+
+  Image image;
+  image.set_type(Image::DOCKER);
+  Image::Docker dockerImage;
+  dockerImage.set_name(UUID::random().toString());
+  image.mutable_docker()->CopyFrom(dockerImage);
+
+  Volume* volume = containerInfo.add_volumes();
+  volume->mutable_image()->CopyFrom(image);
+  volume->set_container_path("tmp");
+  volume->set_mode(Volume::RW);
+
+  ExecutorInfo executorInfo = CREATE_EXECUTOR_INFO("executor", "exit 0");
+  executorInfo.mutable_container()->CopyFrom(containerInfo);
+
+  Future<bool> launch = containerizer.launch(
+      containerId,
+      taskInfo,
+      executorInfo,
+      os::getcwd(),
+      None(),
+      SlaveID(),
+      PID<Slave>(),
+      false);
+
+  Future<containerizer::Termination> wait = containerizer.wait(containerId);
+
+  AWAIT_READY(provision);
+
+  containerizer.destroy(containerId);
+
+  ASSERT_TRUE(wait.isPending());
+  promise.set(ProvisionInfo{"rootfs", None()});
+
+  AWAIT_FAILED(launch);
+  AWAIT_READY(wait);
+
+  containerizer::Termination termination = wait.get();
+
+  EXPECT_EQ(
+    "Container destroyed while provisioning images",
+    termination.message());
+
+  EXPECT_FALSE(termination.has_status());
+}
+
+
+// This test verifies that isolator cleanup will not be invoked
+// if the containerizer destroy a container while it is provisioning
+// an image, because isolators are not prepared yet.
+TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
+{
+  slave::Flags flags = CreateSlaveFlags();
+
+  Try<Launcher*> launcher_ = PosixLauncher::create(flags);
+  ASSERT_SOME(launcher_);
+
+  TestLauncher* launcher = new TestLauncher(Owned<Launcher>(launcher_.get()));
+
+  MockProvisioner* provisioner = new MockProvisioner();
+
+  Future<Nothing> provision;
+  Promise<ProvisionInfo> promise;
+
+  EXPECT_CALL(*provisioner, provision(_, _))
+    .WillOnce(DoAll(FutureSatisfy(&provision),
+                    Return(promise.future())));
+
+  EXPECT_CALL(*provisioner, destroy(_))
+    .WillOnce(Return(true));
+
+  MockIsolator* isolator = new MockIsolator();
+
+  EXPECT_CALL(*isolator, cleanup(_))
+    .Times(0);
+
+  Fetcher fetcher;
+
+  Try<ContainerLogger*> logger =
+    ContainerLogger::create(flags.container_logger);
+
+  ASSERT_SOME(logger);
+
+  MesosContainerizerProcess* process = new MesosContainerizerProcess(
+      flags,
+      true,
+      &fetcher,
+      Owned<ContainerLogger>(logger.get()),
+      Owned<Launcher>(launcher),
+      Owned<Provisioner>(provisioner),
+      {Owned<Isolator>(isolator)});
+
+  MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  TaskInfo taskInfo;
+  CommandInfo commandInfo;
+  taskInfo.mutable_command()->MergeFrom(commandInfo);
+
+  Image image;
+  image.set_type(Image::DOCKER);
+  Image::Docker dockerImage;
+  dockerImage.set_name(UUID::random().toString());
+  image.mutable_docker()->CopyFrom(dockerImage);
+
+  ContainerInfo::MesosInfo mesosInfo;
+  mesosInfo.mutable_image()->CopyFrom(image);
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::MESOS);
+  containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
+
+  ExecutorInfo executorInfo = CREATE_EXECUTOR_INFO("executor", "exit 0");
+  executorInfo.mutable_container()->CopyFrom(containerInfo);
+
+  Future<bool> launch = containerizer.launch(
+      containerId,
+      taskInfo,
+      executorInfo,
+      os::getcwd(),
+      None(),
+      SlaveID(),
+      PID<Slave>(),
+      false);
+
+  Future<containerizer::Termination> wait = containerizer.wait(containerId);
+
+  AWAIT_READY(provision);
+
+  containerizer.destroy(containerId);
+
+  ASSERT_TRUE(wait.isPending());
+  promise.set(ProvisionInfo{"rootfs", None()});
+
+  AWAIT_FAILED(launch);
+  AWAIT_READY(wait);
+
+  containerizer::Termination termination = wait.get();
+
+  EXPECT_EQ(
+    "Container destroyed while provisioning images",
+    termination.message());
+
+  EXPECT_FALSE(termination.has_status());
+}
+
+
 // This action destroys the container using the real launcher and
 // waits until the destroy is complete.
 ACTION_P(InvokeDestroyAndWait, launcher)
@@ -958,7 +1171,7 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
   MesosContainerizer containerizer((Owned<MesosContainerizerProcess>(process)));
 
   ContainerID containerId;
-  containerId.set_value("test_container");
+  containerId.set_value(UUID::random().toString());
 
   TaskInfo taskInfo;
   CommandInfo commandInfo;

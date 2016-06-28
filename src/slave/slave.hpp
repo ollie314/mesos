@@ -30,6 +30,8 @@
 #include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
 
+#include <mesos/agent/agent.hpp>
+
 #include <mesos/executor/executor.hpp>
 
 #include <mesos/master/detector.hpp>
@@ -419,6 +421,14 @@ private:
   // exited.
   void _shutdownExecutor(Framework* framework, Executor* executor);
 
+  process::Future<bool> authorizeLogAccess(
+      const Option<std::string>& principal);
+
+  Future<bool> authorizeSandboxAccess(
+      const Option<std::string>& principal,
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId);
+
   // Inner class used to namespace HTTP route handlers (see
   // slave/http.cpp for implementations).
   class Http
@@ -431,7 +441,12 @@ private:
     // desired request handler to get consistent request logging.
     static void log(const process::http::Request& request);
 
-    // /slave/api/v1/executor
+    // /api/v1
+    process::Future<process::http::Response> api(
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
+
+    // /api/v1/executor
     process::Future<process::http::Response> executor(
         const process::http::Request& request) const;
 
@@ -458,8 +473,9 @@ private:
     // /slave/containers
     process::Future<process::http::Response> containers(
         const process::http::Request& request,
-        const Option<std::string>& /* principal */) const;
+        const Option<std::string>& principal) const;
 
+    static std::string API_HELP();
     static std::string EXECUTOR_HELP();
     static std::string FLAGS_HELP();
     static std::string HEALTH_HELP();
@@ -468,16 +484,20 @@ private:
     static std::string CONTAINERS_HELP();
 
   private:
-    // Continuations.
-    static process::Future<process::http::Response> _flags(
-        const process::http::Request& request,
-        const Flags& flags);
+    JSON::Object _flags() const;
 
     // Make continuation for `statistics` `static` as it might
     // execute when the invoking `Http` is already destructed.
-    static process::http::Response _statistics(
+    process::http::Response _statistics(
         const ResourceUsage& usage,
-        const process::http::Request& request);
+        const process::http::Request& request) const;
+
+    // Continuation for `/containers` endpoint
+    process::Future<process::http::Response> _containers(
+        const process::http::Request& request) const;
+
+    // Helper function to collect containers status and resource statistics.
+    process::Future<JSON::Array> __containers() const;
 
     // Helper routines for endpoint authorization.
     Try<std::string> extractEndpoint(const process::http::URL& url) const;
@@ -493,6 +513,43 @@ private:
         const Option<std::string>& principal,
         const std::string& endpoint,
         const std::string& method) const;
+
+    // Agent API handlers.
+
+    process::Future<process::http::Response> getFlags(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getHealth(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getVersion(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getMetrics(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getLoggingLevel(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> setLoggingLevel(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getContainers(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
 
     Slave* slave;
 
@@ -546,6 +603,8 @@ private:
       const process::Future<Resources>& oversubscribable);
 
   const Flags flags;
+
+  const Http http;
 
   SlaveInfo info;
 
@@ -724,6 +783,16 @@ struct Executor
   friend std::ostream& operator<<(
       std::ostream& stream,
       const Executor& executor);
+
+// Undefine NetBios preprocessor macros used by the `State` enum.
+#ifdef REGISTERING
+#undef REGISTERING
+#endif // REGISTERING
+
+#ifdef REGISTERED
+#undef REGISTERED
+#endif // REGISTERED
+
 
   enum State
   {

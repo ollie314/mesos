@@ -128,7 +128,13 @@ public:
 private:
   process::Future<ProvisionInfo> _provision(
       const ContainerID& containerId,
-      const ImageInfo& layers);
+      const Image& image,
+      const ImageInfo& imageInfo);
+
+  process::Future<ProvisionInfo> __provision(
+      const std::string& rootfs,
+      const Image& image,
+      const ImageInfo& imageInfo);
 
   process::Future<bool> _destroy(const ContainerID& containerId);
 

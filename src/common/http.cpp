@@ -47,6 +47,8 @@ using std::set;
 using std::string;
 using std::vector;
 
+using process::Owned;
+
 using process::http::authorization::AuthorizationCallbacks;
 
 namespace mesos {
@@ -187,10 +189,6 @@ JSON::Object model(const NetworkInfo& info)
 {
   JSON::Object object;
 
-  if (info.has_ip_address()) {
-    object.values["ip_address"] = info.ip_address();
-  }
-
   if (info.groups().size() > 0) {
     JSON::Array array;
     array.values.reserve(info.groups().size()); // MESOS-2353.
@@ -283,6 +281,10 @@ JSON::Object model(const Task& task)
   object.values["state"] = TaskState_Name(task.state());
   object.values["resources"] = model(task.resources());
 
+  if (task.has_user()) {
+    object.values["user"] = task.user();
+  }
+
   {
     JSON::Array array;
     array.values.reserve(task.statuses().size()); // MESOS-2353.
@@ -372,30 +374,6 @@ JSON::Object model(const ExecutorInfo& executorInfo)
 }
 
 
-void json(JSON::ObjectWriter* writer, const Task& task)
-{
-  writer->field("id", task.task_id().value());
-  writer->field("name", task.name());
-  writer->field("framework_id", task.framework_id().value());
-  writer->field("executor_id", task.executor_id().value());
-  writer->field("slave_id", task.slave_id().value());
-  writer->field("state", TaskState_Name(task.state()));
-  writer->field("resources", Resources(task.resources()));
-  writer->field("statuses", task.statuses());
-
-  if (task.has_labels()) {
-    writer->field("labels", task.labels());
-  }
-
-  if (task.has_discovery()) {
-    writer->field("discovery", JSON::Protobuf(task.discovery()));
-  }
-
-  if (task.has_container()) {
-    writer->field("container", JSON::Protobuf(task.container()));
-  }
-}
-
 }  // namespace internal {
 
 void json(JSON::ObjectWriter* writer, const Attributes& attributes)
@@ -484,10 +462,6 @@ void json(JSON::ArrayWriter* writer, const Labels& labels)
 
 static void json(JSON::ObjectWriter* writer, const NetworkInfo& info)
 {
-  if (info.has_ip_address()) {
-    writer->field("ip_address", info.ip_address());
-  }
-
   if (info.groups().size() > 0) {
     writer->field("groups", info.groups());
   }
@@ -538,6 +512,35 @@ void json(JSON::ObjectWriter* writer, const Resources& resources)
   json(writer, scalars);
   json(writer, ranges);
   json(writer, sets);
+}
+
+
+void json(JSON::ObjectWriter* writer, const Task& task)
+{
+  writer->field("id", task.task_id().value());
+  writer->field("name", task.name());
+  writer->field("framework_id", task.framework_id().value());
+  writer->field("executor_id", task.executor_id().value());
+  writer->field("slave_id", task.slave_id().value());
+  writer->field("state", TaskState_Name(task.state()));
+  writer->field("resources", Resources(task.resources()));
+  writer->field("statuses", task.statuses());
+
+  if (task.has_user()) {
+    writer->field("user", task.user());
+  }
+
+  if (task.has_labels()) {
+    writer->field("labels", task.labels());
+  }
+
+  if (task.has_discovery()) {
+    writer->field("discovery", JSON::Protobuf(task.discovery()));
+  }
+
+  if (task.has_container()) {
+    writer->field("container", JSON::Protobuf(task.container()));
+  }
 }
 
 
@@ -617,6 +620,82 @@ const AuthorizationCallbacks createAuthorizationCallbacks(
   callbacks.insert(std::make_pair("/metrics/snapshot", getEndpoint));
 
   return callbacks;
+}
+
+
+bool approveViewFrameworkInfo(
+    const Owned<ObjectApprover>& frameworksApprover,
+    const FrameworkInfo& frameworkInfo)
+{
+  ObjectApprover::Object object;
+  object.framework_info = &frameworkInfo;
+
+  Try<bool> approved = frameworksApprover->approved(object);
+  if (approved.isError()) {
+    LOG(WARNING) << "Error during FrameworkInfo authorization: "
+                 << approved.error();
+    // TODO(joerg84): Consider exposing these errors to the caller.
+    return false;
+  }
+  return approved.get();
+}
+
+
+bool approveViewExecutorInfo(
+    const Owned<ObjectApprover>& executorsApprover,
+    const ExecutorInfo& executorInfo,
+    const FrameworkInfo& frameworkInfo)
+{
+  ObjectApprover::Object object;
+  object.executor_info = &executorInfo;
+  object.framework_info = &frameworkInfo;
+
+  Try<bool> approved = executorsApprover->approved(object);
+  if (approved.isError()) {
+    LOG(WARNING) << "Error during ExecutorInfo authorization: "
+                 << approved.error();
+    // TODO(joerg84): Consider exposing these errors to the caller.
+    return false;
+  }
+  return approved.get();
+}
+
+
+bool approveViewTaskInfo(
+    const Owned<ObjectApprover>& tasksApprover,
+    const TaskInfo& taskInfo,
+    const FrameworkInfo& frameworkInfo)
+{
+  ObjectApprover::Object object;
+  object.task_info = &taskInfo;
+  object.framework_info = &frameworkInfo;
+
+  Try<bool> approved = tasksApprover->approved(object);
+  if (approved.isError()) {
+    LOG(WARNING) << "Error during TaskInfo authorization: " << approved.error();
+    // TODO(joerg84): Consider exposing these errors to the caller.
+    return false;
+  }
+  return approved.get();
+}
+
+
+bool approveViewTask(
+    const Owned<ObjectApprover>& tasksApprover,
+    const Task& task,
+    const FrameworkInfo& frameworkInfo)
+{
+  ObjectApprover::Object object;
+  object.task = &task;
+  object.framework_info = &frameworkInfo;
+
+  Try<bool> approved = tasksApprover->approved(object);
+  if (approved.isError()) {
+    LOG(WARNING) << "Error during Task authorization: " << approved.error();
+     // TODO(joerg84): Consider exposing these errors to the caller.
+    return false;
+  }
+  return approved.get();
 }
 
 }  // namespace mesos {

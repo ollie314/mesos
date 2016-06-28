@@ -14,7 +14,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef __WINDOWS__
+#include <fts.h>
+#endif // __WINDOWS__
+
 #include <mesos/type_utils.hpp>
+
+#include <mesos/docker/spec.hpp>
 
 #include <process/collect.hpp>
 #include <process/defer.hpp>
@@ -36,6 +42,8 @@
 #include "slave/containerizer/mesos/provisioner/store.hpp"
 
 using namespace process;
+
+namespace spec = docker::spec;
 
 using std::list;
 using std::string;
@@ -101,7 +109,7 @@ Provisioner::Provisioner(Owned<ProvisionerProcess> _process)
 
 Provisioner::~Provisioner()
 {
-  if (process.get() != NULL) {
+  if (process.get() != nullptr) {
     terminate(process.get());
     wait(process.get());
   }
@@ -260,13 +268,14 @@ Future<ProvisionInfo> ProvisionerProcess::provision(
 
   // Get and then provision image layers from the store.
   return stores.get(image.type()).get()->get(image)
-    .then(defer(self(), &Self::_provision, containerId, lambda::_1));
+    .then(defer(self(), &Self::_provision, containerId, image, lambda::_1));
 }
 
 
 Future<ProvisionInfo> ProvisionerProcess::_provision(
     const ContainerID& containerId,
-    const ImageInfo& ImageInfo)
+    const Image& image,
+    const ImageInfo& imageInfo)
 {
   // TODO(jieyu): Choose a backend smartly. For instance, if there is
   // only one layer returned from the store. prefer to use bind
@@ -299,20 +308,107 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
       backend);
 
   return backends.get(backend).get()->provision(
-      ImageInfo.layers,
+      imageInfo.layers,
       rootfs,
       backendDir)
-    .then([rootfs, ImageInfo]() -> Future<ProvisionInfo> {
-      return ProvisionInfo{rootfs, ImageInfo.dockerManifest};
-    });
+    .then(defer(self(), &Self::__provision, rootfs, image, imageInfo));
+}
+
+
+// This function is currently docker image specific. Depending
+// on docker v1 spec, a docker image may include filesystem
+// changeset, which may need to delete directories or files.
+// The file/dir to be deleted will be labeled by creating a
+// 'whiteout' file, which is at the same location and with the
+// basename of the deleted file or directory prefixed with
+// '.wh.'. Please see:
+// https://github.com/docker/docker/blob/master/image/spec/v1.md
+Future<ProvisionInfo> ProvisionerProcess::__provision(
+    const string& rootfs,
+    const Image& image,
+    const ImageInfo& imageInfo)
+{
+  // Skip single-layered images since no 'whiteout' files needs
+  // to be handled, and this excludes any image using the bind
+  // backend.
+  if (imageInfo.layers.size() == 1 || image.type() != Image::DOCKER) {
+    return ProvisionInfo{rootfs, imageInfo.dockerManifest};
+  }
+
+#ifndef __WINDOWS__
+  // TODO(hausdorff): The FTS API is not available on some platforms, such as
+  // Windows. We will need to either (1) prove that this is not necessary for
+  // Windows Containers, which use much of the Docker spec themselves, or (2)
+  // make this code compatible with Windows, as we did with other code that
+  // depended on FTS, such as `os::rmdir`. See MESOS-5610.
+  char* _rootfs[] = {const_cast<char*>(rootfs.c_str()), nullptr};
+
+  FTS* tree = ::fts_open(_rootfs, FTS_NOCHDIR | FTS_PHYSICAL, nullptr);
+  if (tree == nullptr) {
+    return Failure("Failed to open '" + rootfs + "': " + os::strerror(errno));
+  }
+
+  vector<string> whiteout;
+
+  for (FTSENT *node = ::fts_read(tree);
+       node != nullptr; node = ::fts_read(tree)) {
+    if (node->fts_info == FTS_F &&
+        strings::startsWith(node->fts_name, string(spec::WHITEOUT_PREFIX))) {
+      Path path = Path(node->fts_path);
+
+      whiteout.push_back(path::join(path.dirname(), path.basename().substr(
+          strlen(spec::WHITEOUT_PREFIX))));
+
+      Try<Nothing> rm = os::rm(path.value);
+      if (rm.isError()) {
+        ::fts_close(tree);
+        return Failure(
+            "Failed to remove the whiteout '.wh.' file '" +
+            path.value + "': " + rm.error());
+      }
+    }
+  }
+
+  if (errno != 0) {
+    Error error = ErrnoError();
+    ::fts_close(tree);
+    return Failure(error);
+  }
+
+  if (::fts_close(tree) != 0) {
+    return Failure(
+        "Failed to stop traversing file system: " + os::strerror(errno));
+  }
+
+  foreach (const string& path, whiteout) {
+    if (os::stat::isdir(path)) {
+      Try<Nothing> rmdir = os::rmdir(path);
+      if (rmdir.isError()) {
+        return Failure(
+            "Failed to remove whiteout directory '" +
+            path + "': " + rmdir.error());
+      }
+    } else {
+      Try<Nothing> rm = os::rm(path);
+      if (rm.isError()) {
+        return Failure(
+            "Failed to remove whiteout file '" +
+            path + "': " + rm.error());
+      }
+    }
+  }
+
+  return ProvisionInfo{rootfs, imageInfo.dockerManifest};
+#else
+  return ProvisionInfo{ rootfs, imageInfo.dockerManifest };
+#endif // __WINDOWS__
 }
 
 
 Future<bool> ProvisionerProcess::destroy(const ContainerID& containerId)
 {
   if (!infos.contains(containerId)) {
-    LOG(INFO) << "Ignoring destroy request for unknown container "
-              << containerId;
+    VLOG(1) << "Ignoring destroy request for unknown container " << containerId;
 
     return false;
   }

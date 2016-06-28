@@ -24,7 +24,7 @@
 
 #include <mesos/authorizer/authorizer.hpp>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 
 #include <mesos/module/authorizer.hpp>
 
@@ -1039,20 +1039,29 @@ typedef ::testing::Types<
 TYPED_TEST_CASE(MasterAuthorizerTest, AuthorizerTypes);
 
 
-// This test verifies that only authorized principals
-// can access the '/flags' endpoint.
-TYPED_TEST(MasterAuthorizerTest, AuthorizeFlagsEndpoint)
+// This test verifies that authorization based endpoint filtering
+// works correctly on the /state-summary endpoint.
+// Only one of the default users is allowed to view frameworks.
+TYPED_TEST(MasterAuthorizerTest, FilterStateSummaryEndpoint)
 {
-  const string endpoint = "flags";
+  const string stateSummaryEndpoint = "state-summary";
+  const string user = "bar";
 
-  // Setup ACLs so that only the default principal
-  // can access the '/flags' endpoint.
   ACLs acls;
-  acls.set_permissive(false);
 
-  mesos::ACL::GetEndpoint* acl = acls.add_get_endpoints();
-  acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
-  acl->mutable_paths()->add_values("/" + endpoint);
+  {
+    // Default principal can see all frameworks.
+    mesos::ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // No other principal can see frameworks running under any user.
+    ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_users()->set_type(ACL::Entity::NONE);
+  }
 
   // Create an `Authorizer` with the ACLs.
   Try<Authorizer*> create = TypeParam::create(parameterize(acls));
@@ -1062,155 +1071,435 @@ TYPED_TEST(MasterAuthorizerTest, AuthorizeFlagsEndpoint)
   Try<Owned<cluster::Master>> master = this->StartMaster(authorizer.get());
   ASSERT_SOME(master);
 
-  Future<Response> response = http::get(
-      master.get()->pid,
-      endpoint,
-      None(),
-      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+  // Start framwork with user "bar".
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+  frameworkInfo.set_user(user);
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response.get().body;
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  response = http::get(
-      master.get()->pid,
-      endpoint,
-      None(),
-      createBasicAuthHeaders(DEFAULT_CREDENTIAL_2));
+  Future<Nothing> registered;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureSatisfy(&registered));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Forbidden().status, response)
-    << response.get().body;
+  driver.start();
+
+  AWAIT_READY(registered);
+
+  // Retrieve endpoint with the user allowed to view the framework.
+  {
+    Future<Response> response = http::get(
+        master.get()->pid,
+        stateSummaryEndpoint,
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
+      << response.get().body;
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    JSON::Object stateSummary = parse.get();
+
+    ASSERT_TRUE(stateSummary.values["frameworks"].is<JSON::Array>());
+    EXPECT_EQ(
+        1u, stateSummary.values["frameworks"].as<JSON::Array>().values.size());
+  }
+
+  // Retrieve endpoint with the user not allowed to view the framework.
+  {
+    Future<Response> response = http::get(
+        master.get()->pid,
+        stateSummaryEndpoint,
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL_2));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
+      << response.get().body;
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    JSON::Object stateSummary = parse.get();
+
+    ASSERT_TRUE(stateSummary.values["frameworks"].is<JSON::Array>());
+    EXPECT_TRUE(
+        stateSummary.values["frameworks"].as<JSON::Array>().values.empty());
+  }
+
+  driver.stop();
+  driver.join();
 }
 
 
-// This test verifies that access to the '/flags' endpoint can be authorized
-// without authentication if an authorization rule exists that applies to
-// anyone. The authorizer will map the absence of a principal to "ANY".
-TYPED_TEST(MasterAuthorizerTest, AuthorizeFlagsEndpointWithoutPrincipal)
+// This test verifies that authorization based endpoint filtering
+// works correctly on the /state endpoint.
+// Both default users are allowed to to view high level frameworks, but only
+// one is allowed to view the tasks.
+TYPED_TEST(MasterAuthorizerTest, FilterStateEndpoint)
 {
-  const string endpoint = "flags";
+  const string stateEndpoint = "state";
+  const string user = "bar";
 
-  // Setup ACLs so that any principal can access the '/flags' endpoint.
   ACLs acls;
-  acls.set_permissive(false);
 
-  mesos::ACL::GetEndpoint* acl = acls.add_get_endpoints();
-  acl->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
-  acl->mutable_paths()->add_values("/" + endpoint);
+  {
+    // Default principal can see all frameworks.
+    mesos::ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
 
-  master::Flags masterFlags = this->CreateMasterFlags();
-  masterFlags.authenticate_http = false;
+  {
+    // Second default principal can see all frameworks.
+    mesos::ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL_2.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // No other principal can see frameworks running under any user.
+    ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_users()->set_type(ACL::Entity::NONE);
+  }
+
+  {
+    // Default principal can see all executors.
+    mesos::ACL::ViewExecutor* acl = acls.add_view_executors();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // No other principal can see executors running under any user.
+    ACL::ViewExecutor* acl = acls.add_view_executors();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_users()->set_type(ACL::Entity::NONE);
+  }
+
+  {
+    // Default principal can see all tasks.
+    mesos::ACL::ViewTask* acl = acls.add_view_tasks();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // No other principal can see tasks running under any user.
+    ACL::ViewTask* acl = acls.add_view_tasks();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_users()->set_type(ACL::Entity::NONE);
+  }
 
   // Create an `Authorizer` with the ACLs.
   Try<Authorizer*> create = TypeParam::create(parameterize(acls));
   ASSERT_SOME(create);
   Owned<Authorizer> authorizer(create.get());
 
-  Try<Owned<cluster::Master>> master =
-    this->StartMaster(authorizer.get(), masterFlags);
+  Try<Owned<cluster::Master>> master = this->StartMaster(authorizer.get());
   ASSERT_SOME(master);
 
-  Future<Response> response = http::get(master.get()->pid, endpoint);
+  // Start framwork with user "bar".
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+  frameworkInfo.set_user(user);
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response.get().body;
+  // Create an executor with user "bar".
+  ExecutorInfo executor = CREATE_EXECUTOR_INFO("test-executor", "sleep 2");
+  executor.mutable_command()->set_user(user);
+
+  MockExecutor exec(executor.executor_id());
+  TestContainerizer containerizer(&exec);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave =
+    this->StartSlave(detector.get(), &containerizer);
+
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .Times(AtMost(1));
+
+  Future<Nothing> registered;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureSatisfy(&registered))
+    .WillRepeatedly(Return());
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(registered);
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  TaskInfo task;
+  task.set_name("test");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
+  task.mutable_resources()->MergeFrom(offers.get()[0].resources());
+  task.mutable_executor()->MergeFrom(executor);
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING))
+    .WillRepeatedly(Return());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
+
+  // Retrieve endpoint with the user allowed to view the framework.
+  {
+    Future<Response> response = http::get(
+        master.get()->pid,
+        stateEndpoint,
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
+      << response.get().body;
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    JSON::Object state = parse.get();
+
+    ASSERT_TRUE(state.values["frameworks"].is<JSON::Array>());
+    EXPECT_EQ(1u, state.values["frameworks"].as<JSON::Array>().values.size());
+
+    ASSERT_TRUE(state.values["frameworks"].is<JSON::Array>());
+
+    JSON::Array frameworks = state.values["frameworks"].as<JSON::Array>();
+    EXPECT_EQ(1u, frameworks.values.size());
+
+    JSON::Object framework = frameworks.values.front().as<JSON::Object>();
+    EXPECT_EQ(1u, framework.values["tasks"].as<JSON::Array>().values.size());
+  }
+
+  // Retrieve endpoint with the user allowed to view the framework,
+  // but not the executor.
+  {
+    Future<Response> response = http::get(
+        master.get()->pid,
+        stateEndpoint,
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL_2));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
+      << response.get().body;
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    JSON::Object state = parse.get();
+    ASSERT_TRUE(state.values["frameworks"].is<JSON::Array>());
+
+    JSON::Array frameworks = state.values["frameworks"].as<JSON::Array>();
+    EXPECT_EQ(1u, frameworks.values.size());
+
+    JSON::Object framework = frameworks.values.front().as<JSON::Object>();
+    EXPECT_TRUE(framework.values["tasks"].as<JSON::Array>().values.empty());
+  }
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
 }
 
 
-// Parameterized fixture for master-specific authorization tests. The
-// path of the tested endpoint is passed as the only parameter.
-class MasterEndpointTest:
-    public MesosTest,
-    public ::testing::WithParamInterface<string> {};
-
-
-// The tests are parameterized by the endpoint being queried.
-INSTANTIATE_TEST_CASE_P(
-    Endpoint,
-    MasterEndpointTest,
-    ::testing::Values(string("flags")));
-
-
-// Tests that a master endpoint handler forms
-// correct queries against the authorizer.
-TEST_P(MasterEndpointTest, AuthorizedRequest)
+// This test verifies that authorization based endpoint filtering
+// works correctly on the /state endpoint.
+// Both default users are allowed to to view high level frameworks, but only
+// one is allowed to view the tasks.
+TYPED_TEST(MasterAuthorizerTest, FilterTasksEndpoint)
 {
-  const string endpoint = GetParam();
+  const string stateEndpoint = "tasks";
+  const string user = "bar";
 
-  MockAuthorizer mockAuthorizer;
+  ACLs acls;
 
-  Try<Owned<cluster::Master>> master = StartMaster(&mockAuthorizer);
+  {
+    // Default principal can see all frameworks.
+    mesos::ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // Second default principal can see all frameworks.
+    mesos::ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL_2.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // No other principal can see frameworks running under any user.
+    ACL::ViewFramework* acl = acls.add_view_frameworks();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_users()->set_type(ACL::Entity::NONE);
+  }
+
+  {
+    // Default principal can see all executors.
+    mesos::ACL::ViewExecutor* acl = acls.add_view_executors();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // No other principal can see executors running under any user.
+    ACL::ViewExecutor* acl = acls.add_view_executors();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_users()->set_type(ACL::Entity::NONE);
+  }
+
+  {
+    // Default principal can see all tasks.
+    mesos::ACL::ViewTask* acl = acls.add_view_tasks();
+    acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
+    acl->mutable_users()->set_type(ACL::Entity::ANY);
+  }
+
+  {
+    // No other principal can see tasks running under any user.
+    ACL::ViewTask* acl = acls.add_view_tasks();
+    acl->mutable_principals()->set_type(ACL::Entity::ANY);
+    acl->mutable_users()->set_type(ACL::Entity::NONE);
+  }
+
+  // Create an `Authorizer` with the ACLs.
+  Try<Authorizer*> create = TypeParam::create(parameterize(acls));
+  ASSERT_SOME(create);
+  Owned<Authorizer> authorizer(create.get());
+
+  Try<Owned<cluster::Master>> master = this->StartMaster(authorizer.get());
   ASSERT_SOME(master);
 
-  Future<authorization::Request> request;
-  EXPECT_CALL(mockAuthorizer, authorized(_))
-    .WillOnce(DoAll(FutureArg<0>(&request),
-                    Return(true)));
+  // Start framwork with user "bar".
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role");
+  frameworkInfo.set_user(user);
 
-  Future<Response> response = http::get(
-      master.get()->pid,
-      endpoint,
-      None(),
-      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+  // Create an executor with user "bar".
+  ExecutorInfo executor = CREATE_EXECUTOR_INFO("test-executor", "sleep 2");
+  executor.mutable_command()->set_user(user);
 
-  AWAIT_READY(request);
+  MockExecutor exec(executor.executor_id());
+  TestContainerizer containerizer(&exec);
 
-  const string principal = DEFAULT_CREDENTIAL.principal();
-  EXPECT_EQ(principal, request.get().subject().value());
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave =
+    this->StartSlave(detector.get(), &containerizer);
 
-  // TODO(nfnt): Once master endpoint handlers use more than just
-  // `GET_ENDPOINT_WITH_PATH` we should factor out the request method
-  // and expected authorization action and parameterize
-  // `MasterEndpointTest` on that.
-  EXPECT_EQ(authorization::GET_ENDPOINT_WITH_PATH, request.get().action());
+  ASSERT_SOME(slave);
 
-  EXPECT_EQ("/" + endpoint, request.get().object().value());
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response.get().body;
-}
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .Times(AtMost(1));
 
+  Future<Nothing> registered;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureSatisfy(&registered))
+    .WillRepeatedly(Return());
 
-// Tests that unauthorized requests for a master endpoint are properly rejected.
-TEST_P(MasterEndpointTest, UnauthorizedRequest)
-{
-  const string endpoint = GetParam();
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
 
-  MockAuthorizer mockAuthorizer;
+  driver.start();
 
-  Try<Owned<cluster::Master>> master = StartMaster(&mockAuthorizer);
-  ASSERT_SOME(master);
+  AWAIT_READY(registered);
 
-  EXPECT_CALL(mockAuthorizer, authorized(_))
-    .WillOnce(Return(false));
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
 
-  Future<Response> response = http::get(
-      master.get()->pid,
-      endpoint,
-      None(),
-      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+  TaskInfo task;
+  task.set_name("test");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
+  task.mutable_resources()->MergeFrom(offers.get()[0].resources());
+  task.mutable_executor()->MergeFrom(executor);
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Forbidden().status, response)
-    << response.get().body;
-}
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING))
+    .WillRepeatedly(Return());
 
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
 
-// Tests that requests for a master endpoint
-// always succeed if the authorizer is absent.
-TEST_P(MasterEndpointTest, NoAuthorizer)
-{
-  const string endpoint = GetParam();
+  driver.launchTasks(offers.get()[0].id(), {task});
 
-  Try<Owned<cluster::Master>> master = StartMaster(CreateMasterFlags());
-  ASSERT_SOME(master);
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
 
-  Future<Response> response = http::get(
-      master.get()->pid,
-      endpoint,
-      None(),
-      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+  // Retrieve endpoint with the user allowed to view the framework.
+  {
+    Future<Response> response = http::get(
+        master.get()->pid,
+        stateEndpoint,
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
-    << response.get().body;
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
+      << response.get().body;
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    JSON::Object tasks = parse.get();
+    ASSERT_TRUE(tasks.values["tasks"].is<JSON::Array>());
+    EXPECT_EQ(1u, tasks.values["tasks"].as<JSON::Array>().values.size());
+  }
+
+  // Retrieve endpoint with the user allowed to view the framework,
+  // but not the tasks.
+  {
+    Future<Response> response = http::get(
+        master.get()->pid,
+        stateEndpoint,
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL_2));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response)
+      << response.get().body;
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    JSON::Object tasks = parse.get();
+    ASSERT_TRUE(tasks.values["tasks"].is<JSON::Array>());
+    EXPECT_TRUE(tasks.values["tasks"].as<JSON::Array>().values.empty());
+  }
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
 }
 
 } // namespace tests {

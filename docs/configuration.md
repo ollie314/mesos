@@ -379,8 +379,11 @@ masters i.e., <code>quorum > (number of masters)/2</code>.
     --work_dir=VALUE
   </td>
   <td>
-Directory path to store the persistent information stored in the
-Registry. (example: <code>/var/lib/mesos/master</code>)
+Path of the master work directory. This is where the persistent
+information of the cluster will be stored. Note that locations like
+<code>/tmp</code> which are cleaned automatically are not suitable for the work
+directory when running in production, since long-running masters could
+lose data when cleanup occurs. (Example: <code>/var/lib/mesos/master</code>)
   </td>
 </tr>
 <tr>
@@ -867,6 +870,19 @@ May be one of:
   <code>file:///path/to/file</code> (where file contains one of the above)
   </td>
 </tr>
+<tr>
+  <td>
+    --work_dir=VALUE
+  </td>
+  <td>
+Path of the agent work directory. This is where executor sandboxes
+will be placed, as well as the agent's checkpointed state in case of
+failover. Note that locations like <code>/tmp</code> which are cleaned
+automatically are not suitable for the work directory when running in
+production, since long-running agents could lose data when cleanup
+occurs. (Example: <code>/var/lib/mesos/agent</code>)
+  </td>
+</tr>
 </table>
 
 *Optional Flags*
@@ -907,6 +923,17 @@ Example:
     }
   ]
 }</code></pre>
+  </td>
+</tr>
+<tr>
+  <td>
+    --appc_simple_discovery_uri_prefix=VALUE
+  </td>
+  <td>
+URI prefix to be used for simple discovery of appc images,
+e.g., <code>http://</code>, <code>https://</code>,
+<code>hdfs://<hostname>:9000/user/abc/cde</code>.
+(default: http://)
   </td>
 </tr>
 <tr>
@@ -1020,7 +1047,7 @@ Name of the root cgroup. (default: mesos)
   </td>
   <td>
 The interval between disk quota checks for containers. This flag is
-used for the <code>posix/disk</code> isolator. (default: 15secs)
+used for the <code>disk/du</code> isolator. (default: 15secs)
   </td>
 </tr>
 <tr>
@@ -1096,7 +1123,7 @@ Example:
   "type": "MESOS",
   "volumes": [
     {
-      "host_path": "./.private/tmp",
+      "host_path": ".private/tmp",
       "container_path": "/tmp",
       "mode": "RW"
     }
@@ -1235,11 +1262,21 @@ Directory the Docker provisioner will store images in (default: /tmp/mesos/store
 </tr>
 <tr>
   <td>
+    --docker_volume_checkpoint_dir=VALUE
+  </td>
+  <td>
+The root directory where we checkpoint the information about docker
+volumes that each container uses.
+(default: /var/run/mesos/isolators/docker/volume)
+  </td>
+</tr>
+<tr>
+  <td>
     --[no-]enforce_container_disk_quota
   </td>
   <td>
 Whether to enable disk quota enforcement for containers. This flag
-is used for the <code>posix/disk</code> isolator. (default: false)
+is used for the <code>disk/du</code> isolator. (default: false)
   </td>
 </tr>
 <tr>
@@ -1248,8 +1285,8 @@ is used for the <code>posix/disk</code> isolator. (default: false)
   </td>
   <td>
 JSON object representing the environment variables that should be
-passed to the executor, and thus subsequently task(s). By default the
-executor will inherit the agent's environment variables.
+passed to the executor, and thus subsequently task(s). By default this
+flag is none. Users have to define executor environment explicitly.
 Example:
 <pre><code>{
   "PATH": "/bin:/usr/bin",
@@ -1389,8 +1426,8 @@ e.g., <code>APPC,DOCKER</code>.
     --image_provisioner_backend=VALUE
   </td>
   <td>
-Strategy for provisioning container rootfs from images,
-e.g., <code>bind</code>, <code>copy</code>. (default: copy)
+Strategy for provisioning container rootfs from images, e.g., <code>aufs</code>,
+<code>bind</code>, <code>copy</code>, <code>overlay</code>. (default: copy)
   </td>
 </tr>
 <tr>
@@ -1691,15 +1728,6 @@ the agent is launched as a systemd unit.
   <td>
 The path to the systemd system run time directory.
 (default: /run/systemd/system)
-  </td>
-</tr>
-<tr>
-  <td>
-    --work_dir=VALUE
-  </td>
-  <td>
-Directory path to place framework work directories
-(default: /tmp/mesos)
   </td>
 </tr>
 </table>

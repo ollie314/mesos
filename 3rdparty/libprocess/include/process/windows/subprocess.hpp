@@ -63,7 +63,7 @@ inline void close(
 }
 
 
-// Creates a NULL-terminated array of NULL-terminated strings that will be
+// Creates a null-terminated array of null-terminated strings that will be
 // passed to `CreateProcess` as the `lpEnvironment` argument, as described by
 // MSDN[1]. This array needs to be sorted in alphabetical order, but the `map`
 // already takes care of that. Note that this function does not handle Unicode
@@ -98,7 +98,7 @@ inline Try<PROCESS_INFORMATION> createChildProcess(
   // Construct the environment that will be passed to `CreateProcess`.
   Option<string> environmentString = createProcessEnvironment(environment);
   const char* processEnvironment = environmentString.isNone()
-    ? NULL
+    ? nullptr
     : environmentString.get().c_str();
 
   PROCESS_INFORMATION processInfo;
@@ -126,7 +126,13 @@ inline Try<PROCESS_INFORMATION> createChildProcess(
   // to have been already quoted correctly before we generate `command`.
   // Incorrectly-quoted command arguments will probably lead the child process
   // to terminate with an error. See also NOTE on `process::subprocess`.
-  const string command = strings::join(" ", argv);
+  string command = strings::join(" ", argv);
+
+  // Escape the quotes in `command`.
+  //
+  // TODO(dpravat): Add tests cases that cover this functionality. See
+  // MESOS-5418.
+  command = strings::replace(command, "\"", "\\\"");
 
   // NOTE: If Mesos is built against the ANSI version of this function, the
   // environment is limited to 32,767 characters. See[1].
@@ -142,14 +148,14 @@ inline Try<PROCESS_INFORMATION> createChildProcess(
   //
   // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/ms682425(v=vs.85).aspx
   BOOL createProcessResult = CreateProcess(
-      NULL,
+      nullptr,
       (LPSTR)command.data(),
-      NULL,                    // Default security attributes.
-      NULL,                    // Default primary thread security attributes.
+      nullptr,                 // Default security attributes.
+      nullptr,                 // Default primary thread security attributes.
       TRUE,                    // Inherited parent process handles.
       0,                       // Normal thread priority.
       (LPVOID)processEnvironment,
-      NULL,                    // Use parent's current directory.
+      nullptr,                 // Use parent's current directory.
       &startupInfo,            // STARTUPINFO pointer.
       &processInfo);           // PROCESS_INFORMATION pointer.
 

@@ -126,8 +126,18 @@ public:
           break;
         }
 
+        case Event::INVERSE_OFFERS: {
+          cout << endl << "Received an INVERSE_OFFERS event" << endl;
+          break;
+        }
+
         case Event::RESCIND: {
           cout << endl << "Received a RESCIND event" << endl;
+          break;
+        }
+
+        case Event::RESCIND_INVERSE_OFFER: {
+          cout << endl << "Received a RESCIND_INVERSE_OFFER event" << endl;
           break;
         }
 

@@ -13,6 +13,7 @@ can selectively enable different isolators.
 It also provides basic support for POSIX systems (e.g., OSX) but
 without any actual isolation, only resource usage reporting.
 
+
 ### Shared Filesystem
 
 The SharedFilesystem isolator can optionally be used on Linux hosts to
@@ -42,6 +43,7 @@ executor's work directory (mode 1777) and simultaneously mount it as
 inside the container. Containers will not be able to see the host's
 /tmp or any other container's /tmp.
 
+
 ### Pid Namespace
 
 The Pid Namespace isolator can be used to isolate each container in
@@ -69,15 +71,15 @@ The Posix Disk isolator provides basic disk isolation. It is able to
 report the disk usage for each sandbox and optionally enforce the disk
 quota. It can be used on both Linux and OS X.
 
-To enable the Posix Disk isolator, append `posix/disk` to the
-`--isolation` flag when starting the agent.
+To enable the Posix Disk isolator, append `disk/du` to the `--isolation`
+flag when starting the agent.
 
 By default, the disk quota enforcement is disabled. To enable it,
 specify `--enforce_container_disk_quota` when starting the agent.
 
 The Posix Disk isolator reports disk usage for each sandbox by
 periodically running the `du` command. The disk usage can be retrieved
-from the resource statistics endpoint ([/monitor/statistics](endpoints/monitor/statistics.md)).
+from the resource statistics endpoint ([/monitor/statistics](endpoints/slave/monitor/statistics.md)).
 
 The interval between two `du`s can be controlled by the agent flag
 `--container_disk_watch_interval`. For example,
@@ -97,8 +99,8 @@ The XFS disk isolator is functionally similar to Posix Disk isolator
 but avoids the cost of repeatedly running the `du`.  Though they will
 not interfere with each other, it is not recommended to use them together.
 
-To enable the XFS Disk isolator, append `xfs/disk` to the
-`--isolation` flag when starting the agent.
+To enable the XFS Disk isolator, append `disk/xfs` to the `--isolation`
+flag when starting the agent.
 
 The XFS Disk isolator requires the sandbox directory to be located
 on an XFS filesystem that is mounted with the `pquota` option. There
@@ -127,6 +129,7 @@ to display the `fsxattr.projid` field. For example:
 Note that the Posix Disk isolator flags `--enforce_container_disk_quota`,
 `--container_disk_watch_interval` and `--enforce_container_disk_quota` do
 not apply to the XFS Disk isolator.
+
 
 ### Docker Runtime Isolator
 
@@ -271,4 +274,14 @@ secondary handle to the net_cls cgroup associated with the container
 by writing to `net_cls.classid`. The cgroups/net_cls isolator exposes
 the assigned net_cls handle to operators by exposing the handle as
 part of the `ContainerStatus` &mdash;associated with any task running within
-the container&mdash; in the agent's `state` endpoint.
+the container&mdash; in the agent's [/state](endpoints/slave/state.md) endpoint.
+
+
+### The `docker/volume` Isolator
+
+This is described in a [separate document](docker-volume.md).
+
+
+### The `network/cni` Isolator
+
+This is described in a [separate document](cni.md).

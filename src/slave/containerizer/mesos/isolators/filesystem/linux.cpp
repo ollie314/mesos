@@ -372,7 +372,7 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
 
       // An absolute path must already exist.
       if (!os::exists(source)) {
-        return Error("Absolute host path does not exist");
+        return Error("Absolute host path '" + source + "' does not exist");
       }
     } else {
       // Path is interpreted as relative to the work directory.
@@ -414,7 +414,8 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
         // want to avoid creating mount points outside the work
         // directory in the host filesystem.
         if (!os::exists(target)) {
-          return Error("Absolute container path does not exist");
+          return Error("Absolute container path '" + target + "' "
+                       "does not exist");
         }
       }
 
@@ -456,23 +457,6 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
   }
 
   return out.str();
-}
-
-
-Future<Nothing> LinuxFilesystemIsolatorProcess::isolate(
-    const ContainerID& containerId,
-    pid_t pid)
-{
-  // No-op, isolation happens when unsharing the mount namespace.
-  return Nothing();
-}
-
-
-Future<ContainerLimitation> LinuxFilesystemIsolatorProcess::watch(
-    const ContainerID& containerId)
-{
-  // No-op.
-  return Future<ContainerLimitation>();
 }
 
 
@@ -578,7 +562,7 @@ Future<Nothing> LinuxFilesystemIsolatorProcess::update(
               << source << "' with uid " << s.st_uid
               << " and gid " << s.st_gid;
 
-    Try<Nothing> chown = os::chown(s.st_uid, s.st_gid, source, true);
+    Try<Nothing> chown = os::chown(s.st_uid, s.st_gid, source, false);
     if (chown.isError()) {
       return Failure(
           "Failed to change the ownership of the persistent volume at '" +
@@ -612,7 +596,7 @@ Future<Nothing> LinuxFilesystemIsolatorProcess::update(
                 << "' for persistent volume " << resource
                 << " of container " << containerId;
 
-      Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, NULL);
+      Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, nullptr);
       if (mount.isError()) {
         return Failure(
             "Failed to mount persistent volume from '" +
@@ -625,14 +609,6 @@ Future<Nothing> LinuxFilesystemIsolatorProcess::update(
   info->resources = resources;
 
   return Nothing();
-}
-
-
-Future<ResourceStatistics> LinuxFilesystemIsolatorProcess::usage(
-    const ContainerID& containerId)
-{
-  // No-op, no usage gathered.
-  return ResourceStatistics();
 }
 
 

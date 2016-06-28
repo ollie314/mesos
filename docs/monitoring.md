@@ -40,12 +40,9 @@ The tables in this document indicate the type of each available metric.
 
 ## Master Nodes
 
-Metrics from the master node are available at the following URL:
-
-    http://<mesos-master-ip>:5050/metrics/snapshot
-
-The response is a JSON object that contains metrics names and values as
-key-value pairs.
+Metrics from each master node are available via the
+[/metrics/snapshot](endpoints/metrics/snapshot.md) master endpoint.  The response
+is a JSON object that contains metrics names and values as key-value pairs.
 
 ### Observability metrics
 
@@ -898,6 +895,27 @@ agent registrar.
 </tr>
 </table>
 
+#### Replicated log
+
+The following metrics provide information about the replicated log underneath
+the registrar, which is the persistent store for masters.
+
+<table class="table table-striped">
+<thead>
+<tr><th>Metric</th><th>Description</th><th>Type</th>
+</thead>
+<tr>
+  <td>
+  <code>registrar/log/recovered</code>
+  </td>
+  <td>
+    Whether the replicated log for the registrar has caught up with the other
+    masters in the cluster. A cluster is operational as long as a quorum of
+    "recovered" masters is available in the cluster.
+  </td>
+  <td>Gauge</td>
+</tr>
+</table>
 
 #### Allocator
 
@@ -1104,13 +1122,9 @@ No master is currently elected.
 
 ## Agent Nodes
 
-Metrics from each agent node are available at the following URL:
-
-    http://<mesos-agent>:5051/metrics/snapshot
-
-The response is a JSON object that contains metrics names and values as key-
-value pairs.
-
+Metrics from each agent node are available via the
+[/metrics/snapshot](endpoints/metrics/snapshot.md) agent endpoint.  The response
+is a JSON object that contains metrics names and values as key-value pairs.
 
 ### Observability Metrics
 

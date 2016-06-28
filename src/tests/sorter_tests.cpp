@@ -176,6 +176,34 @@ TEST(SorterTest, WDRFSorter)
 }
 
 
+TEST(SorterTest, WDRFSorterUpdateWeight)
+{
+  DRFSorter sorter;
+
+  SlaveID slaveId;
+  slaveId.set_value("agentId");
+
+  Resources totalResources = Resources::parse("cpus:100;mem:100").get();
+
+  sorter.add(slaveId, totalResources);
+
+  sorter.add("a");
+  sorter.allocated("a", slaveId, Resources::parse("cpus:5;mem:5").get());
+
+  sorter.add("b");
+  sorter.allocated("b", slaveId, Resources::parse("cpus:6;mem:6").get());
+
+  // shares: a = .05, b = .06
+  EXPECT_EQ(list<string>({"a", "b"}), sorter.sort());
+
+  // Increase b's  weight to flip the sort order.
+  sorter.update("b", 2);
+
+  // shares: a = .05, b = .03
+  EXPECT_EQ(list<string>({"b", "a"}), sorter.sort());
+}
+
+
 // Some resources are split across multiple resource objects (e.g.
 // persistent volumes). This test ensures that the shares for these
 // are accounted correctly.

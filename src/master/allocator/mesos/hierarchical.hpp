@@ -78,8 +78,8 @@ public:
       initialized(false),
       paused(true),
       metrics(*this),
-      roleSorter(NULL),
-      quotaRoleSorter(NULL),
+      roleSorter(nullptr),
+      quotaRoleSorter(nullptr),
       roleSorterFactory(_roleSorterFactory),
       frameworkSorterFactory(_frameworkSorterFactory),
       quotaRoleSorterFactory(_quotaRoleSorterFactory) {}
@@ -168,11 +168,12 @@ public:
       const SlaveID& slaveId,
       const FrameworkID& frameworkId,
       const Option<UnavailableResources>& unavailableResources,
-      const Option<mesos::master::InverseOfferStatus>& status,
+      const Option<mesos::allocator::InverseOfferStatus>& status,
       const Option<Filters>& filters);
 
   process::Future<
-      hashmap<SlaveID, hashmap<FrameworkID, mesos::master::InverseOfferStatus>>>
+      hashmap<SlaveID,
+      hashmap<FrameworkID, mesos::allocator::InverseOfferStatus>>>
     getInverseOfferStatuses();
 
   void recoverResources(
@@ -283,6 +284,10 @@ protected:
     // Whether the framework desires revocable resources.
     bool revocable;
 
+    // Whether the framework is aware of GPU resources. See
+    // the documentation for the GPU_RESOURCES Capability.
+    bool gpuAware;
+
     // Active offer and inverse offer filters for the framework.
     hashmap<SlaveID, hashset<OfferFilter*>> offerFilters;
     hashmap<SlaveID, hashset<InverseOfferFilter*>> inverseOfferFilters;
@@ -355,7 +360,7 @@ protected:
       // allocator will send out new inverse offers and re-collect the
       // information. This is similar to all the outstanding offers from an old
       // master being invalidated, and new offers being sent out.
-      hashmap<FrameworkID, mesos::master::InverseOfferStatus> statuses;
+      hashmap<FrameworkID, mesos::allocator::InverseOfferStatus> statuses;
 
       // Represents the "unit of accounting" for maintenance. When a
       // `FrameworkID` is present in the hashset it means an inverse offer has

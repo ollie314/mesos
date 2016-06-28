@@ -24,7 +24,6 @@
 #include <map>
 #include <memory>
 #include <set>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -150,6 +149,7 @@ Slave::Slave(const std::string& id,
   : ProcessBase(id),
     state(RECOVERING),
     flags(_flags),
+    http(this),
     completedFrameworks(MAX_COMPLETED_FRAMEWORKS),
     detector(_detector),
     containerizer(_containerizer),
@@ -161,7 +161,7 @@ Slave::Slave(const std::string& id,
     metaDir(paths::getMetaRootDir(flags.work_dir)),
     recoveryErrors(0),
     credential(None()),
-    authenticatee(NULL),
+    authenticatee(nullptr),
     authenticating(None()),
     authenticated(false),
     reauthenticate(false),
@@ -298,7 +298,7 @@ void Slave::initialize()
           }
         }
 
-        LOG(INFO) << "A agent (or child process) is still running, please"
+        LOG(INFO) << "An agent (or child process) is still running, please"
                   << " consider checking the following process(es) listed in "
                   << path::join(hierarchy.get(), cgroup, "cgroups.proc")
                   << ":\n" << strings::join("\n", infos);
@@ -366,7 +366,7 @@ void Slave::initialize()
   }
 
   if (flags.authenticate_http) {
-    authentication::Authenticator* httpAuthenticator = NULL;
+    authentication::Authenticator* httpAuthenticator = nullptr;
 
     if (httpAuthenticatorNames[0] == DEFAULT_HTTP_AUTHENTICATOR) {
       // Load credentials for HTTP authentication.
@@ -427,7 +427,7 @@ void Slave::initialize()
       httpAuthenticator = module.get();
     }
 
-    if (httpAuthenticator == NULL) {
+    if (httpAuthenticator == nullptr) {
       EXIT(EXIT_FAILURE)
         << "An error occurred while initializing the '"
         << httpAuthenticatorNames[0] << "' HTTP authenticator";
@@ -482,8 +482,8 @@ void Slave::initialize()
   // Ensure disk `source`s are accessible.
   foreach (
       const Resource& resource,
-      resources->filter([](const Resource& resource) {
-        return resource.has_disk() && resource.disk().has_source();
+      resources->filter([](const Resource& _resource) {
+        return _resource.has_disk() && _resource.disk().has_source();
       })) {
     // For `PATH` sources we create them if they do not exist.
     const Resource::DiskInfo::Source& source = resource.disk().source();
@@ -701,12 +701,22 @@ void Slave::initialize()
       &Slave::ping,
       &PingSlaveMessage::connected);
 
-  // Setup HTTP routes.
-  Http http = Http(this);
+
+  route("/api/v1",
+        // TODO(benh): Is this authentication realm sufficient or do
+        // we need some kind of hybrid if we expect both executors
+        // and operators/tooling to use this endpoint?
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        Http::API_HELP(),
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
+          Http::log(request);
+          return http.api(request, principal);
+        });
 
   route("/api/v1/executor",
         Http::EXECUTOR_HELP(),
-        [http](const process::http::Request& request) {
+        [this](const process::http::Request& request) {
           Http::log(request);
           return http.executor(request);
         });
@@ -716,7 +726,7 @@ void Slave::initialize()
   route("/state.json",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
-        [http](const process::http::Request& request,
+        [this](const process::http::Request& request,
                const Option<string>& principal) {
           Http::log(request);
           return http.state(request, principal);
@@ -724,7 +734,7 @@ void Slave::initialize()
   route("/state",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
-        [http](const process::http::Request& request,
+        [this](const process::http::Request& request,
                const Option<string>& principal) {
           Http::log(request);
           return http.state(request, principal);
@@ -732,20 +742,20 @@ void Slave::initialize()
   route("/flags",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::FLAGS_HELP(),
-        [http](const process::http::Request& request,
+        [this](const process::http::Request& request,
                const Option<string>& principal) {
           Http::log(request);
           return http.flags(request, principal);
         });
   route("/health",
         Http::HEALTH_HELP(),
-        [http](const process::http::Request& request) {
+        [this](const process::http::Request& request) {
           return http.health(request);
         });
   route("/monitor/statistics",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATISTICS_HELP(),
-        [http](const process::http::Request& request,
+        [this](const process::http::Request& request,
                const Option<string>& principal) {
           return http.statistics(request, principal);
         });
@@ -754,22 +764,31 @@ void Slave::initialize()
   route("/monitor/statistics.json",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATISTICS_HELP(),
-        [http](const process::http::Request& request,
+        [this](const process::http::Request& request,
                const Option<string>& principal) {
           return http.statistics(request, principal);
         });
   route("/containers",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::CONTAINERS_HELP(),
-        [http](const process::http::Request& request,
+        [this](const process::http::Request& request,
                const Option<string>& principal) {
           return http.containers(request, principal);
         });
 
+  const PID<Slave> slavePid = self();
+
+  auto authorize = [slavePid](const Option<string>& principal) {
+    return dispatch(
+        slavePid,
+        &Slave::authorizeLogAccess,
+        principal);
+  };
+
   // Expose the log file for the webui. Fall back to 'log_dir' if
   // an explicit file was not specified.
   if (flags.external_log_file.isSome()) {
-    files->attach(flags.external_log_file.get(), "/slave/log")
+    files->attach(flags.external_log_file.get(), "/slave/log", authorize)
       .onAny(defer(self(),
                    &Self::fileAttached,
                    lambda::_1,
@@ -781,7 +800,7 @@ void Slave::initialize()
     if (log.isError()) {
       LOG(ERROR) << "Agent log file cannot be found: " << log.error();
     } else {
-      files->attach(log.get(), "/slave/log")
+      files->attach(log.get(), "/slave/log", authorize)
         .onAny(defer(self(), &Self::fileAttached, lambda::_1, log.get()));
     }
   }
@@ -1013,12 +1032,17 @@ void Slave::authenticate()
   // communicating with it.
   link(master.get());
 
-  CHECK(authenticatee == NULL);
+  CHECK(authenticatee == nullptr);
 
+#ifdef HAS_AUTHENTICATION
+  // On Windows CRAMMD5Authenticatee is not supported.
   if (authenticateeName == DEFAULT_AUTHENTICATEE) {
     LOG(INFO) << "Using default CRAM-MD5 authenticatee";
     authenticatee = new cram_md5::CRAMMD5Authenticatee();
-  } else {
+  }
+#endif // HAS_AUTHENTICATION
+
+  if (authenticatee == nullptr) {
     Try<Authenticatee*> module =
       modules::ModuleManager::create<Authenticatee>(authenticateeName);
     if (module.isError()) {
@@ -1043,7 +1067,7 @@ void Slave::authenticate()
 void Slave::_authenticate()
 {
   delete CHECK_NOTNULL(authenticatee);
-  authenticatee = NULL;
+  authenticatee = nullptr;
 
   CHECK_SOME(authenticating);
   const Future<bool>& future = authenticating.get();
@@ -1284,7 +1308,7 @@ void Slave::reregistered(
       bool known = false;
 
       // Try to locate the task.
-      if (framework != NULL) {
+      if (framework != nullptr) {
         foreachkey (const ExecutorID& executorId, framework->pending) {
           if (framework->pending[executorId].contains(taskId)) {
             known = true;
@@ -1553,7 +1577,7 @@ void Slave::runTask(
   // If we are about to create a new framework, unschedule the work
   // and meta directories from getting gc'ed.
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     // Unschedule framework work directory.
     string path = paths::getFrameworkPath(
         flags.work_dir, info.id(), frameworkId);
@@ -1613,7 +1637,7 @@ void Slave::runTask(
   // If we are about to create a new executor, unschedule the top
   // level work and meta directories from getting gc'ed.
   Executor* executor = framework->getExecutor(executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     // Unschedule executor work directory.
     string path = paths::getExecutorPath(
         flags.work_dir, info.id(), frameworkId, executorId);
@@ -1647,7 +1671,7 @@ void Slave::_runTask(
             << " for framework " << frameworkId;
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Ignoring run task " << task.task_id()
                  << " because the framework " << frameworkId
                  << " does not exist";
@@ -1827,7 +1851,7 @@ void Slave::_runTask(
   // and queue the task until the executor has started.
   Executor* executor = framework->getExecutor(executorId);
 
-  if (executor == NULL) {
+  if (executor == nullptr) {
     executor = framework->launchExecutor(executorInfo, task);
   }
 
@@ -1945,7 +1969,7 @@ void Slave::runTasks(
     containerizer->destroy(containerId);
 
     Executor* executor = getExecutor(frameworkId, executorId);
-    if (executor != NULL) {
+    if (executor != nullptr) {
       containerizer::Termination termination;
       termination.set_state(TASK_LOST);
       termination.add_reasons(TaskStatus::REASON_CONTAINER_UPDATE_FAILED);
@@ -1962,7 +1986,7 @@ void Slave::runTasks(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Ignoring sending queued tasks " << taskIds
                  << " to executor '" << executorId
                  << "' of framework " << frameworkId
@@ -1982,7 +2006,7 @@ void Slave::runTasks(
   }
 
   Executor* executor = framework->getExecutor(executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING) << "Ignoring sending queued tasks " << taskIds
                  << " to executor '" << executorId
                  << "' of framework " << frameworkId
@@ -2083,7 +2107,7 @@ void Slave::killTask(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Ignoring kill task " << taskId
                  << " of framework " << frameworkId
                  << " because no such framework is running";
@@ -2131,7 +2155,7 @@ void Slave::killTask(
   }
 
   Executor* executor = framework->getExecutor(taskId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING) << "Cannot kill task " << taskId
                  << " of framework " << frameworkId
                  << " because no corresponding executor is running";
@@ -2261,7 +2285,7 @@ void Slave::shutdownFramework(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Cannot shut down unknown framework " << frameworkId;
     return;
   }
@@ -2332,7 +2356,7 @@ void Slave::schedulerMessage(
 
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Dropping message from framework " << frameworkId
                  << " because framework does not exist";
     metrics.invalid_framework_messages++;
@@ -2351,7 +2375,7 @@ void Slave::schedulerMessage(
   }
 
   Executor* executor = framework->getExecutor(executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING) << "Dropping message for executor " << executorId
                  << " because executor does not exist";
     metrics.invalid_framework_messages++;
@@ -2404,7 +2428,7 @@ void Slave::updateFramework(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Ignoring updating pid for framework " << frameworkId
                  << " because it does not exist";
     return;
@@ -2601,13 +2625,13 @@ void Slave::statusUpdateAcknowledgement(
   }
 
   statusUpdateManager->acknowledgement(
-      taskId, frameworkId, UUID::fromBytes(uuid))
+      taskId, frameworkId, UUID::fromBytes(uuid).get())
     .onAny(defer(self(),
                  &Slave::_statusUpdateAcknowledgement,
                  lambda::_1,
                  taskId,
                  frameworkId,
-                 UUID::fromBytes(uuid)));
+                 UUID::fromBytes(uuid).get()));
 }
 
 
@@ -2636,7 +2660,7 @@ void Slave::_statusUpdateAcknowledgement(
     << state;
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(ERROR) << "Status update acknowledgement (UUID: " << uuid
                << ") for task " << taskId
                << " of unknown framework " << frameworkId;
@@ -2649,7 +2673,7 @@ void Slave::_statusUpdateAcknowledgement(
 
   // Find the executor that has this update.
   Executor* executor = framework->getExecutor(taskId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(ERROR) << "Status update acknowledgement (UUID: " << uuid
                << ") for task " << taskId
                << " of unknown executor";
@@ -2882,7 +2906,7 @@ void Slave::registerExecutor(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Shutting down executor '" << executorId
                  << "' as the framework " << frameworkId
                  << " does not exist";
@@ -2907,7 +2931,7 @@ void Slave::registerExecutor(
   Executor* executor = framework->getExecutor(executorId);
 
   // Check the status of the executor.
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING) << "Unexpected executor '" << executorId
                  << "' registering for framework " << frameworkId;
     reply(ShutdownExecutorMessage());
@@ -2948,20 +2972,14 @@ void Slave::registerExecutor(
         CHECK_SOME(state::checkpoint(path, executor->pid.get()));
       }
 
-      // Tell executor it's registered and give it any queued tasks.
-      ExecutorRegisteredMessage message;
-      message.mutable_executor_info()->MergeFrom(executor->info);
-      message.mutable_framework_id()->MergeFrom(framework->id());
-      message.mutable_framework_info()->MergeFrom(framework->info);
-      message.mutable_slave_id()->MergeFrom(info.id());
-      message.mutable_slave_info()->MergeFrom(info);
-      executor->send(message);
-
       // Here, we kill the executor if it no longer has any task to run
       // (e.g., framework sent a `killTask()`). This is a workaround for those
       // single task executors (e.g., command executor) that do not have a
       // proper self terminating logic when they haven't received the task
-      // within a timeout.
+      // within a timeout. Also note even if the agent restarts before sending
+      // this shutdown message, it is safe because the executor driver shuts
+      // down the executor if it gets disconnected from the agent before
+      // registration.
       if (executor->queuedTasks.empty()) {
         CHECK(executor->launchedTasks.empty())
             << " Newly registered executor '" << executor->id
@@ -2974,6 +2992,15 @@ void Slave::registerExecutor(
 
         return;
       }
+
+      // Tell executor it's registered and give it any queued tasks.
+      ExecutorRegisteredMessage message;
+      message.mutable_executor_info()->MergeFrom(executor->info);
+      message.mutable_framework_id()->MergeFrom(framework->id());
+      message.mutable_framework_info()->MergeFrom(framework->info);
+      message.mutable_slave_id()->MergeFrom(info.id());
+      message.mutable_slave_info()->MergeFrom(info);
+      executor->send(message);
 
       // Update the resource limits for the container. Note that the
       // resource limits include the currently queued tasks because we
@@ -3157,7 +3184,7 @@ void Slave::_reregisterExecutor(
     containerizer->destroy(containerId);
 
     Executor* executor = getExecutor(frameworkId, executorId);
-    if (executor != NULL) {
+    if (executor != nullptr) {
       containerizer::Termination termination;
       termination.set_state(TASK_LOST);
       termination.add_reasons(TaskStatus::REASON_CONTAINER_UPDATE_FAILED);
@@ -3276,7 +3303,7 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
   }
 
   Framework* framework = getFramework(update.framework_id());
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Ignoring status update " << update
                  << " for unknown framework " << update.framework_id();
     metrics.invalid_status_updates++;
@@ -3316,7 +3343,7 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
   const TaskStatus& status = update.status();
 
   Executor* executor = framework->getExecutor(status.task_id());
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING)  << "Could not find the executor for "
                   << "status update " << update;
     metrics.valid_status_updates++;
@@ -3414,12 +3441,7 @@ void Slave::_statusUpdate(
     // TODO(karya): Fill in the IP address by looking up the executor PID.
     if (containerStatus->network_infos().size() == 0) {
       NetworkInfo* networkInfo = containerStatus->add_network_infos();
-
-      // TODO(CD): Deprecated -- Remove after 0.27.0.
-      networkInfo->set_ip_address(stringify(self().address.ip));
-
-      NetworkInfo::IPAddress* ipAddress =
-        networkInfo->add_ip_addresses();
+      NetworkInfo::IPAddress* ipAddress = networkInfo->add_ip_addresses();
       ipAddress->set_ip_address(stringify(self().address.ip));
     }
   }
@@ -3428,7 +3450,7 @@ void Slave::_statusUpdate(
   const TaskStatus& status = update.status();
 
   Executor* executor = getExecutor(update.framework_id(), executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING) << "Ignoring container status update for framework "
                  << update.framework_id()
                  << "for a non-existent executor";
@@ -3496,7 +3518,7 @@ void Slave::__statusUpdate(
     containerizer->destroy(containerId);
 
     Executor* executor = getExecutor(update.framework_id(), executorId);
-    if (executor != NULL) {
+    if (executor != nullptr) {
       containerizer::Termination termination;
       termination.set_state(TASK_LOST);
       termination.add_reasons(TaskStatus::REASON_CONTAINER_UPDATE_FAILED);
@@ -3552,14 +3574,14 @@ void Slave::___statusUpdate(
   } else {
     // Acknowledge the HTTP based executor.
     Framework* framework = getFramework(update.framework_id());
-    if (framework == NULL) {
+    if (framework == nullptr) {
       LOG(WARNING) << "Ignoring sending acknowledgement for status update "
                    << update << " of unknown framework";
       return;
     }
 
     Executor* executor = framework->getExecutor(update.status().task_id());
-    if (executor == NULL) {
+    if (executor == nullptr) {
       // Refer to the comments in 'statusUpdate()' on when this can
       // happen.
       LOG(WARNING) << "Ignoring sending acknowledgement for status update "
@@ -3599,22 +3621,22 @@ void Slave::forward(StatusUpdate update)
   // Update the status update state of the task and include the latest
   // state of the task in the status update.
   Framework* framework = getFramework(update.framework_id());
-  if (framework != NULL) {
+  if (framework != nullptr) {
     const TaskID& taskId = update.status().task_id();
     Executor* executor = framework->getExecutor(taskId);
-    if (executor != NULL) {
+    if (executor != nullptr) {
       // NOTE: We do not look for the task in queued tasks because
       // no update is expected for it until it's launched. Similarly,
       // we do not look for completed tasks because the state for a
       // completed task shouldn't be changed.
-      Task* task = NULL;
+      Task* task = nullptr;
       if (executor->launchedTasks.contains(taskId)) {
         task = executor->launchedTasks[taskId];
       } else if (executor->terminatedTasks.contains(taskId)) {
         task = executor->terminatedTasks[taskId];
       }
 
-      if (task != NULL) {
+      if (task != nullptr) {
         // We set the status update state of the task here because in
         // steady state master updates the status update state of the
         // task when it receives this update. If the master fails over,
@@ -3674,7 +3696,7 @@ void Slave::executorMessage(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Cannot send framework message from executor '"
                  << executorId << "' to framework " << frameworkId
                  << " because framework does not exist";
@@ -3780,7 +3802,7 @@ Framework* Slave::getFramework(const FrameworkID& frameworkId)
     return frameworks[frameworkId];
   }
 
-  return NULL;
+  return nullptr;
 }
 
 
@@ -3789,11 +3811,11 @@ Executor* Slave::getExecutor(
     const ExecutorID& executorId)
 {
   Framework* framework = getFramework(frameworkId);
-  if (framework != NULL) {
+  if (framework != nullptr) {
     return framework->getExecutor(executorId);
   }
 
-  return NULL;
+  return nullptr;
 }
 
 
@@ -3891,6 +3913,17 @@ ExecutorInfo Slave::getExecutorInfo(
           task.command().environment());
     }
 
+    // Add fields which can be relevant (depending on Authorizer) for
+    // authorization.
+
+    if (task.has_labels()) {
+      executor.mutable_labels()->MergeFrom(task.labels());
+    }
+
+    if (task.has_discovery()) {
+      executor.mutable_discovery()->MergeFrom(task.discovery());
+    }
+
     // Adjust the executor shutdown grace period if the kill policy is
     // set. We add a small buffer of time to avoid destroying the
     // container before `TASK_KILLED` is sent by the executor.
@@ -3916,14 +3949,8 @@ ExecutorInfo Slave::getExecutorInfo(
       executor.mutable_command()->set_user(task.command().user());
     }
 
-    Result<string> path = None();
-    if (flags.http_command_executor) {
-      path =
-        os::realpath(path::join(flags.launcher_dir, "mesos-http-executor"));
-    } else {
-      path =
-        os::realpath(path::join(flags.launcher_dir, "mesos-executor"));
-    }
+    Result<string> path =
+      os::realpath(path::join(flags.launcher_dir, "mesos-executor"));
 
     // Explicitly set 'shell' to true since we want to use the shell
     // for running the mesos-executor (and even though this is the
@@ -3933,11 +3960,7 @@ ExecutorInfo Slave::getExecutorInfo(
     if (path.isSome()) {
       if (hasRootfs) {
         executor.mutable_command()->set_shell(false);
-        if (flags.http_command_executor) {
-          executor.mutable_command()->add_arguments("mesos-http-executor");
-        } else {
-          executor.mutable_command()->add_arguments("mesos-executor");
-        }
+        executor.mutable_command()->add_arguments("mesos-executor");
         executor.mutable_command()->add_arguments(
             "--sandbox_directory=" + flags.sandbox_directory);
 
@@ -3947,17 +3970,14 @@ ExecutorInfo Slave::getExecutorInfo(
         // filesystem isolator. Linux filesystem isolator requires slave
         // to have root permission.
         if (flags.switch_user) {
-          Option<string> user;
+          string user;
           if (task.command().has_user()) {
             user = task.command().user();
-          } else if (frameworkInfo.has_user()) {
+          } else {
             user = frameworkInfo.user();
           }
 
-          if (user.isSome()) {
-            executor.mutable_command()->add_arguments(
-                "--user=" + user.get());
-          }
+          executor.mutable_command()->add_arguments("--user=" + user);
         }
 #endif // __WINDOWS__
       }
@@ -4022,7 +4042,7 @@ void Slave::executorLaunched(
     containerizer->destroy(containerId);
 
     Executor* executor = getExecutor(frameworkId, executorId);
-    if (executor != NULL) {
+    if (executor != nullptr) {
       containerizer::Termination termination;
       termination.set_state(TASK_FAILED);
       termination.add_reasons(TaskStatus::REASON_CONTAINER_LAUNCH_FAILED);
@@ -4049,7 +4069,7 @@ void Slave::executorLaunched(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Framework '" << frameworkId
                  << "' for executor '" << executorId
                  << "' is no longer valid";
@@ -4069,7 +4089,7 @@ void Slave::executorLaunched(
   }
 
   Executor* executor = framework->getExecutor(executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING) << "Killing unknown executor '" << executorId
                  << "' of framework " << frameworkId;
     containerizer->destroy(containerId);
@@ -4130,7 +4150,7 @@ void Slave::executorTerminated(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Framework " << frameworkId
                  << " for executor '" << executorId
                  << "' does not exist";
@@ -4142,7 +4162,7 @@ void Slave::executorTerminated(
     << framework->state;
 
   Executor* executor = framework->getExecutor(executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     LOG(WARNING) << "Executor '" << executorId
                  << "' of framework " << frameworkId
                  << " does not exist";
@@ -4389,7 +4409,7 @@ void Slave::shutdownExecutor(
   }
 
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(WARNING) << "Cannot shut down executor '" << executorId
                  << "' of unknown framework " << frameworkId;
     return;
@@ -4482,7 +4502,7 @@ void Slave::shutdownExecutorTimeout(
     const ContainerID& containerId)
 {
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(INFO) << "Framework " << frameworkId
               << " seems to have exited. Ignoring shutdown timeout"
               << " for executor '" << executorId << "'";
@@ -4494,7 +4514,7 @@ void Slave::shutdownExecutorTimeout(
     << framework->state;
 
   Executor* executor = framework->getExecutor(executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     VLOG(1) << "Executor '" << executorId
             << "' of framework " << frameworkId
             << " seems to have exited. Ignoring its shutdown timeout";
@@ -4533,7 +4553,7 @@ void Slave::registerExecutorTimeout(
     const ContainerID& containerId)
 {
   Framework* framework = getFramework(frameworkId);
-  if (framework == NULL) {
+  if (framework == nullptr) {
     LOG(INFO) << "Framework " << frameworkId
               << " seems to have exited. Ignoring registration timeout"
               << " for executor '" << executorId << "'";
@@ -4552,7 +4572,7 @@ void Slave::registerExecutorTimeout(
   }
 
   Executor* executor = framework->getExecutor(executorId);
-  if (executor == NULL) {
+  if (executor == nullptr) {
     VLOG(1) << "Executor '" << executorId
             << "' of framework " << frameworkId
             << " seems to have exited. Ignoring its registration timeout";
@@ -5111,7 +5131,7 @@ void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
       const ExecutorID& executorId = kill.executor_id();
 
       Framework* framework = getFramework(frameworkId);
-      if (framework == NULL) {
+      if (framework == nullptr) {
         LOG(WARNING) << "Ignoring QoS correction KILL on framework "
                      << frameworkId << ": framework cannot be found";
         continue;
@@ -5129,7 +5149,7 @@ void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
       }
 
       Executor* executor = framework->getExecutor(executorId);
-      if (executor == NULL) {
+      if (executor == nullptr) {
         LOG(WARNING) << "Ignoring QoS correction KILL on executor '"
                      << executorId << "' of framework " << frameworkId
                      << ": executor cannot be found";
@@ -5380,6 +5400,72 @@ double Slave::_executors_terminating()
 double Slave::_executor_directory_max_allowed_age_secs()
 {
   return executorDirectoryMaxAllowedAge.secs();
+}
+
+
+Future<bool> Slave::authorizeLogAccess(const Option<std::string>& principal)
+{
+  if (authorizer.isNone()) {
+    return true;
+  }
+
+  authorization::Request request;
+  request.set_action(authorization::ACCESS_MESOS_LOG);
+
+  if (principal.isSome()) {
+    request.mutable_subject()->set_value(principal.get());
+  }
+
+  return authorizer.get()->authorized(request);
+}
+
+
+Future<bool> Slave::authorizeSandboxAccess(
+    const Option<std::string>& principal,
+    const FrameworkID& frameworkId,
+    const ExecutorID& executorId)
+{
+  if (authorizer.isNone()) {
+    return true;
+  }
+
+  // Set authorization subject.
+  authorization::Subject subject;
+
+  if (principal.isSome()) {
+    subject.set_value(principal.get());
+  }
+
+  Future<Owned<ObjectApprover>> sandboxApprover =
+    authorizer.get()->getObjectApprover(subject, authorization::ACCESS_SANDBOX);
+
+  return sandboxApprover
+    .then(defer(
+        self(),
+        [this, frameworkId, executorId](
+            const Owned<ObjectApprover>& sandboxApprover) -> Future<bool> {
+          // Construct authorization object.
+          ObjectApprover::Object object;
+
+          if (frameworks.contains(frameworkId)) {
+            Framework* framework = frameworks.get(frameworkId).get();
+
+            object.framework_info = &(framework->info);
+
+            if (framework->executors.contains(executorId)) {
+              object.executor_info =
+                &(framework->executors.get(executorId).get()->info);
+            }
+          }
+
+          Try<bool> approved = sandboxApprover.get()->approved(object);
+
+          if (approved.isError()) {
+            return Failure(approved.error());
+          }
+
+          return approved.get();
+        }));
 }
 
 
@@ -5642,7 +5728,22 @@ Executor* Framework::launchExecutor(
             << " with resources " << executorInfo.resources()
             << " in work directory '" << directory << "'";
 
-  slave->files->attach(executor->directory, executor->directory)
+  ExecutorID executorId = executorInfo.executor_id();
+  FrameworkID frameworkId = id();
+
+  const PID<Slave> slavePid = slave->self();
+
+  auto authorize =
+    [slavePid, executorId, frameworkId](const Option<string>& principal) {
+      return dispatch(
+          slavePid,
+          &Slave::authorizeSandboxAccess,
+          principal,
+          frameworkId,
+          executorId);
+    };
+
+  slave->files->attach(executor->directory, executor->directory, authorize)
     .onAny(defer(slave, &Slave::fileAttached, lambda::_1, executor->directory));
 
   // Tell the containerizer to launch the executor.
@@ -5727,7 +5828,7 @@ Executor* Framework::getExecutor(const ExecutorID& executorId)
     return executors[executorId];
   }
 
-  return NULL;
+  return nullptr;
 }
 
 
@@ -5740,7 +5841,7 @@ Executor* Framework::getExecutor(const TaskID& taskId)
       return executor;
     }
   }
-  return NULL;
+  return nullptr;
 }
 
 
@@ -5831,8 +5932,23 @@ void Framework::recoverExecutor(const ExecutorState& state)
     executor->recoverTask(taskState);
   }
 
+  ExecutorID executorId = state.id;
+  FrameworkID frameworkId = id();
+
+  const PID<Slave> slavePid = slave->self();
+
+  auto authorize =
+    [slavePid, executorId, frameworkId](const Option<string>& principal) {
+      return dispatch(
+          slavePid,
+          &Slave::authorizeSandboxAccess,
+          principal,
+          frameworkId,
+          executorId);
+    };
+
   // Expose the executor's files.
-  slave->files->attach(executor->directory, executor->directory)
+  slave->files->attach(executor->directory, executor->directory, authorize)
     .onAny(defer(slave, &Slave::fileAttached, lambda::_1, executor->directory));
 
   // Add the executor to the framework.
@@ -5898,22 +6014,12 @@ Executor::Executor(
 {
   CHECK_NOTNULL(slave);
 
-  // See if this is driver based command executor.
   Result<string> executorPath =
     os::realpath(path::join(slave->flags.launcher_dir, "mesos-executor"));
 
   if (executorPath.isSome()) {
     commandExecutor =
-        strings::contains(info.command().value(), executorPath.get());
-  }
-
-  // See if this is HTTP based command executor.
-  if (!commandExecutor) {
-    executorPath = os::realpath(
-        path::join(slave->flags.launcher_dir, "mesos-http-executor"));
-
-    commandExecutor =
-        strings::contains(info.command().value(), executorPath.get());
+      strings::contains(info.command().value(), executorPath.get());
   }
 }
 
@@ -5959,7 +6065,7 @@ void Executor::terminateTask(
 {
   VLOG(1) << "Terminating task " << taskId;
 
-  Task* task = NULL;
+  Task* task = nullptr;
   // Remove the task if it's queued.
   if (queuedTasks.contains(taskId)) {
     task = new Task(
@@ -6080,7 +6186,7 @@ void Executor::recoverTask(const TaskState& state)
         << "Expecting updates without 'uuid' to have been rejected";
 
       // If the terminal update has been acknowledged, remove it.
-      if (state.acks.contains(UUID::fromBytes(update.uuid()))) {
+      if (state.acks.contains(UUID::fromBytes(update.uuid()).get())) {
         completeTask(state.id);
       }
       break;

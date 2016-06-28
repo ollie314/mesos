@@ -11,8 +11,8 @@ There are different ways you can get Mesos:
 
 1\. Download the latest stable release from [Apache](http://mesos.apache.org/downloads/) (***Recommended***)
 
-    $ wget http://www.apache.org/dist/mesos/0.28.1/mesos-0.28.1.tar.gz
-    $ tar -zxf mesos-0.28.1.tar.gz
+    $ wget http://www.apache.org/dist/mesos/0.28.2/mesos-0.28.2.tar.gz
+    $ tar -zxf mesos-0.28.2.tar.gz
 
 2\. Clone the Mesos git [repository](https://git-wip-us.apache.org/repos/asf/mesos.git) (***Advanced Users Only***)
 
@@ -25,6 +25,8 @@ There are different ways you can get Mesos:
 Mesos runs on Linux (64 Bit) and Mac OS X (64 Bit). To build Mesos from source, GCC 4.8.1+ or Clang 3.5+ is required.
 
 For full support of process isolation under Linux a recent kernel >=3.10 is required.
+
+Mesos agent also run on Windows. To build Mesos agent from source, Visual Studio 2015 is required.
 
 Make sure your hostname is resolvable via DNS or via `/etc/hosts` to allow full support of Docker's host-networking capabilities, needed for some of the Mesos tests. When in doubt, please validate that `/etc/hosts` contains your hostname.
 
@@ -165,7 +167,17 @@ Following are the instructions for stock CentOS 7.1. If you are using a differen
     # Install other Mesos dependencies.
     $ sudo yum install -y apache-maven python-devel java-1.8.0-openjdk-devel zlib-devel libcurl-devel openssl-devel cyrus-sasl-devel cyrus-sasl-md5 apr-devel subversion-devel apr-util-devel
 
-## Building Mesos
+### Windows
+
+Following are the instructions for stock Windows 10 and Windows Server 2012 or newer.
+
+1. Install the latest version of [Visual Studio Community 2015](https://www.visualstudio.com/post-download-vs?sku=community).
+   Start Visual Studio Community to complete the setup and configuration.
+2. Install [CMake 3.5.2 or later](https://cmake.org/files/v3.5/cmake-3.5.2-win32-x86.msi).
+   Do not run CMake before finishing the Visual Studio Community setup.
+3. Install [Gnu Patch 2.5.9-7 or later](http://downloads.sourceforge.net/project/gnuwin32/patch/2.5.9-7/patch-2.5.9-7-setup.exe).
+
+## Building Mesos (Posix)
 
     # Change working directory.
     $ cd mesos
@@ -187,6 +199,38 @@ In order to speed up the build and reduce verbosity of the logs, you can append 
     # Install (Optional).
     $ make install
 
+## Building Mesos (Windows)
+
+    # Start a VS2015 x64 Native Tool command prompt.
+    # This can be found by opening VS2015 and looking under the "tools"
+    # menu for "Visual Studio Command Prompt".
+
+    # Change working directory.
+    $ cd mesos
+
+    # If you are developing on Windows, we recommend running the bootstrap.
+    # This requires administrator privileges.
+    $ .\bootstrap.bat
+
+    # Generate the solution and build.
+    $ mkdir build
+    $ cd build
+    $ cmake .. -G "Visual Studio 14 2015 Win64" -DENABLE_LIBEVENT=1
+
+    # After generating the Visual Studio solution you can use the IDE to open
+    # the project and skip the next step. In this case it is recommended to set
+    # `PreferredToolArchitecture` environment variable to `x64`.
+    # NOTE: `PreferredToolArchitecture` can be set system-wide via Control Panel.
+    $ msbuild Mesos.sln /p:PreferredToolArchitecture=x64
+
+    # mesos-agent.exe can be found in the <repository>\build\src\Debug folder.
+    $ cd src\Debug
+
+    # The Windows agent exposes new isolators that must be used as with
+    # the `--isolation` flag. To get started point the agent to a working
+    # master, using eiher an IP address or zookeeper information.
+    $ mesos-agent.exe --master=<master> --work_dir=<work folder> --isolation=windows/cpu,filesystem/windows --launcher_dir=<repository>\build\src\Debug
+
 ## Examples
 
 Mesos comes bundled with example frameworks written in C++, Java and Python.
@@ -199,8 +243,8 @@ described in the ***Building Mesos*** section above.
     # Start mesos master (Ensure work directory exists and has proper permissions).
     $ ./bin/mesos-master.sh --ip=127.0.0.1 --work_dir=/var/lib/mesos
 
-    # Start mesos agent.
-    $ ./bin/mesos-agent.sh --master=127.0.0.1:5050
+    # Start mesos agent (Ensure work directory exists and has proper permissions).
+    $ ./bin/mesos-agent.sh --master=127.0.0.1:5050 --work_dir=/var/lib/mesos
 
     # Visit the mesos web page.
     $ http://127.0.0.1:5050

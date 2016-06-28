@@ -17,6 +17,8 @@
 #ifndef __SLAVE_VALIDATION_HPP__
 #define __SLAVE_VALIDATION_HPP__
 
+#include <mesos/agent/agent.hpp>
+
 #include <mesos/executor/executor.hpp>
 
 #include <stout/error.hpp>
@@ -26,6 +28,19 @@ namespace mesos {
 namespace internal {
 namespace slave {
 namespace validation {
+
+namespace agent {
+namespace call {
+
+// Validates that a agent:Call is well-formed.
+// TODO(bmahler): Add unit tests.
+Option<Error> validate(
+    const mesos::agent::Call& call,
+    const Option<std::string>& principal = None());
+
+} // namespace call {
+} // namespace agent {
+
 namespace executor {
 namespace call {
 

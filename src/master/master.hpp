@@ -32,9 +32,10 @@
 
 #include <mesos/maintenance/maintenance.hpp>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 #include <mesos/master/contender.hpp>
 #include <mesos/master/detector.hpp>
+#include <mesos/master/master.hpp>
 
 #include <mesos/module/authenticator.hpp>
 
@@ -98,18 +99,18 @@ class WhitelistWatcher;
 
 namespace master {
 
-class Repairer;
+class Master;
 class SlaveObserver;
 
 struct BoundedRateLimiter;
 struct Framework;
-struct HttpConnection;
 struct Role;
 
 
 struct Slave
 {
-  Slave(const SlaveInfo& _info,
+  Slave(Master* const _master,
+        const SlaveInfo& _info,
         const process::UPID& _pid,
         const MachineID& _machineId,
         const std::string& _version,
@@ -119,7 +120,8 @@ struct Slave
           std::vector<ExecutorInfo>(),
         const std::vector<Task> tasks =
           std::vector<Task>())
-    : id(_info.id()),
+    : master(_master),
+      id(_info.id()),
       info(_info),
       machineId(_machineId),
       pid(_pid),
@@ -128,7 +130,7 @@ struct Slave
       connected(true),
       active(true),
       checkpointedResources(_checkpointedResources),
-      observer(NULL)
+      observer(nullptr)
   {
     CHECK(_info.has_id());
 
@@ -157,27 +159,10 @@ struct Slave
     if (tasks.contains(frameworkId) && tasks[frameworkId].contains(taskId)) {
       return tasks[frameworkId][taskId];
     }
-    return NULL;
+    return nullptr;
   }
 
-  void addTask(Task* task)
-  {
-    const TaskID& taskId = task->task_id();
-    const FrameworkID& frameworkId = task->framework_id();
-
-    CHECK(!tasks[frameworkId].contains(taskId))
-      << "Duplicate task " << taskId << " of framework " << frameworkId;
-
-    tasks[frameworkId][taskId] = task;
-
-    if (!protobuf::isTerminalState(task->state())) {
-      usedResources[frameworkId] += task->resources();
-    }
-
-    LOG(INFO) << "Adding task " << taskId
-              << " with resources " << task->resources()
-              << " on agent " << id << " (" << info.hostname() << ")";
-  }
+  void addTask(Task* task);
 
   // Notification of task termination, for resource accounting.
   // TODO(bmahler): This is a hack for performance. We need to
@@ -295,6 +280,7 @@ struct Slave
     checkpointedResources = totalResources.filter(needCheckpointing);
   }
 
+  Master* const master;
   const SlaveID id;
   const SlaveInfo info;
 
@@ -365,12 +351,49 @@ inline std::ostream& operator<<(std::ostream& stream, const Slave& slave)
 }
 
 
+// Represents the streaming HTTP connection to a framework or a client
+// subscribed to the '/api/vX' endpoint.
+struct HttpConnection
+{
+  HttpConnection(const process::http::Pipe::Writer& _writer,
+                 ContentType _contentType,
+                 UUID _streamId)
+    : writer(_writer),
+      contentType(_contentType),
+      streamId(_streamId) {}
+
+  // We need to evolve the internal old style message/unversioned event into a
+  // versioned event e.g., `v1::scheduler::Event` or `v1::master::Event`.
+  template <typename Message, typename Event = v1::scheduler::Event>
+  bool send(const Message& message)
+  {
+    ::recordio::Encoder<Event> encoder (lambda::bind(
+        serialize, contentType, lambda::_1));
+
+    return writer.write(encoder.encode(evolve(message)));
+  }
+
+  bool close()
+  {
+    return writer.close();
+  }
+
+  process::Future<Nothing> closed() const
+  {
+    return writer.readerClosed();
+  }
+
+  process::http::Pipe::Writer writer;
+  ContentType contentType;
+  UUID streamId;
+};
+
+
 class Master : public ProtobufProcess<Master>
 {
 public:
-  Master(mesos::master::allocator::Allocator* allocator,
+  Master(mesos::allocator::Allocator* allocator,
          Registrar* registrar,
-         Repairer* repairer,
          Files* files,
          mesos::master::contender::MasterContender* contender,
          mesos::master::detector::MasterDetector* detector,
@@ -553,6 +576,9 @@ protected:
   virtual void exited(const process::UPID& pid);
   void exited(const FrameworkID& frameworkId, const HttpConnection& http);
   void _exited(Framework* framework);
+
+  // Invoked upon noticing a subscriber disconnection.
+  void exited(const UUID& id);
 
   // Invoked when the message is ready to be executed after
   // being throttled.
@@ -867,6 +893,9 @@ private:
       bool force,
       const process::Future<bool>& authorized);
 
+  // Subscribes a client to the 'api/vX' endpoint.
+  void subscribe(HttpConnection http);
+
   void teardown(Framework* framework);
 
   void accept(
@@ -880,9 +909,17 @@ private:
     const scheduler::Call::Accept& accept,
     const process::Future<std::list<process::Future<bool>>>& authorizations);
 
+  void acceptInverseOffers(
+      Framework* framework,
+      const scheduler::Call::AcceptInverseOffers& accept);
+
   void decline(
       Framework* framework,
       const scheduler::Call::Decline& decline);
+
+  void declineInverseOffers(
+      Framework* framework,
+      const scheduler::Call::DeclineInverseOffers& decline);
 
   void revive(Framework* framework);
 
@@ -917,6 +954,9 @@ private:
     return leader.isSome() && leader.get() == info_;
   }
 
+  process::Future<bool> authorizeLogAccess(
+      const Option<std::string>& principal);
+
   /**
    * Returns whether the given role is on the whitelist.
    *
@@ -944,6 +984,10 @@ private:
     // Returns a list of set quotas.
     process::Future<process::http::Response> status(
         const process::http::Request& request,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> set(
+        const mesos::master::Call& call,
         const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> set(
@@ -1003,13 +1047,17 @@ private:
         const Option<std::string>& principal,
         const std::string& role) const;
 
+    // TODO(mpark): The following functions `authorizeSetQuota` and
+    // `authorizeRemoveQuota` should be replaced with `authorizeUpdateQuota` at
+    // the end of deprecation cycle which started with 1.0.
+
     process::Future<bool> authorizeSetQuota(
         const Option<std::string>& principal,
-        const std::string& role) const;
+        const mesos::quota::QuotaInfo& quotaInfo) const;
 
     process::Future<bool> authorizeRemoveQuota(
-        const Option<std::string>& requestPrincipal,
-        const Option<std::string>& quotaPrincipal) const;
+        const Option<std::string>& principal,
+        const mesos::quota::QuotaInfo& quotaInfo) const;
 
     process::Future<process::http::Response> _status(
         const process::http::Request& request,
@@ -1017,7 +1065,11 @@ private:
         const std::list<bool>& authorized) const;
 
     process::Future<process::http::Response> _set(
-        const mesos::quota::QuotaInfo& quota,
+        const mesos::quota::QuotaRequest& quotaRequest,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> __set(
+        const mesos::quota::QuotaInfo& quotaInfo,
         bool forced) const;
 
     process::Future<process::http::Response> _remove(
@@ -1045,16 +1097,33 @@ private:
     }
 
     process::Future<process::http::Response> get(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> get(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
 
     process::Future<process::http::Response> update(
         const process::http::Request& request,
         const Option<std::string>& principal) const;
 
   private:
-    process::Future<bool> authorize(
+    process::Future<bool> authorizeGetWeight(
+        const Option<std::string>& principal,
+        const std::string& role) const;
+
+    process::Future<bool> authorizeUpdateWeights(
         const Option<std::string>& principal,
         const std::vector<std::string>& roles) const;
+
+    process::Future<std::vector<WeightInfo>> _filterWeights(
+        const std::vector<WeightInfo>& weightInfos,
+        const std::list<bool>& authorized) const;
+
+    process::Future<std::vector<WeightInfo>> _getWeights(
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> _update(
         const std::vector<WeightInfo>& updateWeightInfos) const;
@@ -1078,6 +1147,11 @@ private:
     // Logs the request, route handlers can compose this with the
     // desired request handler to get consistent request logging.
     static void log(const process::http::Request& request);
+
+    // /api/v1
+    process::Future<process::http::Response> api(
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /api/v1/scheduler
     process::Future<process::http::Response> scheduler(
@@ -1107,11 +1181,6 @@ private:
     // /master/health
     process::Future<process::http::Response> health(
         const process::http::Request& request) const;
-
-    // /master/observe
-    process::Future<process::http::Response> observe(
-        const process::http::Request& request,
-        const Option<std::string>& principal) const;
 
     // /master/redirect
     process::Future<process::http::Response> redirect(
@@ -1187,11 +1256,11 @@ private:
         const process::http::Request& request,
         const Option<std::string>& principal) const;
 
+    static std::string API_HELP();
     static std::string SCHEDULER_HELP();
     static std::string FLAGS_HELP();
     static std::string FRAMEWORKS_HELP();
     static std::string HEALTH_HELP();
-    static std::string OBSERVE_HELP();
     static std::string REDIRECT_HELP();
     static std::string ROLES_HELP();
     static std::string TEARDOWN_HELP();
@@ -1211,12 +1280,50 @@ private:
     static std::string WEIGHTS_HELP();
 
   private:
-    // Continuations.
-    process::Future<process::http::Response> _flags(
-        const process::http::Request& request) const;
+    JSON::Object _flags() const;
+
+    process::Future<std::vector<const Task*>> _tasks(
+        const size_t limit,
+        const size_t offset,
+        const std::string& order,
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> _teardown(
         const FrameworkID& id) const;
+
+    process::Future<process::http::Response> _updateMaintenanceSchedule(
+        const mesos::maintenance::Schedule& schedule) const;
+
+    mesos::maintenance::Schedule _getMaintenanceSchedule() const;
+
+    process::Future<mesos::maintenance::ClusterStatus>
+      _getMaintenanceStatus() const;
+
+    process::Future<process::http::Response> _startMaintenance(
+        const google::protobuf::RepeatedPtrField<MachineID>& machineIds) const;
+
+    process::Future<process::http::Response> _stopMaintenance(
+        const google::protobuf::RepeatedPtrField<MachineID>& machineIds) const;
+
+    process::Future<process::http::Response> _reserve(
+        const SlaveID& slaveId,
+        const Resources& resources,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> _unreserve(
+        const SlaveID& slaveId,
+        const Resources& resources,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> _createVolumes(
+        const SlaveID& slaveId,
+        const google::protobuf::RepeatedPtrField<Resource>& volumes,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> _destroyVolumes(
+        const SlaveID& slaveId,
+        const google::protobuf::RepeatedPtrField<Resource>& volumes,
+        const Option<std::string>& principal) const;
 
     /**
      * Continuation for operations: /reserve, /unreserve,
@@ -1242,20 +1349,102 @@ private:
         Resources required,
         const Offer::Operation& operation) const;
 
-    // Helper routines for endpoint authorization.
-    Try<std::string> extractEndpoint(const process::http::URL& url) const;
+    // Master API handlers.
 
-    // Authorizes access to an HTTP endpoint. The `method` parameter
-    // determines which ACL action will be used in the authorization.
-    // It is expected that the caller has validated that `method` is
-    // supported by this function. Currently "GET" is supported.
-    //
-    // TODO(nfnt): Prefer types instead of strings
-    // for `endpoint` and `method`, see MESOS-5300.
-    process::Future<bool> authorizeEndpoint(
+    process::Future<process::http::Response> getAgents(
+        const mesos::master::Call& call,
         const Option<std::string>& principal,
-        const std::string& endpoint,
-        const std::string& method) const;
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getFlags(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getHealth(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getVersion(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getRoles(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getMetrics(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getLoggingLevel(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> setLoggingLevel(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getLeadingMaster(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> updateMaintenanceSchedule(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getMaintenanceSchedule(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getMaintenanceStatus(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> startMaintenance(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> stopMaintenance(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getTasks(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> createVolumes(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> destroyVolumes(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> reserveResources(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> unreserveResources(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
 
     Master* master;
 
@@ -1273,10 +1462,14 @@ private:
 
   friend struct Framework;
   friend struct Metrics;
+  friend struct Slave;
 
-  // NOTE: Since 'getOffer' and 'slaves' are protected,
-  // we need to make the following functions friends.
+  // NOTE: Since 'getOffer', 'getInverseOffer' and 'slaves' are
+  // protected, we need to make the following functions friends.
   friend Offer* validation::offer::getOffer(
+      Master* master, const OfferID& offerId);
+
+  friend InverseOffer* validation::offer::getInverseOffer(
       Master* master, const OfferID& offerId);
 
   friend Slave* validation::offer::getSlave(
@@ -1288,10 +1481,9 @@ private:
 
   Option<MasterInfo> leader; // Current leading master.
 
-  mesos::master::allocator::Allocator* allocator;
+  mesos::allocator::Allocator* allocator;
   WhitelistWatcher* whitelistWatcher;
   Registrar* registrar;
-  Repairer* repairer;
   Files* files;
 
   mesos::master::contender::MasterContender* contender;
@@ -1358,12 +1550,12 @@ private:
 
       Slave* get(const SlaveID& slaveId) const
       {
-        return ids.get(slaveId).getOrElse(NULL);
+        return ids.get(slaveId).getOrElse(nullptr);
       }
 
       Slave* get(const process::UPID& pid) const
       {
-        return pids.get(pid).getOrElse(NULL);
+        return pids.get(pid).getOrElse(nullptr);
       }
 
       void put(Slave* slave)
@@ -1465,6 +1657,28 @@ private:
     // 'flags.rate_limits'.
     Option<process::Owned<BoundedRateLimiter>> defaultLimiter;
   } frameworks;
+
+  struct Subscribers
+  {
+    // Represents a client subscribed to the 'api/vX' endpoint.
+    //
+    // TODO(anand): Add support for filtering. Some subscribers
+    // might only be interested in a subset of events.
+    struct Subscriber
+    {
+      Subscriber(const HttpConnection& _http)
+        : http(_http) {}
+
+      HttpConnection http;
+    };
+
+    // Sends the event to all subscribers connected to the 'api/vX' endpoint.
+    void send(const mesos::master::Event& event);
+
+    // Active subscribers to the 'api/vX' endpoint keyed by the stream
+    // identifier.
+    hashmap<UUID, Subscriber> subscribed;
+  } subscribers;
 
   hashmap<OfferID, Offer*> offers;
   hashmap<OfferID, process::Timer> offerTimers;
@@ -1689,43 +1903,6 @@ inline std::ostream& operator<<(
     const Framework& framework);
 
 
-// Represents the streaming HTTP connection to a framework.
-struct HttpConnection
-{
-  HttpConnection(const process::http::Pipe::Writer& _writer,
-                 ContentType _contentType,
-                 UUID _streamId)
-    : writer(_writer),
-      contentType(_contentType),
-      streamId(_streamId),
-      encoder(lambda::bind(serialize, contentType, lambda::_1)) {}
-
-  // Converts the message to an Event before sending.
-  template <typename Message>
-  bool send(const Message& message)
-  {
-    // We need to evolve the internal 'message' into a
-    // 'v1::scheduler::Event'.
-    return writer.write(encoder.encode(evolve(message)));
-  }
-
-  bool close()
-  {
-    return writer.close();
-  }
-
-  process::Future<Nothing> closed() const
-  {
-    return writer.readerClosed();
-  }
-
-  process::http::Pipe::Writer writer;
-  ContentType contentType;
-  UUID streamId;
-  ::recordio::Encoder<v1::scheduler::Event> encoder;
-};
-
-
 // This process periodically sends heartbeats to a scheduler on the
 // given HTTP connection.
 class Heartbeater : public process::Process<Heartbeater>
@@ -1813,7 +1990,7 @@ struct Framework
       return tasks[taskId];
     }
 
-    return NULL;
+    return nullptr;
   }
 
   void addTask(Task* task)

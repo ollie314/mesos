@@ -36,10 +36,11 @@ activate :blog do |blog|
   blog.prefix = "blog"
   blog.sources = "{year}-{month}-{day}-{title}"
   blog.default_extension = ".md"
-  blog.layout = "post", 
+  blog.layout = "post",
   blog.permalink = ":title"
 end
 
+page "/index.html", :layout => "basic"
 page "/documentation/*", :layout => "documentation"
 proxy "/documentation/index.html", "/documentation/latest.html", :layout => "documentation"
 proxy "/gettingstarted/index.html", "/documentation/latest/getting-started.html", :layout => "documentation"

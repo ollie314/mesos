@@ -22,7 +22,9 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
+#include <stout/error.hpp>
 #include <stout/thread_local.hpp>
+#include <stout/try.hpp>
 
 #ifdef __WINDOWS__
 #include <stout/windows.hpp>
@@ -40,19 +42,30 @@ struct UUID : boost::uuids::uuid
 public:
   static UUID random()
   {
-    static THREAD_LOCAL boost::uuids::random_generator* generator = NULL;
+    static THREAD_LOCAL boost::uuids::random_generator* generator = nullptr;
 
-    if (generator == NULL) {
+    if (generator == nullptr) {
       generator = new boost::uuids::random_generator();
     }
 
     return UUID((*generator)());
   }
 
-  static UUID fromBytes(const std::string& s)
+  static Try<UUID> fromBytes(const std::string& s)
   {
+    const std::string error = "Not a valid UUID";
+
+    if (s.size() != UUID::static_size()) {
+      return Error(error);
+    }
+
     boost::uuids::uuid uuid;
     memcpy(&uuid, s.data(), s.size());
+
+    if (uuid.version() == UUID::version_unknown) {
+      return Error(error);
+    }
+
     return UUID(uuid);
   }
 

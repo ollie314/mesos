@@ -84,12 +84,12 @@ The operator can set a new quota by sending an HTTP POST request to the `/quota`
 endpoint.
 
 An example request to the quota endpoint could look like this (using the JSON
-definitions below):
+file below):
 
-    $ curl -d jsonMessageBody -X POST http://<master-ip>:<port>/quota
+    $ curl -d @quota.json -X POST http://<master-ip>:<port>/quota
 
 For example to set a quota of 12 CPUs and 6144 MB of RAM for `role1` the operator
-can use the following `jsonMessageBody`:
+can use the following `quota.json`:
 
         {
           "role": "role1",
@@ -156,7 +156,8 @@ to the `/quota` endpoint.
     $ curl -X GET http://<master-ip>:<port>/quota
 
 The response message body includes a JSON representation of the current quota
-status, for example:
+status for role(s) which principal is authorized to query quota status (if
+authorization is enabled). For example:
 
         {
           "infos": [
@@ -184,6 +185,9 @@ The operator will receive one of the following HTTP response codes:
 
 * `200 OK`: Success.
 * `401 Unauthorized`: Unauthenticated request.
+
+__NOTE:__ If the principal is not authorized to query quota status for certain
+          role(s), the result will not include corresponding quota information.
 
 # How does it work?
 

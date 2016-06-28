@@ -24,7 +24,7 @@
 
 #include <mesos/log/log.hpp>
 
-#include <mesos/master/allocator.hpp>
+#include <mesos/allocator/allocator.hpp>
 
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -70,7 +70,6 @@
 #include "master/flags.hpp"
 #include "master/master.hpp"
 #include "master/registrar.hpp"
-#include "master/repairer.hpp"
 
 #include "master/allocator/mesos/hierarchical.hpp"
 
@@ -105,7 +104,7 @@ namespace cluster {
 Try<process::Owned<Master>> Master::start(
     const master::Flags& flags,
     const Option<zookeeper::URL>& zookeeperUrl,
-    const Option<mesos::master::allocator::Allocator*>& allocator,
+    const Option<mesos::allocator::Allocator*>& allocator,
     const Option<Authorizer*>& authorizer,
     const Option<std::shared_ptr<process::RateLimiter>>& slaveRemovalLimiter)
 {
@@ -114,7 +113,7 @@ Try<process::Owned<Master>> Master::start(
 
   // If the allocator is not provided, create a default one.
   if (allocator.isNone()) {
-    Try<mesos::master::allocator::Allocator*> _allocator =
+    Try<mesos::allocator::Allocator*> _allocator =
       master::allocator::HierarchicalDRFAllocator::create();
 
     if (_allocator.isError()) {
@@ -244,7 +243,6 @@ Try<process::Owned<Master>> Master::start(
   master->state.reset(new mesos::state::protobuf::State(master->storage.get()));
   master->registrar.reset(new master::Registrar(
       flags, master->state.get(), master::DEFAULT_HTTP_AUTHENTICATION_REALM));
-  master->repairer.reset(new master::Repairer());
 
   if (slaveRemovalLimiter.isNone() && flags.agent_removal_rate_limit.isSome()) {
     // Parse the flag value.
@@ -284,7 +282,6 @@ Try<process::Owned<Master>> Master::start(
   master->master.reset(new master::Master(
       allocator.getOrElse(master->allocator.get()),
       master->registrar.get(),
-      master->repairer.get(),
       &master->files,
       master->contender.get(),
       master->detector.get(),

@@ -22,6 +22,7 @@
 #include <stout/result.hpp>
 #include <stout/strings.hpp>
 
+#include <stout/os/killtree.hpp>
 #include <stout/os/read.hpp>
 
 #include <process/check.hpp>
@@ -53,8 +54,6 @@ using std::string;
 using std::vector;
 
 
-Nothing _nothing() { return Nothing(); }
-
 template <typename T>
 static Future<T> failure(
     const string& cmd,
@@ -62,8 +61,8 @@ static Future<T> failure(
     const string& err)
 {
   return Failure(
-      "Failed to '" + cmd + "': exit status = " +
-      WSTRINGIFY(status) + " stderr = " + err);
+      "Failed to run '" + cmd + "': " + WSTRINGIFY(status) +
+      "; stderr='" + err + "'");
 }
 
 
@@ -148,7 +147,7 @@ Future<Version> Docker::version() const
       Subprocess::PIPE());
 
   if (s.isError()) {
-    return Failure(s.error());
+    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
   return s.get().status()
@@ -439,7 +438,7 @@ Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
 }
 
 
-Future<Nothing> Docker::run(
+Future<Option<int>> Docker::run(
     const ContainerInfo& containerInfo,
     const CommandInfo& commandInfo,
     const string& name,
@@ -447,8 +446,8 @@ Future<Nothing> Docker::run(
     const string& mappedDirectory,
     const Option<Resources>& resources,
     const Option<map<string, string>>& env,
-    const process::Subprocess::IO& stdout,
-    const process::Subprocess::IO& stderr) const
+    const process::Subprocess::IO& _stdout,
+    const process::Subprocess::IO& _stderr) const
 {
   if (!containerInfo.has_docker()) {
     return Failure("No docker info found in container info");
@@ -509,6 +508,8 @@ Future<Nothing> Docker::run(
 
   foreach (const Volume& volume, containerInfo.volumes()) {
     string volumeConfig = volume.container_path();
+
+    // TODO(gyliu513): Set `host_path` as source.
     if (volume.has_host_path()) {
       if (!strings::startsWith(volume.host_path(), "/") &&
           !dockerInfo.has_volume_driver()) {
@@ -520,15 +521,34 @@ Future<Nothing> Docker::run(
         volumeConfig = volume.host_path() + ":" + volumeConfig;
       }
 
-      if (volume.has_mode()) {
-        switch (volume.mode()) {
-          case Volume::RW: volumeConfig += ":rw"; break;
-          case Volume::RO: volumeConfig += ":ro"; break;
-          default: return Failure("Unsupported volume mode");
-        }
+      switch (volume.mode()) {
+        case Volume::RW: volumeConfig += ":rw"; break;
+        case Volume::RO: volumeConfig += ":ro"; break;
+        default: return Failure("Unsupported volume mode");
       }
-    } else if (volume.has_mode() && !volume.has_host_path()) {
-      return Failure("Host path is required with mode");
+    } else if (volume.has_source()) {
+      if (volume.source().type() != Volume::Source::DOCKER_VOLUME) {
+        VLOG(1) << "Ignored volume type '" << volume.source().type()
+                << "' for container '" << name << "' as only "
+                << "'DOCKER_VOLUME' was supported by docker";
+        continue;
+      }
+
+      volumeConfig = volume.source().docker_volume().name() +
+                     ":" + volumeConfig;
+
+      if (volume.source().docker_volume().has_driver()) {
+        argv.push_back("--volume-driver=" +
+                       volume.source().docker_volume().driver());
+      }
+
+      switch (volume.mode()) {
+        case Volume::RW: volumeConfig += ":rw"; break;
+        case Volume::RO: volumeConfig += ":ro"; break;
+        default: return Failure("Unsupported volume mode");
+      }
+    } else {
+      return Failure("Host path or volume source is required");
     }
 
     argv.push_back("-v");
@@ -539,6 +559,8 @@ Future<Nothing> Docker::run(
   argv.push_back("-v");
   argv.push_back(sandboxDirectory + ":" + mappedDirectory);
 
+  // TODO(gyliu513): Deprecate this after the release cycle of 1.0.
+  // It will be replaced by Volume.Source.DockerVolume.driver.
   if (dockerInfo.has_volume_driver()) {
     argv.push_back("--volume-driver=" + dockerInfo.volume_driver());
   }
@@ -674,7 +696,7 @@ Future<Nothing> Docker::run(
 
   string cmd = strings::join(" ", argv);
 
-  VLOG(1) << "Running " << cmd;
+  LOG(INFO) << "Running " << cmd;
 
   map<string, string> environment = os::environment();
 
@@ -686,36 +708,28 @@ Future<Nothing> Docker::run(
       path,
       argv,
       Subprocess::PATH("/dev/null"),
-      stdout,
-      stderr,
+      _stdout,
+      _stderr,
       NO_SETSID,
       None(),
       environment);
 
   if (s.isError()) {
-    return Failure(s.error());
+    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
-  // We don't call checkError here to avoid printing the stderr
-  // of the docker container task as docker run with attach forwards
-  // the container's stderr to the client's stderr.
-  return s.get().status()
-    .then(lambda::bind(
-        &Docker::_run,
-        lambda::_1))
+  s->status()
     .onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
-}
 
-
-Future<Nothing> Docker::_run(const Option<int>& status)
-{
-  if (status.isNone()) {
-    return Failure("Failed to get exit status");
-  } else if (status.get() != 0) {
-    return Failure("Container exited on error: " + WSTRINGIFY(status.get()));
-  }
-
-  return Nothing();
+  // Ideally we could capture the stderr when docker itself fails,
+  // however due to the stderr redirection used here we cannot.
+  //
+  // TODO(bmahler): Determine a way to redirect stderr while still
+  // capturing the stderr when 'docker run' itself fails. E.g. we
+  // could use 'docker logs' in conjuction with a "detached" form
+  // of 'docker run' to isolate 'docker run' failure messages from
+  // the container stderr.
+  return s->status();
 }
 
 
@@ -742,7 +756,7 @@ Future<Nothing> Docker::stop(
       Subprocess::PIPE());
 
   if (s.isError()) {
-    return Failure(s.error());
+    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
   return s.get().status()
@@ -773,6 +787,30 @@ Future<Nothing> Docker::_stop(
 }
 
 
+Future<Nothing> Docker::kill(
+    const string& containerName,
+    int signal) const
+{
+  const string cmd =
+    path + " -H " + socket +
+    " kill --signal=" + stringify(signal) + " " + containerName;
+
+  VLOG(1) << "Running " << cmd;
+
+  Try<Subprocess> s = subprocess(
+      cmd,
+      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH("/dev/null"),
+      Subprocess::PIPE());
+
+  if (s.isError()) {
+    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
+  }
+
+  return checkError(cmd, s.get());
+}
+
+
 Future<Nothing> Docker::rm(
     const string& containerName,
     bool force) const
@@ -791,7 +829,7 @@ Future<Nothing> Docker::rm(
       Subprocess::PIPE());
 
   if (s.isError()) {
-    return Failure(s.error());
+    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
   return checkError(cmd, s.get());
@@ -830,7 +868,7 @@ void Docker::_inspect(
       Subprocess::PIPE());
 
   if (s.isError()) {
-    promise->fail(s.error());
+    promise->fail("Failed to create subprocess '" + cmd + "': " + s.error());
     return;
   }
 
@@ -949,7 +987,7 @@ Future<list<Docker::Container>> Docker::ps(
       Subprocess::PIPE());
 
   if (s.isError()) {
-    return Failure(s.error());
+    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
   // Start reading from stdout so writing to the pipe won't block
@@ -1120,7 +1158,7 @@ Future<Docker::Image> Docker::pull(
       None());
 
   if (s.isError()) {
-    return Failure("Failed to execute '" + cmd + "': " + s.error());
+    return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
   }
 
   // Start reading from stdout so writing to the pipe won't block

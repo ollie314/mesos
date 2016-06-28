@@ -39,6 +39,7 @@
 namespace process {
 
 // Forward declaration.
+class Logging;
 class Sequence;
 
 namespace firewall {
@@ -135,7 +136,7 @@ protected:
   void inject(
       const UPID& from,
       const std::string& name,
-      const char* data = NULL,
+      const char* data = nullptr,
       size_t length = 0);
 
   /**
@@ -146,7 +147,7 @@ protected:
   void send(
       const UPID& to,
       const std::string& name,
-      const char* data = NULL,
+      const char* data = nullptr,
       size_t length = 0);
 
   /**
@@ -485,6 +486,12 @@ network::Address address();
 
 
 /**
+ * Return the PID associated with the global logging process.
+ */
+PID<Logging> logging();
+
+
+/**
  * Spawn a new process.
  *
  * @param process Process to be spawned.
@@ -560,14 +567,14 @@ bool wait(const ProcessBase* process, const Duration& duration = Seconds(-1));
  */
 void post(const UPID& to,
           const std::string& name,
-          const char* data = NULL,
+          const char* data = nullptr,
           size_t length = 0);
 
 
 void post(const UPID& from,
           const UPID& to,
           const std::string& name,
-          const char* data = NULL,
+          const char* data = nullptr,
           size_t length = 0);
 
 

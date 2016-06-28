@@ -143,13 +143,19 @@ public:
   iterator begin() { return flags_.begin(); }
   iterator end() { return flags_.end(); }
 
+  // In the overloaded function signatures for `add` found below, we use a `T2*`
+  // for the default flag value where applicable. This is used instead of an
+  // `Option<T2>&` because when string literals are passed to this parameter,
+  // `Option` infers a character array type, which causes problems in the
+  // current implementation of `Option`. See MESOS-5471.
+
   template <typename T1, typename T2, typename F>
   void add(
       T1* t1,
       const Name& name,
       const Option<Name>& alias,
       const std::string& help,
-      const T2& t2,
+      const T2* t2,
       F validate);
 
   template <typename T1, typename T2, typename F>
@@ -160,7 +166,7 @@ public:
       const T2& t2,
       F validate)
   {
-    add(t1, name, None(), help, t2, validate);
+    add(t1, name, None(), help, &t2, validate);
   }
 
   template <typename T1, typename T2>
@@ -170,7 +176,21 @@ public:
       const std::string& help,
       const T2& t2)
   {
-    add(t1, name, None(), help, t2, [](const T1&) { return None(); });
+    add(t1, name, None(), help, &t2, [](const T1&) { return None(); });
+  }
+
+  template <typename T1>
+  void add(
+      T1* t1,
+      const Name& name,
+      const std::string& help)
+  {
+    add(t1,
+        name,
+        None(),
+        help,
+        static_cast<const T1*>(nullptr),
+        [](const T1&) { return None(); });
   }
 
   template <typename T1, typename T2>
@@ -181,7 +201,7 @@ public:
       const std::string& help,
       const T2& t2)
   {
-    add(t1, name, alias, help, t2, [](const T1&) { return None(); });
+    add(t1, name, alias, help, &t2, [](const T1&) { return None(); });
   }
 
   template <typename T, typename F>
@@ -228,8 +248,20 @@ protected:
       const Name& name,
       const Option<Name>& alias,
       const std::string& help,
-      const T2& t2,
+      const T2* t2,
       F validate);
+
+  template <typename Flags, typename T1, typename T2, typename F>
+  void add(
+      T1 Flags::*t1,
+      const Name& name,
+      const Option<Name>& alias,
+      const std::string& help,
+      const T2& t2,
+      F validate)
+  {
+    add(t1, name, alias, help, &t2, validate);
+  }
 
   template <typename Flags, typename T1, typename T2, typename F>
   void add(
@@ -239,7 +271,7 @@ protected:
       const T2& t2,
       F validate)
   {
-    add(t1, name, None(), help, t2, validate);
+    add(t1, name, None(), help, &t2, validate);
   }
 
   template <typename Flags, typename T1, typename T2>
@@ -249,7 +281,21 @@ protected:
       const std::string& help,
       const T2& t2)
   {
-    add(t1, name, None(), help, t2, [](const T1&) { return None(); });
+    add(t1, name, None(), help, &t2, [](const T1&) { return None(); });
+  }
+
+  template <typename Flags, typename T>
+  void add(
+      T Flags::*t,
+      const Name& name,
+      const std::string& help)
+  {
+    add(t,
+        name,
+        None(),
+        help,
+        static_cast<const T*>(nullptr),
+        [](const T&) { return None(); });
   }
 
   template <typename Flags, typename T1, typename T2>
@@ -260,7 +306,7 @@ protected:
       const std::string& help,
       const T2& t2)
   {
-    add(t1, name, alias, help, t2, [](const T1&) { return None(); });
+    add(t1, name, alias, help, &t2, [](const T1&) { return None(); });
   }
 
   template <typename Flags, typename T, typename F>
@@ -362,21 +408,26 @@ void FlagsBase::add(
     const Name& name,
     const Option<Name>& alias,
     const std::string& help,
-    const T2& t2,
+    const T2* t2,
     F validate)
 {
-  // Don't bother adding anything if the pointer is NULL.
-  if (t1 == NULL) {
+  // Don't bother adding anything if the pointer is `nullptr`.
+  if (t1 == nullptr) {
     return;
   }
-
-  *t1 = t2; // Set the default.
 
   Flag flag;
   flag.name = name;
   flag.alias = alias;
   flag.help = help;
   flag.boolean = typeid(T1) == typeid(bool);
+
+  if (t2 != nullptr) {
+    *t1 = *t2; // Set the default.
+    flag.required = false;
+  } else {
+    flag.required = true;
+  }
 
   // NOTE: We need to take FlagsBase* (or const FlagsBase&) as the
   // first argument to match the function signature of the 'load',
@@ -409,7 +460,9 @@ void FlagsBase::add(
   flag.help += help.size() > 0 && help.find_last_of("\n\r") != help.size() - 1
     ? " (default: " // On same line, add space.
     : "(default: "; // On newline.
-  flag.help += stringify(t2);
+  if (t2 != nullptr) {
+    flag.help += stringify(*t2);
+  }
   flag.help += ")";
 
   add(flag);
@@ -424,8 +477,8 @@ void FlagsBase::add(
     const std::string& help,
     F validate)
 {
-  // Don't bother adding anything if the pointer is NULL.
-  if (option == NULL) {
+  // Don't bother adding anything if the pointer is `nullptr`.
+  if (option == nullptr) {
     return;
   }
 
@@ -434,6 +487,7 @@ void FlagsBase::add(
   flag.alias = alias;
   flag.help = help;
   flag.boolean = typeid(T) == typeid(bool);
+  flag.required = false;
 
   // NOTE: See comment above in T* overload of FlagsBase::add for why
   // we need to take the FlagsBase* parameter.
@@ -472,20 +526,18 @@ void FlagsBase::add(
     const Name& name,
     const Option<Name>& alias,
     const std::string& help,
-    const T2& t2,
+    const T2* t2,
     F validate)
 {
-  // Don't bother adding anything if the pointer is NULL.
-  if (t1 == NULL) {
+  // Don't bother adding anything if the pointer is `nullptr`.
+  if (t1 == nullptr) {
     return;
   }
 
   Flags* flags = dynamic_cast<Flags*>(this);
-  if (flags == NULL) {
+  if (flags == nullptr) {
     ABORT("Attempted to add flag '" + name.value +
           "' with incompatible type");
-  } else {
-    flags->*t1 = t2; // Set the default.
   }
 
   Flag flag;
@@ -493,6 +545,13 @@ void FlagsBase::add(
   flag.alias = alias;
   flag.help = help;
   flag.boolean = typeid(T1) == typeid(bool);
+
+  if (t2 != nullptr) {
+    flags->*t1 = *t2; // Set the default.
+    flag.required = false;
+  } else {
+    flag.required = true;
+  }
 
   // NOTE: We need to take FlagsBase* (or const FlagsBase&) as the
   // first argument to 'load', 'stringify', and 'validate' so that we
@@ -503,7 +562,7 @@ void FlagsBase::add(
 
   flag.load = [t1](FlagsBase* base, const std::string& value) -> Try<Nothing> {
     Flags* flags = dynamic_cast<Flags*>(base);
-    if (base != NULL) {
+    if (base != nullptr) {
       // NOTE: 'fetch' "retrieves" the value if necessary and then
       // invokes 'parse'. See 'fetch' for more details.
       Try<T1> t = fetch<T1>(value);
@@ -519,7 +578,7 @@ void FlagsBase::add(
 
   flag.stringify = [t1](const FlagsBase& base) -> Option<std::string> {
     const Flags* flags = dynamic_cast<const Flags*>(&base);
-    if (flags != NULL) {
+    if (flags != nullptr) {
       return stringify(flags->*t1);
     }
     return None();
@@ -527,7 +586,7 @@ void FlagsBase::add(
 
   flag.validate = [t1, validate](const FlagsBase& base) -> Option<Error> {
     const Flags* flags = dynamic_cast<const Flags*>(&base);
-    if (flags != NULL) {
+    if (flags != nullptr) {
       return validate(flags->*t1);
     }
     return None();
@@ -537,7 +596,9 @@ void FlagsBase::add(
   flag.help += help.size() > 0 && help.find_last_of("\n\r") != help.size() - 1
     ? " (default: " // On same line, add space.
     : "(default: "; // On newline.
-  flag.help += stringify(t2);
+  if (t2 != nullptr) {
+    flag.help += stringify(*t2);
+  }
   flag.help += ")";
 
   add(flag);
@@ -552,13 +613,13 @@ void FlagsBase::add(
     const std::string& help,
     F validate)
 {
-  // Don't bother adding anything if the pointer is NULL.
-  if (option == NULL) {
+  // Don't bother adding anything if the pointer is `nullptr`.
+  if (option == nullptr) {
     return;
   }
 
   Flags* flags = dynamic_cast<Flags*>(this);
-  if (flags == NULL) {
+  if (flags == nullptr) {
     ABORT("Attempted to add flag '" + name.value +
           "' with incompatible type");
   }
@@ -568,6 +629,7 @@ void FlagsBase::add(
   flag.alias = alias;
   flag.help = help;
   flag.boolean = typeid(T) == typeid(bool);
+  flag.required = false;
 
   // NOTE: See comment above in Flags::T* overload of FLagsBase::add
   // for why we need to pass FlagsBase* (or const FlagsBase&) as a
@@ -576,7 +638,7 @@ void FlagsBase::add(
   flag.load =
     [option](FlagsBase* base, const std::string& value) -> Try<Nothing> {
     Flags* flags = dynamic_cast<Flags*>(base);
-    if (flags != NULL) {
+    if (flags != nullptr) {
       // NOTE: 'fetch' "retrieves" the value if necessary and then
       // invokes 'parse'. See 'fetch' for more details.
       Try<T> t = fetch<T>(value);
@@ -592,7 +654,7 @@ void FlagsBase::add(
 
   flag.stringify = [option](const FlagsBase& base) -> Option<std::string> {
     const Flags* flags = dynamic_cast<const Flags*>(&base);
-    if (flags != NULL) {
+    if (flags != nullptr) {
       if ((flags->*option).isSome()) {
         return stringify((flags->*option).get());
       }
@@ -602,7 +664,7 @@ void FlagsBase::add(
 
   flag.validate = [option, validate](const FlagsBase& base) -> Option<Error> {
     const Flags* flags = dynamic_cast<const Flags*>(&base);
-    if (flags != NULL) {
+    if (flags != nullptr) {
       return validate(flags->*option);
     }
     return None();
@@ -816,7 +878,7 @@ inline Try<Warnings> FlagsBase::load(
     // Now null terminate the array. Note that we'll "leak" the
     // arguments that were processed here but it's not like they would
     // have gotten deleted in normal operations anyway.
-    (*argv)[i++] = NULL;
+    (*argv)[i++] = nullptr;
   }
 
   return result;
@@ -935,6 +997,12 @@ inline Try<Warnings> FlagsBase::load(
   // order to provide more feedback rather than requiring a user to
   // fix one at a time.
   foreachvalue (const Flag& flag, flags_) {
+    if (flag.required && flag.loaded_name.isNone()) {
+        return Error(
+            "Flag '" + flag.name.value +
+            "' is required, but it was not provided");
+    }
+
     Option<Error> error = flag.validate(*this);
     if (error.isSome()) {
       return error.get();

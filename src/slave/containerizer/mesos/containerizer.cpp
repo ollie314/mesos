@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <set>
+
 #include <mesos/module/isolator.hpp>
 
 #include <mesos/slave/container_logger.hpp>
@@ -31,6 +33,7 @@
 #include <stout/adaptor.hpp>
 #include <stout/foreach.hpp>
 #include <stout/fs.hpp>
+#include <stout/hashmap.hpp>
 #include <stout/lambda.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
@@ -51,9 +54,12 @@
 #include "slave/containerizer/mesos/launcher.hpp"
 #ifdef __linux__
 #include "slave/containerizer/mesos/linux_launcher.hpp"
-#endif
+#endif // __linux__
 
 #include "slave/containerizer/mesos/isolators/posix.hpp"
+#ifdef __WINDOWS__
+#include "slave/containerizer/mesos/isolators/windows.hpp"
+#endif // __WINDOWS__
 
 #include "slave/containerizer/mesos/isolators/posix/disk.hpp"
 
@@ -63,32 +69,34 @@
 
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/cgroups/cpushare.hpp"
+#include "slave/containerizer/mesos/isolators/cgroups/devices.hpp"
 #include "slave/containerizer/mesos/isolators/cgroups/mem.hpp"
 #include "slave/containerizer/mesos/isolators/cgroups/net_cls.hpp"
 #include "slave/containerizer/mesos/isolators/cgroups/perf_event.hpp"
-#endif
-
-#ifdef ENABLE_NVIDIA_GPU_SUPPORT
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/cgroups/devices/gpus/nvidia.hpp"
-#endif
-#endif
+#endif // __linux__
 
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/docker/runtime.hpp"
-#endif
+#endif // __linux__
 
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/docker/volume/isolator.hpp"
-#endif
+#endif // __linux__
 
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/filesystem/linux.hpp"
-#endif
+#endif // __linux__
 #include "slave/containerizer/mesos/isolators/filesystem/posix.hpp"
+#ifdef __WINDOWS__
+#include "slave/containerizer/mesos/isolators/filesystem/windows.hpp"
+#endif // __WINDOWS__
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/filesystem/shared.hpp"
-#endif
+#endif // __linux__
+
+#ifdef __linux__
+#include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
+#endif // __linux__
 
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/namespaces/pid.hpp"
@@ -105,6 +113,7 @@
 
 using std::list;
 using std::map;
+using std::set;
 using std::string;
 using std::vector;
 
@@ -128,7 +137,11 @@ using state::FrameworkState;
 using state::ExecutorState;
 using state::RunState;
 
+#ifndef __WINDOWS__
 const char MESOS_CONTAINERIZER[] = "mesos-containerizer";
+#else
+const char MESOS_CONTAINERIZER[] = "mesos-containerizer.exe";
+#endif // __WINDOWS__
 
 Try<MesosContainerizer*> MesosContainerizer::create(
     const Flags& flags,
@@ -161,6 +174,16 @@ Try<MesosContainerizer*> MesosContainerizer::create(
   // TODO(jieyu): Check that only one filesystem isolator is used.
   if (!strings::contains(flags_.isolation, "filesystem/")) {
     flags_.isolation += ",filesystem/posix";
+  }
+
+  if (strings::contains(flags_.isolation, "posix/disk")) {
+    LOG(WARNING) << "'posix/disk' has been renamed as 'disk/du', "
+                 << "please update your --isolation flag to use 'disk/du'";
+
+    if (strings::contains(flags_.isolation, "disk/du")) {
+      return Error(
+          "Using 'posix/disk' and 'disk/du' simultaneously is disallowed");
+    }
   }
 
 #ifdef __linux__
@@ -204,6 +227,15 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     return LinuxLauncher::available()
       ? LinuxLauncher::create(flags_)
       : PosixLauncher::create(flags_);
+#elif __WINDOWS__
+    // NOTE: Because the most basic launcher historically has been "posix", we
+    // accept this flag on Windows, but map it to the `WindowsLauncher`.
+    if (flags_.launcher.isSome() && !(flags_.launcher.get() == "posix" ||
+        flags_.launcher.get() == "windows")) {
+      return Error("Unsupported launcher: " + flags_.launcher.get());
+    }
+
+    return WindowsLauncher::create(flags_);
 #else
     if (flags_.launcher.isSome() && flags_.launcher.get() != "posix") {
       return Error("Unsupported launcher: " + flags_.launcher.get());
@@ -222,64 +254,102 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     return Error("Failed to create provisioner: " + provisioner.error());
   }
 
-  // Create the isolators for the MesosContainerizer.
+  // Create the isolators.
+  //
+  // Currently, the order of the entries in the --isolation flag
+  // specifies the ordering of the isolators. Specifically, the
+  // `create` and `prepare` calls for each isolator are run serially
+  // in the order in which they appear in the --isolation flag, while
+  // the `cleanup` call is serialized in reverse order.
+  //
+  // It is the responsibility of each isolator to check its
+  // dependency requirements (if any) during its `create`
+  // execution. This means that if the operator specifies the
+  // flags in the wrong order, it will produce an error during
+  // isolator creation.
+  //
+  // NOTE: We ignore the placement of the filesystem isolator in
+  // the --isolation flag and place it at the front of the isolator
+  // list. This is a temporary hack until isolators are able to
+  // express and validate their ordering requirements.
+
   const hashmap<string, lambda::function<Try<Isolator*>(const Flags&)>>
     creators = {
     // Filesystem isolators.
+#ifndef __WINDOWS__
     {"filesystem/posix", &PosixFilesystemIsolatorProcess::create},
+#else
+    {"filesystem/windows", &WindowsFilesystemIsolatorProcess::create},
+#endif // __WINDOWS__
 #ifdef __linux__
     {"filesystem/linux", &LinuxFilesystemIsolatorProcess::create},
 
     // TODO(jieyu): Deprecate this in favor of using filesystem/linux.
     {"filesystem/shared", &SharedFilesystemIsolatorProcess::create},
-#endif
+#endif // __linux__
 
     // Runtime isolators.
+#ifndef __WINDOWS__
     {"posix/cpu", &PosixCpuIsolatorProcess::create},
     {"posix/mem", &PosixMemIsolatorProcess::create},
+
+    // "posix/disk" is deprecated in favor of the name "disk/du".
     {"posix/disk", &PosixDiskIsolatorProcess::create},
+    {"disk/du", &PosixDiskIsolatorProcess::create},
+
 #if ENABLE_XFS_DISK_ISOLATOR
-    {"xfs/disk", &XfsDiskIsolatorProcess::create},
+    {"disk/xfs", &XfsDiskIsolatorProcess::create},
 #endif
+#else
+    {"windows/cpu", &WindowsCpuIsolatorProcess::create},
+#endif // __WINDOWS__
 #ifdef __linux__
     {"cgroups/cpu", &CgroupsCpushareIsolatorProcess::create},
+    {"cgroups/devices", &CgroupsDevicesIsolatorProcess::create},
     {"cgroups/mem", &CgroupsMemIsolatorProcess::create},
     {"cgroups/net_cls", &CgroupsNetClsIsolatorProcess::create},
     {"cgroups/perf_event", &CgroupsPerfEventIsolatorProcess::create},
-#ifdef ENABLE_NVIDIA_GPU_SUPPORT
-    {"cgroups/devices/gpus/nvidia", &CgroupsNvidiaGpuIsolatorProcess::create},
-#endif
     {"docker/runtime", &DockerRuntimeIsolatorProcess::create},
     {"docker/volume", &DockerVolumeIsolatorProcess::create},
+    {"gpu/nvidia", &NvidiaGpuIsolatorProcess::create},
     {"namespaces/pid", &NamespacesPidIsolatorProcess::create},
     {"network/cni", &NetworkCniIsolatorProcess::create},
-#endif
-#ifdef WITH_NETWORK_ISOLATOR
+#endif // __linux__
+    // NOTE: Network isolation is currently not supported on Windows builds.
+#if !defined(__WINDOWS__) && defined(WITH_NETWORK_ISOLATOR)
     {"network/port_mapping", &PortMappingIsolatorProcess::create},
 #endif
   };
 
+  const vector<string> isolations = strings::tokenize(flags_.isolation, ",");
+
+  if (isolations.size() !=
+      set<string>(isolations.begin(), isolations.end()).size()) {
+    return Error("Duplicate entries found in --isolation flag"
+                 " '" + stringify(isolations) + "'");
+  }
+
   vector<Owned<Isolator>> isolators;
 
-  foreach (const string& type, strings::tokenize(flags_.isolation, ",")) {
-    Try<Isolator*> isolator = [&creators, &type, &flags_]() -> Try<Isolator*> {
-      if (creators.contains(type)) {
-        return creators.at(type)(flags_);
-      } else if (ModuleManager::contains<Isolator>(type)) {
-        return ModuleManager::create<Isolator>(type);
+  foreach (const string& isolation, isolations) {
+    Try<Isolator*> isolator = [&]() -> Try<Isolator*> {
+      if (creators.contains(isolation)) {
+        return creators.at(isolation)(flags_);
+      } else if (ModuleManager::contains<Isolator>(isolation)) {
+        return ModuleManager::create<Isolator>(isolation);
       }
       return Error("Unknown or unsupported isolator");
     }();
 
     if (isolator.isError()) {
-      return Error(
-          "Could not create isolator '" + type + "': " + isolator.error());
+      return Error("Failed to create isolator '" + isolation + "': " +
+                   isolator.error());
     }
 
     // NOTE: The filesystem isolator must be the first isolator used
     // so that the runtime isolators can have a consistent view on the
     // prepared filesystem (e.g., any volume mounts are performed).
-    if (strings::contains(type, "filesystem/")) {
+    if (strings::contains(isolation, "filesystem/")) {
       isolators.insert(isolators.begin(), Owned<Isolator>(isolator.get()));
     } else {
       isolators.push_back(Owned<Isolator>(isolator.get()));
@@ -925,16 +995,8 @@ Future<list<Option<ContainerLaunchInfo>>> MesosContainerizerProcess::prepare(
   containerConfig.set_directory(directory);
   containerConfig.mutable_executor_info()->CopyFrom(executorInfo);
 
-  // TODO(gilbert): Remove this in 0.29.0. The camel case protobuf
-  // field 'executorInfo' will be deprecated and removed in 0.29.0.
-  containerConfig.mutable_executorinfo()->CopyFrom(executorInfo);
-
   if (taskInfo.isSome()) {
     containerConfig.mutable_task_info()->CopyFrom(taskInfo.get());
-
-    // TODO(gilbert): Remove this in 0.29.0. The camel case protobuf
-    // field 'taskInfo' will be deprecated and removed in 0.29.0.
-    containerConfig.mutable_taskinfo()->CopyFrom(taskInfo.get());
   }
 
   if (user.isSome()) {
@@ -1094,7 +1156,11 @@ Future<bool> MesosContainerizerProcess::__launch(
   }
 
   JSON::Array commandArray;
+
+  // TODO(jieyu): We should use Option here. If no namespace is
+  // required, we should pass None() to 'launcher->fork'.
   int namespaces = 0;
+
   foreach (const Option<ContainerLaunchInfo>& launchInfo, launchInfos) {
     if (!launchInfo.isSome()) {
       continue;
@@ -1139,11 +1205,12 @@ Future<bool> MesosContainerizerProcess::__launch(
         [=](const ContainerLogger::SubprocessInfo& subprocessInfo)
           -> Future<bool> {
     // Use a pipe to block the child until it's been isolated.
-    int pipes[2];
+    // The `pipes` array is captured later in a lambda.
+    std::array<int, 2> pipes;
 
-    // We assume this should not fail under reasonable conditions so
-    // we use CHECK.
-    CHECK(pipe(pipes) == 0);
+    // TODO(jmlvanre): consider returning failure if `pipe` gives an
+    // error. Currently we preserve the previous logic.
+    CHECK_SOME(os::pipe(pipes.data()));
 
     // Prepare the flags to pass to the launch process.
     MesosContainerizerLaunch::Flags launchFlags;
@@ -1167,13 +1234,13 @@ Future<bool> MesosContainerizerProcess::__launch(
     }
 
 #ifdef __WINDOWS__
-    if (!executorRootfs.isNone()) {
+    if (executorRootfs.isSome()) {
       return Failure(
           "`chroot` is not supported on Windows, but the executor "
           "specifies a root filesystem.");
     }
 
-    if (!user.isNone()) {
+    if (user.isSome()) {
       return Failure(
           "`su` is not supported on Windows, but the executor "
           "specifies a user.");
@@ -1182,9 +1249,20 @@ Future<bool> MesosContainerizerProcess::__launch(
     launchFlags.rootfs = executorRootfs;
     launchFlags.user = user;
 #endif // __WINDOWS__
+
+#ifndef __WINDOWS__
     launchFlags.pipe_read = pipes[0];
     launchFlags.pipe_write = pipes[1];
+#else
+    // NOTE: On windows we need to pass `Handle`s between processes, as fds
+    // are not unique across processes.
+    launchFlags.pipe_read = os::fd_to_handle(pipes[0]);
+    launchFlags.pipe_write = os::fd_to_handle(pipes[1]);
+#endif // __WINDOWS
     launchFlags.commands = commands;
+
+    VLOG(1) << "Launching '" << MESOS_CONTAINERIZER << "' with flags '"
+            << launchFlags << "'";
 
     // Fork the child using launcher.
     vector<string> argv(2);
@@ -1247,8 +1325,8 @@ Future<bool> MesosContainerizerProcess::__launch(
                   user,
                   slaveId))
       .then(defer(self(), &Self::exec, containerId, pipes[1]))
-      .onAny(lambda::bind(&os::close, pipes[0]))
-      .onAny(lambda::bind(&os::close, pipes[1]));
+      .onAny([pipes]() { os::close(pipes[0]); })
+      .onAny([pipes]() { os::close(pipes[1]); });
   }));
 }
 

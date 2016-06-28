@@ -59,7 +59,7 @@ inline Try<std::string> nodename()
   // Get DNS name of the local computer. First, find the size of the output
   // buffer.
   DWORD size = 0;
-  if (!::GetComputerNameEx(ComputerNameDnsHostname, NULL, &size) &&
+  if (!::GetComputerNameEx(ComputerNameDnsHostname, nullptr, &size) &&
       ::GetLastError() != ERROR_MORE_DATA) {
     return WindowsError(
         "os::internal::nodename: Call to `GetComputerNameEx` failed");
@@ -185,7 +185,7 @@ inline void setenv(
   //
   // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/ms683188(v=vs.85).aspx
   if (!overwrite &&
-      ::GetEnvironmentVariable(key.c_str(), NULL, 0) != 0 &&
+      ::GetEnvironmentVariable(key.c_str(), nullptr, 0) != 0 &&
       ::GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
     return;
   }
@@ -199,9 +199,9 @@ inline void setenv(
 // environment variables.
 inline void unsetenv(const std::string& key)
 {
-  // Per MSDN documentation[1], passing `NULL` as the value will cause
+  // Per MSDN documentation[1], passing `nullptr` as the value will cause
   // `SetEnvironmentVariable` to delete the key from the process's environment.
-  ::SetEnvironmentVariable(key.c_str(), NULL);
+  ::SetEnvironmentVariable(key.c_str(), nullptr);
 }
 
 
@@ -267,7 +267,7 @@ inline Result<pid_t> waitpid(long pid, int* status, int options)
       FALSE,
       static_cast<DWORD>(pid));
 
-  if (process == NULL) {
+  if (process == nullptr) {
     return WindowsError("os::waitpid: Failed to open process for pid '" +
                         stringify(pid) + "'");
   }
@@ -313,7 +313,7 @@ inline Result<pid_t> waitpid(long pid, int* status, int options)
   }
 
   // Attempt to retrieve exit code from child process. Store that exit code in
-  // the `status` variable if it's `NULL`.
+  // the `status` variable if it's `nullptr`.
   DWORD child_exit_code = 0;
   if (!::GetExitCodeProcess(scoped_process.get(), &child_exit_code)) {
     errno = ECHILD;
@@ -322,7 +322,7 @@ inline Result<pid_t> waitpid(long pid, int* status, int options)
         std::to_string(pid) + "', but could not retrieve exit code");
   }
 
-  if (status != NULL) {
+  if (status != nullptr) {
     *status = child_exit_code;
   }
 
@@ -345,12 +345,12 @@ inline std::string hstrerror(int err)
     case WSATRY_AGAIN: {
       format_error = ::FormatMessage(
           FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-          NULL,
+          nullptr,
           err,
           MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
           buffer,
           sizeof(buffer),
-          NULL);
+          nullptr);
       break;
     }
     default: {
@@ -495,12 +495,12 @@ inline Try<UTSInfo> uname()
 // variable matching key is found, None() is returned.
 inline Option<std::string> getenv(const std::string& key)
 {
-  DWORD buffer_size = ::GetEnvironmentVariable(key.c_str(), NULL, 0);
+  DWORD buffer_size = ::GetEnvironmentVariable(key.c_str(), nullptr, 0);
   if (buffer_size == 0) {
     return None();
   }
 
-  std::unique_ptr<char> environment(new char[buffer_size]);
+  std::unique_ptr<char[]> environment(new char[buffer_size]);
 
   DWORD value_size =
     ::GetEnvironmentVariable(key.c_str(), environment.get(), buffer_size);
@@ -518,24 +518,14 @@ inline Option<std::string> getenv(const std::string& key)
 
 inline tm* gmtime_r(const time_t* timep, tm* result)
 {
-  return ::gmtime_s(result, timep) == ERROR_SUCCESS ? result : NULL;
+  return ::gmtime_s(result, timep) == ERROR_SUCCESS ? result : nullptr;
 }
 
-
-inline Try<bool> access(const std::string& fileName, int how)
-{
-  if (::_access(fileName.c_str(), how) != 0) {
-    return ErrnoError("os::access: Call to `_access` failed for path '" +
-                      fileName + "'");
-  }
-
-  return true;
-}
 
 inline Result<PROCESSENTRY32> process_entry(pid_t pid)
 {
   // Get a snapshot of the processes in the system. NOTE: We should not check
-  // whether the handle is `NULL`, because this API will always return
+  // whether the handle is `nullptr`, because this API will always return
   // `INVALID_HANDLE_VALUE` on error.
   HANDLE snapshot_handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, pid);
   if (snapshot_handle == INVALID_HANDLE_VALUE) {
@@ -678,7 +668,7 @@ inline int random()
 // Every process started by the `pid` process which is part of the job
 // object becomes part of the job object. The job name should match
 // the name used in `kill_job`.
-inline Try<Nothing> create_job(pid_t pid)
+inline Try<HANDLE> create_job(pid_t pid)
 {
   Try<std::string> alpha_pid = strings::internal::format("MESOS_JOB_%X", pid);
   if (alpha_pid.isError()) {
@@ -696,22 +686,32 @@ inline Try<Nothing> create_job(pid_t pid)
 
   SharedHandle safe_process_handle(process_handle, ::CloseHandle);
 
-  HANDLE job_handle = ::CreateJobObject(NULL, alpha_pid.get().c_str());
+  HANDLE job_handle = ::CreateJobObject(nullptr, alpha_pid.get().c_str());
 
-  if (job_handle == NULL) {
+  if (job_handle == nullptr) {
     return WindowsError("os::create_job: Call to `CreateJobObject` failed");
   }
 
-  SharedHandle safe_job_handle(job_handle, ::CloseHandle);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = { { 0 }, 0 };
+
+  jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+  // The job object will be terminated when the job handle closes. This allows
+  // the job tree to be terminated in case of errors by closing the handle.
+  ::SetInformationJobObject(
+      job_handle,
+      JobObjectExtendedLimitInformation,
+      &jeli,
+      sizeof(jeli));
 
   if (::AssignProcessToJobObject(
-          safe_job_handle.get_handle(),
+          job_handle,
           safe_process_handle.get_handle()) == 0) {
     return WindowsError(
         "os::create_job: Call to `AssignProcessToJobObject` failed");
   };
 
-  return Nothing();
+  return job_handle;
 }
 
 
@@ -732,7 +732,7 @@ inline Try<Nothing> kill_job(pid_t pid)
       FALSE,
       alpha_pid.get().c_str());
 
-  if (job_handle == NULL) {
+  if (job_handle == nullptr) {
     return WindowsError("os::kill_job: Call to `OpenJobObject` failed");
   }
 
@@ -744,6 +744,78 @@ inline Try<Nothing> kill_job(pid_t pid)
   }
 
   return Nothing();
+}
+
+
+inline std::string temp()
+{
+  // Get temp folder for current user.
+  char temp_folder[MAX_PATH + 2];
+  if (::GetTempPath(MAX_PATH + 2, temp_folder) == 0) {
+    // Failed, try current folder.
+    if (::GetCurrentDirectory(MAX_PATH + 2, temp_folder) == 0) {
+      // Failed, use relative path.
+      return ".";
+    }
+  }
+
+  return std::string(temp_folder);
+}
+
+
+// Create pipes for interprocess communication. Since the pipes cannot
+// be used directly by Posix `read/write' functions they are wrapped
+// in file descriptors, a process-local concept.
+inline Try<Nothing> pipe(int pipe[2])
+{
+  // Create inheritable pipe, as described in MSDN[1].
+  //
+  // [1] https://msdn.microsoft.com/en-us/library/windows/desktop/aa365782(v=vs.85).aspx
+  SECURITY_ATTRIBUTES securityAttr;
+  securityAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+  securityAttr.bInheritHandle = TRUE;
+  securityAttr.lpSecurityDescriptor = nullptr;
+
+  HANDLE read_handle;
+  HANDLE write_handle;
+
+  const BOOL result = ::CreatePipe(
+      &read_handle,
+      &write_handle,
+      &securityAttr,
+      0);
+
+  pipe[0] = _open_osfhandle(
+      reinterpret_cast<intptr_t>(read_handle),
+      _O_RDONLY | _O_TEXT);
+
+  if (pipe[0] == -1) {
+    return ErrnoError();
+  }
+
+  pipe[1] = _open_osfhandle(reinterpret_cast<intptr_t>(write_handle), _O_TEXT);
+  if (pipe[1] == -1) {
+    return ErrnoError();
+  }
+
+  return Nothing();
+}
+
+
+// Prepare the file descriptors to be shared with a different process.
+// Under Windows we have to obtain the underlying handles to be shared
+// with a different processs.
+inline intptr_t fd_to_handle(int in)
+{
+  return ::_get_osfhandle(in);
+}
+
+
+// Convert the global file handle into a file descriptor, which on
+// Windows is only valid within the current process.
+inline int handle_to_fd(intptr_t in, int flags)
+{
+  return ::_open_osfhandle(in, flags);
 }
 
 } // namespace os {

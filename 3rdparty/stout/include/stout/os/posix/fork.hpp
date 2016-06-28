@@ -30,6 +30,7 @@
 #include <string>
 
 #include <stout/abort.hpp>
+#include <stout/check.hpp>
 #include <stout/error.hpp>
 #include <stout/exit.hpp>
 #include <stout/foreach.hpp>
@@ -301,7 +302,7 @@ private:
     }
 
     void* memory = mmap(
-        NULL,
+        nullptr,
         sizeof(Tree::Memory),
         PROT_READ | PROT_WRITE, MAP_SHARED,
         fd,
@@ -368,13 +369,13 @@ private:
     if (exec.isSome()) {
       // Execute the command (via '/bin/sh -c command').
       const char* command = exec.get().command.c_str();
-      execlp("sh", "sh", "-c", command, (char*) NULL);
+      execlp("sh", "sh", "-c", command, (char*) nullptr);
       EXIT(EXIT_FAILURE)
         << "Failed to execute '" << command << "': " << os::strerror(errno);
     } else if (wait.isSome()) {
       foreach (pid_t pid, pids) {
         // TODO(benh): Check for signal interruption or other errors.
-        waitpid(pid, NULL, 0);
+        waitpid(pid, nullptr, 0);
       }
     }
 

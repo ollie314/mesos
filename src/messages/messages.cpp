@@ -26,39 +26,13 @@ using std::ostream;
 namespace mesos {
 namespace internal {
 
-bool operator==(const Task& left, const Task& right)
-{
-  // Order of task statuses is important.
-  if (left.statuses().size() != right.statuses().size()) {
-    return false;
-  }
-
-  for (int i = 0; i < left.statuses().size(); i++) {
-    if (left.statuses().Get(i) != right.statuses().Get(i)) {
-      return false;
-    }
-  }
-
-  return left.name() == right.name() &&
-    left.task_id() == right.task_id() &&
-    left.framework_id() == right.framework_id() &&
-    left.executor_id() == right.executor_id() &&
-    left.slave_id() == right.slave_id() &&
-    left.state() == right.state() &&
-    Resources(left.resources()) == Resources(right.resources()) &&
-    left.status_update_state() == right.status_update_state() &&
-    left.status_update_uuid() == right.status_update_uuid() &&
-    left.labels() == right.labels() &&
-    left.discovery() == right.discovery();
-}
-
-
 ostream& operator<<(ostream& stream, const StatusUpdate& update)
 {
   stream << update.status().state();
 
   if (update.has_uuid()) {
-    stream << " (UUID: " << stringify(UUID::fromBytes(update.uuid())) << ")";
+    stream << " (UUID: " << stringify(UUID::fromBytes(update.uuid()).get())
+           << ")";
   }
 
   stream << " for task " << update.status().task_id();

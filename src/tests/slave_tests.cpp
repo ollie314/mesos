@@ -663,12 +663,28 @@ TEST_F(SlaveTest, GetExecutorInfo)
 
   task.mutable_command()->MergeFrom(command);
 
+  DiscoveryInfo* info = task.mutable_discovery();
+  info->set_visibility(DiscoveryInfo::EXTERNAL);
+  info->set_name("mytask");
+  info->set_environment("mytest");
+  info->set_location("mylocation");
+  info->set_version("v0.1.1");
+
+  Labels* labels = task.mutable_labels();
+  labels->add_labels()->CopyFrom(createLabel("label1", "key1"));
+  labels->add_labels()->CopyFrom(createLabel("label2", "key2"));
+
   const ExecutorInfo& executor = slave.getExecutorInfo(frameworkInfo, task);
 
   // Now assert that it actually is running mesos-executor without any
   // bleedover from the command we intend on running.
   EXPECT_TRUE(executor.command().shell());
   EXPECT_EQ(0, executor.command().arguments_size());
+  ASSERT_TRUE(executor.has_labels());
+  EXPECT_EQ(2, executor.labels().labels_size());
+  ASSERT_TRUE(executor.has_discovery());
+  ASSERT_TRUE(executor.discovery().has_name());
+  EXPECT_EQ("mytask", executor.discovery().name());
   EXPECT_NE(string::npos, executor.command().value().find("mesos-executor"));
 }
 
@@ -705,7 +721,7 @@ TEST_F(SlaveTest, GetExecutorInfoForTaskWithContainer)
   container->set_type(ContainerInfo::MESOS);
 
   NetworkInfo *network = container->add_network_infos();
-  network->set_ip_address("4.3.2.1");
+  network->add_ip_addresses()->set_ip_address("4.3.2.1");
   network->add_groups("public");
 
   FrameworkInfo frameworkInfo;
@@ -719,7 +735,13 @@ TEST_F(SlaveTest, GetExecutorInfoForTaskWithContainer)
   // must be included in Executor.container (copied from TaskInfo.container).
   EXPECT_TRUE(executor.has_container());
 
-  EXPECT_EQ("4.3.2.1", executor.container().network_infos(0).ip_address());
+  EXPECT_EQ(1, executor.container().network_infos(0).ip_addresses_size());
+
+  NetworkInfo::IPAddress ipAddress =
+    executor.container().network_infos(0).ip_addresses(0);
+
+  EXPECT_EQ("4.3.2.1", ipAddress.ip_address());
+
   EXPECT_EQ(1, executor.container().network_infos(0).groups_size());
   EXPECT_EQ("public", executor.container().network_infos(0).groups(0));
 }
@@ -775,7 +797,7 @@ TEST_F(SlaveTest, LaunchTaskInfoWithContainerInfo)
   container->set_type(ContainerInfo::MESOS);
 
   NetworkInfo *network = container->add_network_infos();
-  network->set_ip_address("4.3.2.1");
+  network->add_ip_addresses()->set_ip_address("4.3.2.1");
   network->add_groups("public");
 
   FrameworkInfo frameworkInfo;
@@ -908,7 +930,7 @@ TEST_F(SlaveTest, DISABLED_ROOT_RunTaskWithCommandInfoWithUser)
   // TODO(nnielsen): Introduce STOUT abstraction for user verification
   // instead of flat getpwnam call.
   const string testUser = "nobody";
-  if (::getpwnam(testUser.c_str()) == NULL) {
+  if (::getpwnam(testUser.c_str()) == nullptr) {
     LOG(WARNING) << "Cannot run ROOT_RunTaskWithCommandInfoWithUser test:"
                  << " user '" << testUser << "' is not present";
     return;
@@ -1288,7 +1310,7 @@ TEST_F(SlaveTest, StateEndpoint)
   slave::Flags flags = this->CreateSlaveFlags();
 
   flags.hostname = "localhost";
-  flags.resources = "cpus:4;mem:2048;disk:512;ports:[33000-34000]";
+  flags.resources = "cpus:4;gpus:0;mem:2048;disk:512;ports:[33000-34000]";
   flags.attributes = "rack:abc;host:myhost";
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
@@ -1745,7 +1767,7 @@ TEST_F(SlaveTest, StatisticsEndpointGetResourceUsageFailed)
 
   AWAIT_READY(response);
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      InternalServerError().status, response);
+      ServiceUnavailable().status, response);
 
   terminate(slave);
   wait(slave);
@@ -2584,7 +2606,7 @@ TEST_F(SlaveTest, CancelSlaveShutdown)
   Clock::settle();
 
   // Reset the filters to allow pongs from the slave.
-  filter(NULL);
+  filter(nullptr);
 
   // Advance clock enough to do a ping pong.
   Clock::advance(masterFlags.agent_ping_timeout);
@@ -2748,7 +2770,8 @@ TEST_F(SlaveTest, KillTaskUnregisteredExecutor)
   task.mutable_resources()->MergeFrom(offers.get()[0].resources());
   task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
 
-  EXPECT_CALL(exec, registered(_, _, _, _));
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .Times(0);
 
   EXPECT_CALL(exec, launchTask(_, _))
     .Times(0);
@@ -3437,11 +3460,13 @@ TEST_F(SlaveTest, TaskStatusContainerStatus)
   // TaskStatus.container_status.network_infos[0].ip_address.
   EXPECT_TRUE(status.get().has_container_status());
   EXPECT_EQ(1, status.get().container_status().network_infos().size());
-  EXPECT_TRUE(
-      status.get().container_status().network_infos(0).has_ip_address());
-  EXPECT_EQ(
-      slaveIPAddress,
-      status.get().container_status().network_infos(0).ip_address());
+  EXPECT_EQ(1, status.get().container_status().network_infos(0).ip_addresses().size()); // NOLINT(whitespace/line_length)
+
+  NetworkInfo::IPAddress ipAddress =
+    status.get().container_status().network_infos(0).ip_addresses(0);
+
+  ASSERT_TRUE(ipAddress.has_ip_address());
+  EXPECT_EQ(slaveIPAddress, ipAddress.ip_address());
 
   // Now do the same validation with state endpoint.
   Future<Response> response = process::http::get(
@@ -3462,7 +3487,8 @@ TEST_F(SlaveTest, TaskStatusContainerStatus)
       slaveIPAddress,
       parse.get().find<JSON::String>(
           "frameworks[0].executors[0].tasks[0].statuses[0]"
-          ".container_status.network_infos[0].ip_address"));
+          ".container_status.network_infos[0]"
+          ".ip_addresses[0].ip_address"));
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -3555,7 +3581,7 @@ TEST_F(SlaveTest, TotalSlaveResourcesIncludedInUsage)
   StandaloneMasterDetector detector(master.get()->pid);
 
   slave::Flags flags = CreateSlaveFlags();
-  flags.resources = "cpus:2;mem:1024;disk:1024;ports:[31000-32000]";
+  flags.resources = "cpus:2;gpus:0;mem:1024;disk:1024;ports:[31000-32000]";
 
   MockSlave slave(flags, &detector, &containerizer);
   spawn(slave);

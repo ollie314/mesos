@@ -22,6 +22,7 @@
 #include <process/future.hpp>
 #include <process/once.hpp>
 
+#include <stout/error.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/try.hpp>
@@ -64,8 +65,14 @@ public:
   virtual process::Future<bool> authorized(
       const authorization::Request& request);
 
+  virtual process::Future<process::Owned<ObjectApprover>> getObjectApprover(
+      const Option<authorization::Subject>& subject,
+      const authorization::Action& action);
+
 private:
   LocalAuthorizer(const ACLs& acls);
+
+  static Option<Error> validate(const ACLs& acls);
 
   LocalAuthorizerProcess* process;
 };

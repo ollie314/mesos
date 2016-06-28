@@ -1,0 +1,182 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+import "mesos/mesos.proto";
+
+package mesos.agent;
+
+option java_package = "org.apache.mesos.agent";
+option java_outer_classname = "Protos";
+
+/**
+ * Calls that can be sent to the agent API.
+ *
+ * A call is described using the standard protocol buffer "union"
+ * trick, see
+ * https://developers.google.com/protocol-buffers/docs/techniques#union.
+ */
+message Call {
+   // If a call of type `Call::FOO` requires additional parameters they can be
+   // included in the corresponding `Call::Foo` message. Similarly, if a call
+   // receives a synchronous response it will be returned as a `Response`
+   // message of type `Response::FOO`.
+   enum Type {
+    UNKNOWN = 0;
+
+    GET_HEALTH = 1;         // Retrieves the agent's health status.
+    GET_FLAGS = 2;          // Retrieves the agent's flag configuration.
+    GET_VERSION = 3;        // Retrieves the agent's version information.
+    GET_METRICS = 4;        // See 'GetMetrics' below.
+
+    GET_LOGGING_LEVEL = 5;  // Retrieves the agent's logging level.
+    SET_LOGGING_LEVEL = 6;  // See 'SetLoggingLevel' below.
+
+    LIST_FILES = 7;
+    READ_FILE = 8;
+
+    GET_STATE = 9;
+
+    GET_CONTAINERS = 10;
+  }
+
+  // Provides a snapshot of the current metrics tracked by the agent.
+  message GetMetrics {
+    // If set, `timeout` would be used to determines the maximum amount of time
+    // the API will take to respond. If the timeout is exceeded, some metrics
+    // may not be included in the response.
+    optional DurationInfo timeout = 1;
+  }
+
+  // Sets the logging verbosity level for a specified duration. Mesos uses
+  // [glog](https://github.com/google/glog) for logging. The library only uses
+  // verbose logging which means nothing will be output unless the verbosity
+  // level is set (by default it's 0, libprocess uses levels 1, 2, and 3).
+  message SetLoggingLevel {
+    // The verbosity level.
+    required uint32 level = 1;
+    // The duration to keep verbosity level toggled. After this duration, the
+    // verbosity level of log would revert to the original level.
+    required DurationInfo duration = 2;
+  }
+
+  message ListFiles {
+    required string path = 1;
+  }
+
+  message ReadFile {
+    required string path = 1;
+    optional string offset = 2;
+    optional string length = 3;
+  }
+
+  optional Type type = 1;
+
+  optional GetMetrics get_metrics = 2;
+  optional SetLoggingLevel set_logging_level = 3;
+  optional ListFiles list_files = 4;
+  optional ReadFile read_file = 5;
+}
+
+
+/**
+ * Synchronous responses for all calls made to the agent API.
+ */
+message Response {
+  // Each of the responses of type `FOO` corresponds to `Foo` message below.
+  enum Type {
+    UNKNOWN = 0;
+
+    GET_HEALTH = 1;                // See 'GetHealth' below.
+    GET_FLAGS = 2;                 // See 'GetFlags' below.
+    GET_VERSION = 3;               // See 'GetVersion' below.
+    GET_METRICS = 4;               // See 'GetMetrics' below.
+
+    GET_LOGGING_LEVEL = 5;         // See 'GetLoggingLevel' below.
+
+    LIST_FILES = 6;
+    READ_FILE = 7;
+
+    GET_STATE = 8;
+
+    GET_CONTAINERS = 9;
+  }
+
+  // `healthy` would be true if the agent is healthy. Delayed responses are also
+  // indicative of the poor health of the agent.
+  message GetHealth {
+    required bool healthy = 1;
+  }
+
+  // Contains the flag configuration of the agent.
+  message GetFlags {
+    repeated Flag flags = 1;
+  }
+
+  // Contains the version information of the agent.
+  message GetVersion {
+    required VersionInfo version_info = 1;
+  }
+
+  // Contains a snapshot of the current metrics.
+  message GetMetrics {
+    repeated Metric metrics = 1;
+  }
+
+  // Contains the logging level of the agent.
+  message GetLoggingLevel {
+    required uint32 level = 1;
+  }
+
+  message ListFiles {
+    repeated string files = 1;
+  }
+
+  message GetFileContents {
+    repeated bytes data = 1;
+  }
+
+  message GetState {
+    // TODO(vinod): Fill in the fields.
+  }
+
+  // Information about containers running on this agent. It contains
+  // ContainerStatus and ResourceStatistics along with some metadata
+  // of the containers.
+  message GetContainers {
+    message Container {
+      required FrameworkID framework_id = 1;
+      required ExecutorID executor_id = 2;
+      required string executor_name = 3;
+      required ContainerID container_id = 4;
+      optional ContainerStatus container_status = 5;
+      optional ResourceStatistics resource_statistics = 6;
+    }
+
+    repeated Container containers = 1;
+  }
+
+  optional Type type = 1;
+
+  optional GetHealth get_health = 2;
+  optional GetFlags get_flags = 3;
+  optional GetVersion get_version = 4;
+  optional GetMetrics get_metrics = 5;
+  optional GetLoggingLevel get_logging_level = 6;
+  optional ListFiles list_files = 7;
+  optional GetFileContents get_file_contents = 8;
+  optional GetState get_state = 9;
+  optional GetContainers get_containers = 10;
+}

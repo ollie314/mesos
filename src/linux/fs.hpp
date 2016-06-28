@@ -17,7 +17,6 @@
 #ifndef __FS_HPP__
 #define __FS_HPP__
 
-#include <fstab.h>
 #include <mntent.h>
 
 #include <sys/mount.h>
@@ -156,21 +155,14 @@ namespace fs {
 Try<bool> supported(const std::string& fsname);
 
 
-namespace overlay {
-
-// Check if overlay fs is supported.
-Try<bool> supported();
-
-} // namespace overlay {
-
-
-// TODO(idownes): These three variations on mount information should
-// be consolidated and moved to stout, along with mount and umount.
+// TODO(idownes): These different variations of mount information
+// should be consolidated and moved to stout, along with mount and
+// umount.
 
 // Structure describing the per-process mounts as found in
 // /proc/[pid]/mountinfo. In particular, entries in this table specify
 // the propagation properties of mounts, information not present in
-// the MountTable or FileSystemTable. Entry order is preserved when
+// the MountTable or /etc/fstab. Entry order is preserved when
 // parsing /proc/[pid]/mountinfo.
 struct MountInfoTable {
   // Structure describing an individual /proc/[pid]/mountinfo entry.
@@ -266,58 +258,17 @@ struct MountTable {
 };
 
 
-// Structure describing a file system table (e.g. /etc/fstab).
-struct FileSystemTable {
-  // Structure describing a file system table entry. This is a wrapper for
-  // struct fstab defined in <fstab.h>
-  struct Entry {
-    Entry() : freq(0), passno(0) {}
-
-    Entry(const std::string& _spec,
-          const std::string& _file,
-          const std::string& _vfstype,
-          const std::string& _mntops,
-          const std::string& _type,
-          int _freq,
-          int _passno)
-      : spec(_spec),
-        file(_file),
-        vfstype(_vfstype),
-        mntops(_mntops),
-        type(_type),
-        freq(_freq),
-        passno(_passno)
-    {}
-
-    std::string spec;     // Block special device name.
-    std::string file;     // File system path prefix.
-    std::string vfstype;  // File system type, ufs, nfs.
-    std::string mntops;   // Mount options ala -o.
-    std::string type;     // FSTAB_* from fs_mntops.
-    int freq;             // Dump frequency, in days.
-    int passno;           // Pass number on parallel dump.
-  };
-
-  // Read the file system table from a file.
-  // @param   path    The path of the file storing the file system table.
-  // @return  An instance of FileSystemTable if success.
-  static Try<FileSystemTable> read();
-
-  std::vector<Entry> entries;
-};
-
-
 // Mount a file system.
 // @param   source    Specify the file system (often a device name but
 //                    it can also be a directory for a bind mount).
-//                    If None(), NULL will be passed as a dummy
+//                    If None(), nullptr will be passed as a dummy
 //                    argument to mount(), i.e., it is not used for
 //                    the specified mount operation. For example, you
 //                    can mount a filesystem specified in /etc/fstab
 //                    by just specifying the target.
 // @param   target    Directory to be attached to.
 // @param   type      File system type (listed in /proc/filesystems).
-//                    If None(), NULL will be passed as a dummy
+//                    If None(), nullptr will be passed as a dummy
 //                    argument to mount(), i.e., it is not used for
 //                    the specified mount operation. For example, it
 //                    should be None() for a bind mount as it will

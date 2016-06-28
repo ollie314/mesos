@@ -54,24 +54,102 @@ namespace internal {
 namespace master {
 
 Future<http::Response> Master::WeightsHandler::get(
-    const http::Request& request) const
+    const http::Request& request,
+    const Option<string>& principal) const
 {
   VLOG(1) << "Handling get weights request.";
 
   // Check that the request type is GET which is guaranteed by the master.
   CHECK_EQ("GET", request.method);
 
-  RepeatedPtrField<WeightInfo> weightInfos;
+  return _getWeights(principal)
+    .then([request](const vector<WeightInfo>& weightInfos)
+      -> Future<http::Response> {
+      RepeatedPtrField<WeightInfo> filteredWeightInfos;
 
-  // Create an entry for each weight.
-  foreachpair (const std::string& role, double weight, master->weights) {
+      foreach (const WeightInfo& weightInfo, weightInfos) {
+        filteredWeightInfos.Add()->CopyFrom(weightInfo);
+      }
+
+      return OK(JSON::protobuf(filteredWeightInfos),
+                request.url.query.get("jsonp"));
+  });
+}
+
+
+Future<http::Response> Master::WeightsHandler::get(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::GET_WEIGHTS, call.type());
+
+  return _getWeights(principal)
+    .then([contentType](const vector<WeightInfo>& weightInfos)
+      -> Future<http::Response> {
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::GET_WEIGHTS);
+
+      foreach(const WeightInfo& weightInfo, weightInfos) {
+        response.mutable_get_weights()->add_weight_infos()->CopyFrom(
+            weightInfo);
+      }
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+  });
+}
+
+
+Future<vector<WeightInfo>> Master::WeightsHandler::_getWeights(
+    const Option<string>& principal) const
+{
+  vector<WeightInfo> weightInfos;
+  weightInfos.reserve(master->weights.size());
+
+  foreachpair (const string& role, double weight, master->weights) {
     WeightInfo weightInfo;
     weightInfo.set_role(role);
     weightInfo.set_weight(weight);
-    weightInfos.Add()->CopyFrom(weightInfo);
+    weightInfos.push_back(weightInfo);
   }
 
-  return OK(JSON::protobuf(weightInfos), request.url.query.get("jsonp"));
+  // Create a list of authorization actions for each role we may return.
+  // TODO(alexr): Batch these actions once we have BatchRequest in authorizer.
+  list<Future<bool>> roleAuthorizations;
+  foreach (const WeightInfo& info, weightInfos) {
+    roleAuthorizations.push_back(authorizeGetWeight(principal, info.role()));
+  }
+
+  return process::collect(roleAuthorizations)
+    .then(defer(
+        master->self(),
+        [=](const list<bool>& roleAuthorizationsCollected)
+          -> Future<vector<WeightInfo>> {
+      return _filterWeights(weightInfos, roleAuthorizationsCollected);
+  }));
+}
+
+
+Future<vector<WeightInfo>> Master::WeightsHandler::_filterWeights(
+    const vector<WeightInfo>& weightInfos,
+    const list<bool>& roleAuthorizations) const
+{
+  CHECK(weightInfos.size() == roleAuthorizations.size());
+
+  vector<WeightInfo> filteredWeightInfos;
+
+  // Create an entry (including role and resources) for each weight,
+  // except those filtered out based on the authorizer's response.
+  auto weightInfoIt = weightInfos.begin();
+  foreach (bool authorized, roleAuthorizations) {
+    if (authorized) {
+      filteredWeightInfos.push_back(*weightInfoIt);
+    }
+    ++weightInfoIt;
+  }
+
+  return filteredWeightInfos;
 }
 
 
@@ -87,8 +165,8 @@ Future<http::Response> Master::WeightsHandler::update(
   Try<JSON::Array> parse = JSON::parse<JSON::Array>(request.body);
   if (parse.isError()) {
     return BadRequest(
-        "Failed to parse update weights request JSON ('" +
-        request.body + "'): " + parse.error());
+        "Failed to parse update weights request JSON '" +
+        request.body + "': " + parse.error());
   }
 
   // Create Protobuf representation of weights.
@@ -97,8 +175,8 @@ Future<http::Response> Master::WeightsHandler::update(
 
   if (weightInfos.isError()) {
     return BadRequest(
-        "Failed to convert weights JSON array to protobuf ('" +
-        request.body + "'): " + weightInfos.error());
+        "Failed to convert weights JSON array to protobuf '" +
+        request.body + "': " + weightInfos.error());
   }
 
   vector<WeightInfo> validatedWeightInfos;
@@ -132,7 +210,7 @@ Future<http::Response> Master::WeightsHandler::update(
     roles.push_back(role);
   }
 
-  return authorize(principal, roles)
+  return authorizeUpdateWeights(principal, roles)
     .then(defer(master->self(), [=](bool authorized) -> Future<http::Response> {
       if (!authorized) {
         return Forbidden();
@@ -214,7 +292,7 @@ void Master::WeightsHandler::rescindOffers(
 }
 
 
-Future<bool> Master::WeightsHandler::authorize(
+Future<bool> Master::WeightsHandler::authorizeUpdateWeights(
     const Option<string>& principal,
     const vector<string>& roles) const
 {
@@ -227,7 +305,7 @@ Future<bool> Master::WeightsHandler::authorize(
             << "' to update weights for roles '" << stringify(roles) << "'";
 
   authorization::Request request;
-  request.set_action(authorization::UPDATE_WEIGHTS_WITH_ROLE);
+  request.set_action(authorization::UPDATE_WEIGHT_WITH_ROLE);
 
   if (principal.isSome()) {
     request.mutable_subject()->set_value(principal.get());
@@ -254,6 +332,31 @@ Future<bool> Master::WeightsHandler::authorize(
         }
         return true;
       });
+}
+
+
+Future<bool> Master::WeightsHandler::authorizeGetWeight(
+    const Option<string>& principal,
+    const string& role) const
+{
+  if (master->authorizer.isNone()) {
+    return true;
+  }
+
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? principal.get() : "ANY")
+            << "' to get weight for role '" << role << "'";
+
+  authorization::Request request;
+  request.set_action(authorization::GET_WEIGHT_WITH_ROLE);
+
+  if (principal.isSome()) {
+    request.mutable_subject()->set_value(principal.get());
+  }
+
+  request.mutable_object()->set_value(role);
+
+  return master->authorizer.get()->authorized(request);
 }
 
 } // namespace master {

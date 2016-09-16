@@ -17,6 +17,7 @@
 #ifndef __MASTER_ALLOCATOR_MESOS_HIERARCHICAL_HPP__
 #define __MASTER_ALLOCATOR_MESOS_HIERARCHICAL_HPP__
 
+#include <set>
 #include <string>
 
 #include <mesos/mesos.hpp>
@@ -71,18 +72,15 @@ class HierarchicalAllocatorProcess : public MesosAllocatorProcess
 {
 public:
   HierarchicalAllocatorProcess(
-      const std::function<Sorter*()>& _roleSorterFactory,
+      const std::function<Sorter*()>& roleSorterFactory,
       const std::function<Sorter*()>& _frameworkSorterFactory,
-      const std::function<Sorter*()>& _quotaRoleSorterFactory)
-    : ProcessBase(process::ID::generate("hierarchical-allocator")),
-      initialized(false),
+      const std::function<Sorter*()>& quotaRoleSorterFactory)
+    : initialized(false),
       paused(true),
       metrics(*this),
-      roleSorter(nullptr),
-      quotaRoleSorter(nullptr),
-      roleSorterFactory(_roleSorterFactory),
-      frameworkSorterFactory(_frameworkSorterFactory),
-      quotaRoleSorterFactory(_quotaRoleSorterFactory) {}
+      roleSorter(roleSorterFactory()),
+      quotaRoleSorter(quotaRoleSorterFactory()),
+      frameworkSorterFactory(_frameworkSorterFactory) {}
 
   virtual ~HierarchicalAllocatorProcess() {}
 
@@ -100,7 +98,9 @@ public:
           void(const FrameworkID&,
                const hashmap<SlaveID, UnavailableResources>&)>&
         inverseOfferCallback,
-      const hashmap<std::string, double>& weights);
+      const hashmap<std::string, double>& weights,
+      const Option<std::set<std::string>>&
+        fairnessExcludeResourceNames = None());
 
   void recover(
       const int _expectedAgentCount,
@@ -154,6 +154,7 @@ public:
   void updateAllocation(
       const FrameworkID& frameworkId,
       const SlaveID& slaveId,
+      const Resources& offeredResources,
       const std::vector<Offer::Operation>& operations);
 
   process::Future<Nothing> updateAvailable(
@@ -320,6 +321,11 @@ protected:
 
     // Regular *and* oversubscribed resources that are allocated.
     //
+    // NOTE: We maintain multiple copies of each shared resource allocated
+    // to a slave, where the number of copies represents the number of times
+    // this shared resource has been allocated to (and has not been recovered
+    // from) a specific framework.
+    //
     // NOTE: We keep track of slave's allocated resources despite
     // having that information in sorters. This is because the
     // information in sorters is not accurate if some framework
@@ -398,6 +404,9 @@ protected:
   // Slaves to send offers for.
   Option<hashset<std::string>> whitelist;
 
+  // Resources (by name) that will be excluded from a role's fair share.
+  Option<std::set<std::string>> fairnessExcludeResourceNames;
+
   // There are two stages of allocation. During the first stage resources
   // are allocated only to frameworks in roles with quota set. During the
   // second stage remaining resources that would not be required to satisfy
@@ -457,10 +466,8 @@ protected:
   // for both the first and the second stages.
   hashmap<std::string, process::Owned<Sorter>> frameworkSorters;
 
-  // Factory functions for sorters.
-  const std::function<Sorter*()> roleSorterFactory;
+  // Factory function for framework sorters.
   const std::function<Sorter*()> frameworkSorterFactory;
-  const std::function<Sorter*()> quotaRoleSorterFactory;
 };
 
 
@@ -469,7 +476,7 @@ protected:
 
 // We map the templatized version of the `HierarchicalAllocatorProcess` to one
 // that relies on sorter factories in the internal namespace. This allows us
-// to keep the implemention of the allocator in the implementation file.
+// to keep the implementation of the allocator in the implementation file.
 template <
     typename RoleSorter,
     typename FrameworkSorter,
@@ -479,7 +486,8 @@ class HierarchicalAllocatorProcess
 {
 public:
   HierarchicalAllocatorProcess()
-    : internal::HierarchicalAllocatorProcess(
+    : ProcessBase(process::ID::generate("hierarchical-allocator")),
+      internal::HierarchicalAllocatorProcess(
           [this]() -> Sorter* {
             return new RoleSorter(this->self(), "allocator/mesos/roles/");
           },

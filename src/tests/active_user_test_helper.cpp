@@ -14,26 +14,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
-#include <iostream>
 #include <string>
 
 #include <stout/os.hpp>
 
-// This helper program takes an expected user.
-// Returns 0 if the current username equals the expected username.
-// Returns 1 otherwise.
-int main(int argc, char **argv) {
-  if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <expected username>" << std::endl;
-    return 1;
-  }
+#include "tests/active_user_test_helper.hpp"
 
-  const std::string expected(argv[1]);
+using std::string;
 
-  Result<std::string> user = os::user();
-  if (user.isSome() && user.get() == expected) {
-      return 0;
+namespace mesos {
+namespace internal {
+namespace tests {
+
+const char ActiveUserTestHelper::NAME[] = "ActiveUser";
+
+
+ActiveUserTestHelper::Flags::Flags()
+{
+  add(&user,
+      "user",
+      "The expected user name.");
+}
+
+
+// This test helper returns 0 if the current username equals the
+// expected username. Returns 1 otherwise.
+int ActiveUserTestHelper::execute()
+{
+  Result<string> user = os::user();
+  if (user.isSome() && user.get() == flags.user) {
+    return 0;
   }
 
   return 1;
 }
+
+} // namespace tests {
+} // namespace internal {
+} // namespace mesos {

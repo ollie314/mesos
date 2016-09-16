@@ -45,7 +45,7 @@ namespace tests {
 
 ACTION_P(InvokeInitialize, allocator)
 {
-  allocator->real->initialize(arg0, arg1, arg2, arg3);
+  allocator->real->initialize(arg0, arg1, arg2, arg3, arg4);
 }
 
 
@@ -129,11 +129,11 @@ ACTION_P(InvokeRequestResources, allocator)
 
 ACTION_P(InvokeUpdateAllocation, allocator)
 {
-  allocator->real->updateAllocation(arg0, arg1, arg2);
+  allocator->real->updateAllocation(arg0, arg1, arg2, arg3);
 }
 
 
-ACTION_P(InvokeUpdateResources, allocator)
+ACTION_P(InvokeUpdateAvailable, allocator)
 {
   return allocator->real->updateAvailable(arg0, arg1);
 }
@@ -229,9 +229,9 @@ public:
     // to get the best of both worlds: the ability to use 'DoDefault'
     // and no warnings when expectations are not explicit.
 
-    ON_CALL(*this, initialize(_, _, _, _))
+    ON_CALL(*this, initialize(_, _, _, _, _))
       .WillByDefault(InvokeInitialize(this));
-    EXPECT_CALL(*this, initialize(_, _, _, _))
+    EXPECT_CALL(*this, initialize(_, _, _, _, _))
       .WillRepeatedly(DoDefault());
 
     ON_CALL(*this, recover(_, _))
@@ -299,13 +299,13 @@ public:
     EXPECT_CALL(*this, requestResources(_, _))
       .WillRepeatedly(DoDefault());
 
-    ON_CALL(*this, updateAllocation(_, _, _))
+    ON_CALL(*this, updateAllocation(_, _, _, _))
       .WillByDefault(InvokeUpdateAllocation(this));
-    EXPECT_CALL(*this, updateAllocation(_, _, _))
+    EXPECT_CALL(*this, updateAllocation(_, _, _, _))
       .WillRepeatedly(DoDefault());
 
     ON_CALL(*this, updateAvailable(_, _))
-      .WillByDefault(InvokeUpdateResources(this));
+      .WillByDefault(InvokeUpdateAvailable(this));
     EXPECT_CALL(*this, updateAvailable(_, _))
       .WillRepeatedly(DoDefault());
 
@@ -357,7 +357,7 @@ public:
 
   virtual ~TestAllocator() {}
 
-  MOCK_METHOD4(initialize, void(
+  MOCK_METHOD5(initialize, void(
       const Duration&,
       const lambda::function<
           void(const FrameworkID&,
@@ -365,7 +365,8 @@ public:
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<SlaveID, UnavailableResources>&)>&,
-      const hashmap<std::string, double>&));
+      const hashmap<std::string, double>&,
+      const Option<std::set<std::string>>&));
 
   MOCK_METHOD2(recover, void(
       const int expectedAgentCount,
@@ -410,15 +411,16 @@ public:
       const SlaveID&));
 
   MOCK_METHOD1(updateWhitelist, void(
-      const Option<hashset<std::string> >&));
+      const Option<hashset<std::string>>&));
 
   MOCK_METHOD2(requestResources, void(
       const FrameworkID&,
       const std::vector<Request>&));
 
-  MOCK_METHOD3(updateAllocation, void(
+  MOCK_METHOD4(updateAllocation, void(
       const FrameworkID&,
       const SlaveID&,
+      const Resources&,
       const std::vector<Offer::Operation>&));
 
   MOCK_METHOD2(updateAvailable, process::Future<Nothing>(

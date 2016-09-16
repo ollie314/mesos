@@ -21,6 +21,7 @@
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
+#include <process/id.hpp>
 
 #include <stout/check.hpp>
 #include <stout/hashmap.hpp>
@@ -163,7 +164,8 @@ StoreProcess::StoreProcess(
     const string& _rootDir,
     Owned<Cache> _cache,
     Owned<Fetcher> _fetcher)
-  : rootDir(_rootDir),
+  : ProcessBase(process::ID::generate("appc-provisioner-store")),
+    rootDir(_rootDir),
     cache(_cache),
     fetcher(_fetcher) {}
 
@@ -195,9 +197,20 @@ Future<ImageInfo> StoreProcess::get(const Image& image)
   }
 
   return fetchImage(appc, image.cached())
-    .then(defer(self(), [=](const vector<string>& imageIds) -> ImageInfo {
-      vector<string> rootfses;
+    .then(defer(self(), [=](const vector<string>& imageIds)
+          -> Future<ImageInfo> {
+      // Appc image contains the manifest at the top layer and the
+      // image id is at index 0.
+      Try<spec::ImageManifest> manifest = spec::getManifest(
+          paths::getImagePath(rootDir, imageIds.at(0)));
 
+      if (manifest.isError()) {
+        return Failure(
+            "Failed to get manifest for Appc image '" +
+            appc.SerializeAsString() + "': " + manifest.error());
+      }
+
+      vector<string> rootfses;
       // TODO(jojy): Print a warning if there are duplicated image ids
       // in the list. The semantics is weird when there are duplicated
       // image ids in the list. Appc spec does not discuss this
@@ -206,7 +219,7 @@ Future<ImageInfo> StoreProcess::get(const Image& image)
         rootfses.emplace_back(paths::getImageRootfsPath(rootDir, imageId));
       }
 
-      return ImageInfo{rootfses, None()};
+      return ImageInfo{rootfses, None(), manifest.get()};
     }));
 }
 

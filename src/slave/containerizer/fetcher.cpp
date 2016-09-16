@@ -163,7 +163,7 @@ Try<Nothing> Fetcher::validateOutputFile(const string& path)
 
   // TODO(mrbrowning): Check that the filename's directory component is
   // actually a subdirectory of the sandbox, not just relative to it.
-  if (path.at(0) == '/') {
+  if (strings::startsWith(path, '/')) {
     return Error("URI output file must be within the sandbox directory");
   }
 
@@ -196,7 +196,8 @@ Result<string> Fetcher::uriToLocalPath(
     const string& uri,
     const Option<string>& frameworksHome)
 {
-  if (!strings::startsWith(uri, "file://") && strings::contains(uri, "://")) {
+  if (!strings::startsWith(uri, FILE_URI_PREFIX) &&
+      strings::contains(uri, "://")) {
     return None();
   }
 
@@ -1035,11 +1036,11 @@ Try<Nothing> FetcherProcess::Cache::remove(
 
   // We may or may not have started downloading. The download may or may
   // not have been partial. In any case, clean up whatever is there.
-  if (os::exists(entry->path().value)) {
-    Try<Nothing> rm = os::rm(entry->path().value);
+  if (os::exists(entry->path().string())) {
+    Try<Nothing> rm = os::rm(entry->path().string());
     if (rm.isError()) {
       return Error("Could not delete fetcher cache file '" +
-                   entry->path().value + "' with error: " + rm.error() +
+                   entry->path().string() + "' with error: " + rm.error() +
                    " for entry '" + entry->key +
                    "', leaking cache space: " + stringify(entry->size));
     }
@@ -1113,8 +1114,9 @@ Try<Nothing> FetcherProcess::Cache::adjust(
 {
   CHECK(contains(entry));
 
-  Try<Bytes> size =
-    os::stat::size(entry.get()->path().value, os::stat::DO_NOT_FOLLOW_SYMLINK);
+  Try<Bytes> size = os::stat::size(
+      entry.get()->path().string(),
+      os::stat::DO_NOT_FOLLOW_SYMLINK);
 
   if (size.isSome()) {
     off_t d = delta(size.get(), entry);
@@ -1129,7 +1131,7 @@ Try<Nothing> FetcherProcess::Cache::adjust(
   } else {
     // This should never be caused by Mesos itself, but cannot be excluded.
     return Error("Fetcher cache file for '" + entry->key +
-                 "' disappeared from: " + entry->path().value);
+                 "' disappeared from: " + entry->path().string());
   }
 
   return Nothing();

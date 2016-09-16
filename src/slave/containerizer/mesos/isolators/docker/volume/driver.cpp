@@ -51,7 +51,7 @@ constexpr Duration MOUNT_TIMEOUT = Seconds(120);
 constexpr Duration UNMOUNT_TIMEOUT = Seconds(120);
 
 Try<Owned<DriverClient>> DriverClient::create(
-    const std::string& dvdcli)
+    const string& dvdcli)
 {
   return Owned<DriverClient>(new DriverClient(dvdcli));
 }
@@ -91,7 +91,7 @@ Future<string> DriverClient::mount(
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       NO_SETSID,
-      None(),
+      nullptr,
       None(),
       None(),
       {},
@@ -177,7 +177,7 @@ Future<Nothing> DriverClient::unmount(
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       NO_SETSID,
-      None(),
+      nullptr,
       None(),
       None(),
       {},

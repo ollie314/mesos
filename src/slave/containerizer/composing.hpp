@@ -22,8 +22,6 @@
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
 
-#include <mesos/containerizer/containerizer.hpp>
-
 #include <process/future.hpp>
 #include <process/process.hpp>
 
@@ -32,13 +30,13 @@
 #include <stout/option.hpp>
 #include <stout/try.hpp>
 
-
 namespace mesos {
 namespace internal {
 namespace slave {
 
 // Forward declaration.
 class ComposingContainerizerProcess;
+
 
 class ComposingContainerizer : public Containerizer
 {
@@ -56,21 +54,12 @@ public:
 
   virtual process::Future<bool> launch(
       const ContainerID& containerId,
+      const Option<TaskInfo>& taskInfo,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
       const Option<std::string>& user,
       const SlaveID& slaveId,
-      const process::PID<Slave>& slavePid,
-      bool checkpoint);
-
-  virtual process::Future<bool> launch(
-      const ContainerID& containerId,
-      const TaskInfo& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const process::PID<Slave>& slavePid,
+      const std::map<std::string, std::string>& environment,
       bool checkpoint);
 
   virtual process::Future<Nothing> update(
@@ -83,7 +72,7 @@ public:
   virtual process::Future<ContainerStatus> status(
       const ContainerID& containerId);
 
-  virtual process::Future<containerizer::Termination> wait(
+  virtual process::Future<mesos::slave::ContainerTermination> wait(
       const ContainerID& containerId);
 
   virtual void destroy(const ContainerID& containerId);

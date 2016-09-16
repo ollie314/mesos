@@ -19,26 +19,22 @@
 
 #include <string>
 
-#include <mesos/v1/mesos.hpp>
+#include <mesos/mesos.hpp>
 
 #include <stout/option.hpp>
 
 namespace mesos {
-namespace v1 {
 namespace internal {
 
 pid_t launchTaskPosix(
-    const mesos::v1::TaskInfo& task,
-    const mesos::v1::CommandInfo& command,
+    const CommandInfo& command,
+    const std::string& launcherDir,
     const Option<std::string>& user,
-    char** argv,
-    Option<char**>& override,
-    Option<std::string>& rootfs,
-    Option<std::string>& sandboxDirectory,
-    Option<std::string>& workingDirectory);
+    const Option<std::string>& rootfs,
+    const Option<std::string>& sandboxDirectory,
+    const Option<std::string>& workingDirectory);
 
 } // namespace internal {
-} // namespace v1 {
 } // namespace mesos {
 
 #endif // __LAUNCHER_POSIX_EXECUTOR_HPP__

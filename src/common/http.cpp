@@ -25,21 +25,27 @@
 #include <mesos/http.hpp>
 #include <mesos/resources.hpp>
 
+#include <mesos/authentication/http/basic_authenticator_factory.hpp>
 #include <mesos/authorizer/authorizer.hpp>
+#include <mesos/module/http_authenticator.hpp>
 
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
 #include <process/http.hpp>
 #include <process/pid.hpp>
 
+#include <stout/duration.hpp>
 #include <stout/foreach.hpp>
 #include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
 #include <stout/unreachable.hpp>
 
+#include <stout/os/permissions.hpp>
+
 #include "common/http.hpp"
 
 #include "messages/messages.hpp"
+#include "module/manager.hpp"
 
 using std::map;
 using std::ostream;
@@ -47,9 +53,13 @@ using std::set;
 using std::string;
 using std::vector;
 
+using process::Failure;
 using process::Owned;
 
+using process::http::authentication::Authenticator;
 using process::http::authorization::AuthorizationCallbacks;
+
+using mesos::http::authentication::BasicAuthenticatorFactory;
 
 namespace mesos {
 
@@ -68,6 +78,18 @@ ostream& operator<<(ostream& stream, ContentType contentType)
 }
 
 namespace internal {
+
+// Set of endpoint whose access is protected with the authorization
+// action `GET_ENDPOINTS_WITH_PATH`.
+hashset<string> AUTHORIZABLE_ENDPOINTS{
+    "/containers",
+    "/files/debug",
+    "/files/debug.json",
+    "/logging/toggle",
+    "/metrics/snapshot",
+    "/monitor/statistics",
+    "/monitor/statistics.json"};
+
 
 string serialize(
     ContentType contentType,
@@ -374,6 +396,65 @@ JSON::Object model(const ExecutorInfo& executorInfo)
 }
 
 
+// Returns JSON representation of a FileInfo protobuf message.
+// Example JSON:
+// {
+//   'path': '\/some\/file',
+//   'mode': '-rwxrwxrwx',
+//   'nlink': 5,
+//   'uid': 'bmahler',
+//   'gid': 'employee',
+//   'size': 4096,           // Bytes.
+//   'mtime': 1348258116,    // Unix timestamp.
+// }
+JSON::Object model(const FileInfo& fileInfo)
+{
+  JSON::Object file;
+  file.values["path"] = fileInfo.path();
+  file.values["nlink"] = fileInfo.nlink();
+  file.values["size"] = fileInfo.size();
+  file.values["mtime"] = Nanoseconds(fileInfo.mtime().nanoseconds()).secs();
+
+  char filetype;
+  if (S_ISREG(fileInfo.mode())) {
+    filetype = '-';
+  } else if (S_ISDIR(fileInfo.mode())) {
+    filetype = 'd';
+  } else if (S_ISCHR(fileInfo.mode())) {
+    filetype = 'c';
+  } else if (S_ISBLK(fileInfo.mode())) {
+    filetype = 'b';
+  } else if (S_ISFIFO(fileInfo.mode())) {
+    filetype = 'p';
+  } else if (S_ISLNK(fileInfo.mode())) {
+    filetype = 'l';
+  } else if (S_ISSOCK(fileInfo.mode())) {
+    filetype = 's';
+  } else {
+    filetype = '-';
+  }
+
+  struct os::Permissions permissions(fileInfo.mode());
+
+  file.values["mode"] = strings::format(
+      "%c%c%c%c%c%c%c%c%c%c",
+      filetype,
+      permissions.owner.r ? 'r' : '-',
+      permissions.owner.w ? 'w' : '-',
+      permissions.owner.x ? 'x' : '-',
+      permissions.group.r ? 'r' : '-',
+      permissions.group.w ? 'w' : '-',
+      permissions.group.x ? 'x' : '-',
+      permissions.others.r ? 'r' : '-',
+      permissions.others.w ? 'w' : '-',
+      permissions.others.x ? 'x' : '-').get();
+
+  file.values["uid"] = fileInfo.uid();
+  file.values["gid"] = fileInfo.gid();
+
+  return file;
+}
+
 }  // namespace internal {
 
 void json(JSON::ObjectWriter* writer, const Attributes& attributes)
@@ -599,6 +680,13 @@ const AuthorizationCallbacks createAuthorizationCallbacks(
   Callback getEndpoint = [authorizer](
       const process::http::Request& httpRequest,
       const Option<string>& principal) -> process::Future<bool> {
+        const string path = httpRequest.url.path;
+
+        if (!internal::AUTHORIZABLE_ENDPOINTS.contains(path)) {
+          return Failure(
+              "Endpoint '" + path + "' is not an authorizable endpoint.");
+        }
+
         authorization::Request authRequest;
         authRequest.set_action(mesos::authorization::GET_ENDPOINT_WITH_PATH);
 
@@ -606,7 +694,6 @@ const AuthorizationCallbacks createAuthorizationCallbacks(
           authRequest.mutable_subject()->set_value(principal.get());
         }
 
-        const string path = httpRequest.url.path;
         authRequest.mutable_object()->set_value(path);
 
         LOG(INFO) << "Authorizing principal '"
@@ -692,10 +779,150 @@ bool approveViewTask(
   Try<bool> approved = tasksApprover->approved(object);
   if (approved.isError()) {
     LOG(WARNING) << "Error during Task authorization: " << approved.error();
-     // TODO(joerg84): Consider exposing these errors to the caller.
+    // TODO(joerg84): Consider exposing these errors to the caller.
     return false;
   }
   return approved.get();
 }
+
+
+bool approveViewFlags(
+    const Owned<ObjectApprover>& flagsApprover)
+{
+  ObjectApprover::Object object;
+
+  Try<bool> approved = flagsApprover->approved(object);
+  if (approved.isError()) {
+    LOG(WARNING) << "Error during Flags authorization: " << approved.error();
+    // TODO(joerg84): Consider exposing these errors to the caller.
+    return false;
+  }
+  return approved.get();
+}
+
+
+process::Future<bool> authorizeEndpoint(
+    const string& endpoint,
+    const string& method,
+    const Option<Authorizer*>& authorizer,
+    const Option<string>& principal)
+{
+  if (authorizer.isNone()) {
+    return true;
+  }
+
+  authorization::Request request;
+
+  // TODO(nfnt): Add an additional case when POST requests
+  // need to be authorized separately from GET requests.
+  if (method == "GET") {
+    request.set_action(authorization::GET_ENDPOINT_WITH_PATH);
+  } else {
+    return Failure("Unexpected request method '" + method + "'");
+  }
+
+  if (!internal::AUTHORIZABLE_ENDPOINTS.contains(endpoint)) {
+    return Failure(
+        "Endpoint '" + endpoint + "' is not an authorizable endpoint.");
+  }
+
+  if (principal.isSome()) {
+    request.mutable_subject()->set_value(principal.get());
+  }
+
+  request.mutable_object()->set_value(endpoint);
+
+  LOG(INFO) << "Authorizing principal '"
+            << (principal.isSome() ? principal.get() : "ANY")
+            << "' to " <<  method
+            << " the '" << endpoint << "' endpoint";
+
+  return authorizer.get()->authorized(request);
+}
+
+
+bool approveViewRole(
+    const Owned<ObjectApprover>& rolesApprover,
+    const string& role)
+{
+  ObjectApprover::Object object;
+  object.value = &role;
+
+  Try<bool> approved = rolesApprover->approved(object);
+  if (approved.isError()) {
+    LOG(WARNING) << "Error during Roles authorization: " << approved.error();
+    // TODO(joerg84): Consider exposing these errors to the caller.
+    return false;
+  }
+  return approved.get();
+}
+
+
+Try<Nothing> initializeHttpAuthenticators(
+    const string& realm,
+    const vector<string>& httpAuthenticatorNames,
+    const Option<Credentials>& credentials)
+{
+  if (httpAuthenticatorNames.empty()) {
+    return Error("No HTTP authenticator specified for realm '" + realm + "'");
+  }
+
+  if (httpAuthenticatorNames.size() > 1) {
+    return Error("Multiple HTTP authenticators not supported");
+  }
+
+  Option<Authenticator*> httpAuthenticator;
+  if (httpAuthenticatorNames[0] == internal::DEFAULT_HTTP_AUTHENTICATOR) {
+    if (credentials.isNone()) {
+      return Error(
+          "No credentials provided for the default '" +
+          string(internal::DEFAULT_HTTP_AUTHENTICATOR) +
+          "' HTTP authenticator for realm '" + realm + "'");
+    }
+
+    LOG(INFO) << "Using default '" << internal::DEFAULT_HTTP_AUTHENTICATOR
+              << "' HTTP authenticator for realm '" << realm << "'";
+
+    Try<Authenticator*> authenticator =
+      BasicAuthenticatorFactory::create(realm, credentials.get());
+    if (authenticator.isError()) {
+      return Error(
+          "Could not create HTTP authenticator module '" +
+          httpAuthenticatorNames[0] + "': " + authenticator.error());
+    }
+
+    httpAuthenticator = authenticator.get();
+  } else {
+    if (!modules::ModuleManager::contains<Authenticator>(
+          httpAuthenticatorNames[0])) {
+      return Error(
+          "HTTP authenticator '" + httpAuthenticatorNames[0] +
+          "' not found. Check the spelling (compare to '" +
+          string(internal::DEFAULT_HTTP_AUTHENTICATOR) +
+          "') or verify that the authenticator was loaded "
+          "successfully (see --modules)");
+    }
+
+    Try<Authenticator*> module =
+      modules::ModuleManager::create<Authenticator>(httpAuthenticatorNames[0]);
+    if (module.isError()) {
+      return Error(
+          "Could not create HTTP authenticator module '" +
+          httpAuthenticatorNames[0] + "': " + module.error());
+    }
+    LOG(INFO) << "Using '" << httpAuthenticatorNames[0]
+              << "' HTTP authenticator for realm '" << realm << "'";
+    httpAuthenticator = module.get();
+  }
+
+  CHECK(httpAuthenticator.isSome());
+
+  // Ownership of the `httpAuthenticator` is passed to libprocess.
+  process::http::authentication::setAuthenticator(
+    realm, Owned<Authenticator>(httpAuthenticator.get()));
+
+  return Nothing();
+}
+
 
 }  // namespace mesos {

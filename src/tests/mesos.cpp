@@ -15,11 +15,10 @@
 // limitations under the License.
 
 #include <memory>
+#include <set>
 #include <string>
 
 #include <mesos/authorizer/authorizer.hpp>
-
-#include <mesos/slave/container_logger.hpp>
 
 #include <mesos/master/detector.hpp>
 
@@ -50,17 +49,16 @@
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
 
-using std::list;
-using std::shared_ptr;
-using std::string;
-using testing::_;
-using testing::Invoke;
-
 using mesos::fetcher::FetcherInfo;
 
 using mesos::master::detector::MasterDetector;
 
-using mesos::slave::ContainerLogger;
+using std::list;
+using std::shared_ptr;
+using std::string;
+
+using testing::_;
+using testing::Invoke;
 
 using namespace process;
 
@@ -107,7 +105,8 @@ master::Flags MesosTest::CreateMasterFlags()
 
   CHECK_SOME(os::mkdir(flags.work_dir.get()));
 
-  flags.authenticate_http = true;
+  flags.authenticate_http_readonly = true;
+  flags.authenticate_http_readwrite = true;
   flags.authenticate_frameworks = true;
   flags.authenticate_agents = true;
 
@@ -164,8 +163,13 @@ slave::Flags MesosTest::CreateSlaveFlags()
   // Create a temporary work directory (removed by Environment).
   Try<string> directory = environment->mkdtemp();
   CHECK_SOME(directory) << "Failed to create temporary directory";
-
   flags.work_dir = directory.get();
+
+  // Create a temporary runtime directory (removed by Environment).
+  directory = environment->mkdtemp();
+  CHECK_SOME(directory) << "Failed to create temporary directory";
+  flags.runtime_dir = directory.get();
+
   flags.fetcher_cache_dir = path::join(directory.get(), "fetch");
 
   flags.launcher_dir = getLauncherDir();
@@ -196,7 +200,8 @@ slave::Flags MesosTest::CreateSlaveFlags()
     flags.acls = ACLs();
   }
 
-  flags.authenticate_http = true;
+  flags.authenticate_http_readonly = true;
+  flags.authenticate_http_readwrite = true;
 
   {
     // Create a default HTTP credentials file.
@@ -313,7 +318,7 @@ Try<Owned<cluster::Slave>> MesosTest::StartSlave(
 Try<Owned<cluster::Slave>> MesosTest::StartSlave(
     MasterDetector* detector,
     slave::Containerizer* containerizer,
-    const std::string& id,
+    const string& id,
     const Option<slave::Flags>& flags)
 {
   return cluster::Slave::start(
@@ -459,154 +464,6 @@ MockExecutor::MockExecutor(const ExecutorID& _id) : id(_id) {}
 MockExecutor::~MockExecutor() {}
 
 
-MockGarbageCollector::MockGarbageCollector()
-{
-  // NOTE: We use 'EXPECT_CALL' and 'WillRepeatedly' here instead of
-  // 'ON_CALL' and 'WillByDefault'. See 'TestContainerizer::SetUp()'
-  // for more details.
-  EXPECT_CALL(*this, schedule(_, _))
-    .WillRepeatedly(Return(Nothing()));
-
-  EXPECT_CALL(*this, unschedule(_))
-    .WillRepeatedly(Return(true));
-
-  EXPECT_CALL(*this, prune(_))
-    .WillRepeatedly(Return());
-}
-
-
-MockGarbageCollector::~MockGarbageCollector() {}
-
-
-MockResourceEstimator::MockResourceEstimator()
-{
-  ON_CALL(*this, initialize(_))
-    .WillByDefault(Return(Nothing()));
-  EXPECT_CALL(*this, initialize(_))
-    .WillRepeatedly(DoDefault());
-
-  ON_CALL(*this, oversubscribable())
-    .WillByDefault(Return(process::Future<Resources>()));
-  EXPECT_CALL(*this, oversubscribable())
-    .WillRepeatedly(DoDefault());
-}
-
-MockResourceEstimator::~MockResourceEstimator() {}
-
-
-MockQoSController::MockQoSController()
-{
-  ON_CALL(*this, initialize(_))
-    .WillByDefault(Return(Nothing()));
-  EXPECT_CALL(*this, initialize(_))
-    .WillRepeatedly(DoDefault());
-
-  ON_CALL(*this, corrections())
-    .WillByDefault(
-        Return(process::Future<list<mesos::slave::QoSCorrection>>()));
-  EXPECT_CALL(*this, corrections())
-    .WillRepeatedly(DoDefault());
-}
-
-
-MockQoSController::~MockQoSController() {}
-
-
-MockSlave::MockSlave(
-    const slave::Flags& flags,
-    MasterDetector* detector,
-    slave::Containerizer* containerizer,
-    const Option<mesos::slave::QoSController*>& _qosController,
-    const Option<mesos::Authorizer*>& authorizer)
-  : slave::Slave(
-        process::ID::generate("slave"),
-        flags,
-        detector,
-        containerizer,
-        &files,
-        &gc,
-        statusUpdateManager = new slave::StatusUpdateManager(flags),
-        &resourceEstimator,
-        _qosController.isSome() ? _qosController.get() : &qosController,
-        authorizer),
-    files(slave::DEFAULT_HTTP_AUTHENTICATION_REALM)
-{
-  // Set up default behaviors, calling the original methods.
-  EXPECT_CALL(*this, runTask(_, _, _, _, _))
-    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_runTask));
-  EXPECT_CALL(*this, _runTask(_, _, _))
-    .WillRepeatedly(Invoke(this, &MockSlave::unmocked__runTask));
-  EXPECT_CALL(*this, killTask(_, _))
-    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_killTask));
-  EXPECT_CALL(*this, removeFramework(_))
-    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_removeFramework));
-  EXPECT_CALL(*this, __recover(_))
-    .WillRepeatedly(Invoke(this, &MockSlave::unmocked___recover));
-  EXPECT_CALL(*this, qosCorrections())
-    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_qosCorrections));
-  EXPECT_CALL(*this, usage())
-    .WillRepeatedly(Invoke(this, &MockSlave::unmocked_usage));
-}
-
-
-MockSlave::~MockSlave()
-{
-  delete statusUpdateManager;
-}
-
-
-void MockSlave::unmocked_runTask(
-    const UPID& from,
-    const FrameworkInfo& frameworkInfo,
-    const FrameworkID& frameworkId,
-    const UPID& pid,
-    TaskInfo task)
-{
-  slave::Slave::runTask(from, frameworkInfo, frameworkInfo.id(), pid, task);
-}
-
-
-void MockSlave::unmocked__runTask(
-    const Future<bool>& future,
-    const FrameworkInfo& frameworkInfo,
-    const TaskInfo& task)
-{
-  slave::Slave::_runTask(future, frameworkInfo, task);
-}
-
-
-void MockSlave::unmocked_killTask(
-    const UPID& from,
-    const KillTaskMessage& killTaskMessage)
-{
-  slave::Slave::killTask(from, killTaskMessage);
-}
-
-
-void MockSlave::unmocked_removeFramework(slave::Framework* framework)
-{
-  slave::Slave::removeFramework(framework);
-}
-
-
-void MockSlave::unmocked___recover(const Future<Nothing>& future)
-{
-  slave::Slave::__recover(future);
-}
-
-
-void MockSlave::unmocked_qosCorrections()
-{
-  slave::Slave::qosCorrections();
-}
-
-
-process::Future<ResourceUsage> MockSlave::unmocked_usage()
-{
-  return slave::Slave::usage();
-}
-
-
 MockFetcherProcess::MockFetcherProcess()
 {
   // Set up default behaviors, calling the original methods.
@@ -618,89 +475,6 @@ MockFetcherProcess::MockFetcherProcess()
 
 
 MockFetcherProcess::~MockFetcherProcess() {}
-
-
-MockContainerLogger::MockContainerLogger()
-{
-  // Set up default behaviors.
-  EXPECT_CALL(*this, initialize())
-    .WillRepeatedly(Return(Nothing()));
-
-  EXPECT_CALL(*this, recover(_, _))
-    .WillRepeatedly(Return(Nothing()));
-
-  // All output is redirected to STDOUT_FILENO and STDERR_FILENO.
-  EXPECT_CALL(*this, prepare(_, _))
-    .WillRepeatedly(Return(mesos::slave::ContainerLogger::SubprocessInfo()));
-}
-
-MockContainerLogger::~MockContainerLogger() {}
-
-
-MockDocker::MockDocker(
-    const string& path,
-    const string& socket,
-    const Option<JSON::Object>& config)
-  : Docker(path, socket, config)
-{
-  EXPECT_CALL(*this, ps(_, _))
-    .WillRepeatedly(Invoke(this, &MockDocker::_ps));
-
-  EXPECT_CALL(*this, pull(_, _, _))
-    .WillRepeatedly(Invoke(this, &MockDocker::_pull));
-
-  EXPECT_CALL(*this, stop(_, _, _))
-    .WillRepeatedly(Invoke(this, &MockDocker::_stop));
-
-  EXPECT_CALL(*this, run(_, _, _, _, _, _, _, _, _))
-    .WillRepeatedly(Invoke(this, &MockDocker::_run));
-
-  EXPECT_CALL(*this, inspect(_, _))
-    .WillRepeatedly(Invoke(this, &MockDocker::_inspect));
-}
-
-
-MockDocker::~MockDocker() {}
-
-
-MockDockerContainerizer::MockDockerContainerizer(
-    const slave::Flags& flags,
-    slave::Fetcher* fetcher,
-    const process::Owned<ContainerLogger>& logger,
-    process::Shared<Docker> docker)
-  : slave::DockerContainerizer(flags, fetcher, logger, docker)
-{
-  initialize();
-}
-
-
-MockDockerContainerizer::MockDockerContainerizer(
-    const process::Owned<slave::DockerContainerizerProcess>& process)
-  : slave::DockerContainerizer(process)
-{
-  initialize();
-}
-
-
-MockDockerContainerizer::~MockDockerContainerizer() {}
-
-
-MockDockerContainerizerProcess::MockDockerContainerizerProcess(
-    const slave::Flags& flags,
-    slave::Fetcher* fetcher,
-    const process::Owned<ContainerLogger>& logger,
-    const process::Shared<Docker>& docker)
-  : slave::DockerContainerizerProcess(flags, fetcher, logger, docker)
-{
-  EXPECT_CALL(*this, fetch(_, _))
-    .WillRepeatedly(Invoke(this, &MockDockerContainerizerProcess::_fetch));
-
-  EXPECT_CALL(*this, pull(_))
-    .WillRepeatedly(Invoke(this, &MockDockerContainerizerProcess::_pull));
-}
-
-
-MockDockerContainerizerProcess::~MockDockerContainerizerProcess() {}
 
 
 MockAuthorizer::MockAuthorizer()
@@ -730,7 +504,7 @@ MockAuthorizer::MockAuthorizer()
 MockAuthorizer::~MockAuthorizer() {}
 
 
-process::Future<Nothing> MockFetcherProcess::unmocked__fetch(
+Future<Nothing> MockFetcherProcess::unmocked__fetch(
     const hashmap<CommandInfo::URI, Option<Future<shared_ptr<Cache::Entry>>>>&
       entries,
     const ContainerID& containerId,
@@ -749,7 +523,7 @@ process::Future<Nothing> MockFetcherProcess::unmocked__fetch(
 }
 
 
-process::Future<Nothing> MockFetcherProcess::unmocked_run(
+Future<Nothing> MockFetcherProcess::unmocked_run(
     const ContainerID& containerId,
     const string& sandboxDirectory,
     const Option<string>& user,
@@ -969,7 +743,19 @@ void ContainerizerTest<slave::MesosContainerizer>::TearDown()
       foreach (const string& cgroup, cgroups.get()) {
         // Remove any cgroups that start with TEST_CGROUPS_ROOT.
         if (strings::startsWith(cgroup, TEST_CGROUPS_ROOT)) {
+          // Cgroup destruction relies on `delay`s,
+          // so we must ensure the clock is resumed.
+          bool paused = Clock::paused();
+
+          if (paused) {
+            Clock::resume();
+          }
+
           AWAIT_READY(cgroups::destroy(hierarchy, cgroup));
+
+          if (paused) {
+            Clock::pause();
+          }
         }
       }
     }

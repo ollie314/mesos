@@ -86,6 +86,61 @@ namespace internal {
 namespace tests {
 
 
+class OfferEqMatcher
+  : public ::testing::MatcherInterface<const vector<Offer>&>
+{
+public:
+  OfferEqMatcher(int _cpus, int _mem)
+    : cpus(_cpus), mem(_mem) {}
+
+  virtual bool MatchAndExplain(
+      const vector<Offer>& offers,
+      ::testing::MatchResultListener* listener) const
+  {
+    double totalCpus = 0;
+    double totalMem = 0;
+
+    foreach (const Offer& offer, offers) {
+      foreach (const Resource& resource, offer.resources()) {
+        if (resource.name() == "cpus") {
+          totalCpus += resource.scalar().value();
+        } else if (resource.name() == "mem") {
+          totalMem += resource.scalar().value();
+        }
+      }
+    }
+
+    bool matches = totalCpus == cpus && totalMem == mem;
+
+    if (!matches) {
+      *listener << totalCpus << " cpus and " << totalMem << "mem";
+    }
+
+    return matches;
+  }
+
+  virtual void DescribeTo(::std::ostream* os) const
+  {
+    *os << "contains " << cpus << " cpus and " << mem << " mem";
+  }
+
+  virtual void DescribeNegationTo(::std::ostream* os) const
+  {
+    *os << "does not contain " << cpus << " cpus and "  << mem << " mem";
+  }
+
+private:
+  int cpus;
+  int mem;
+};
+
+
+const ::testing::Matcher<const vector<Offer>&> OfferEq(int cpus, int mem)
+{
+  return MakeMatcher(new OfferEqMatcher(cpus, mem));
+}
+
+
 template <typename T>
 class MasterAllocatorTest : public MesosTest {};
 
@@ -105,7 +160,7 @@ TYPED_TEST(MasterAllocatorTest, SingleFramework)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -150,7 +205,7 @@ TYPED_TEST(MasterAllocatorTest, ResourcesUnused)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -257,7 +312,7 @@ TYPED_TEST(MasterAllocatorTest, OutOfOrderDispatch)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -385,7 +440,7 @@ TYPED_TEST(MasterAllocatorTest, SchedulerFailover)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -427,7 +482,7 @@ TYPED_TEST(MasterAllocatorTest, SchedulerFailover)
   EXPECT_CALL(sched1, resourceOffers(_, _))
     .WillRepeatedly(DeclineOffers()); // For subsequent offers.
 
-  // Initially, all of slave1's resources are avaliable.
+  // Initially, all of slave1's resources are available.
   EXPECT_CALL(sched1, resourceOffers(_, OfferEq(3, 1024)))
     .WillOnce(LaunchTasks(DEFAULT_EXECUTOR_INFO, 1, 1, 256, "*"));
 
@@ -509,7 +564,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkExited)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -556,7 +611,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkExited)
     .WillRepeatedly(DeclineOffers());
 
   // The first time the framework is offered resources, all of the
-  // cluster's resources should be avaliable.
+  // cluster's resources should be available.
   EXPECT_CALL(sched1, resourceOffers(_, OfferEq(3, 1024)))
     .WillOnce(LaunchTasks(executor1, 1, 2, 512, "*"));
 
@@ -657,7 +712,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveLost)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -748,7 +803,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveLost)
   // Eventually after slave2 is launched, we should get
   // an offer that contains all of slave2's resources
   // and none of slave1's resources.
-  Future<vector<Offer> > resourceOffers;
+  Future<vector<Offer>> resourceOffers;
   EXPECT_CALL(sched, resourceOffers(_, OfferEq(3, 256)))
     .WillOnce(FutureArg<1>(&resourceOffers));
 
@@ -779,7 +834,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveAdded)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -815,7 +870,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveAdded)
   EXPECT_CALL(sched, resourceOffers(_, _))
     .WillRepeatedly(DeclineOffers());
 
-  // Initially, all of slave1's resources are avaliable.
+  // Initially, all of slave1's resources are available.
   EXPECT_CALL(sched, resourceOffers(_, OfferEq(3, 1024)))
     .WillOnce(LaunchTasks(DEFAULT_EXECUTOR_INFO, 1, 2, 512, "*"));
 
@@ -875,7 +930,7 @@ TYPED_TEST(MasterAllocatorTest, TaskFinished)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -979,7 +1034,7 @@ TYPED_TEST(MasterAllocatorTest, CpusOnlyOfferedAndTaskLaunched)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -1060,7 +1115,7 @@ TYPED_TEST(MasterAllocatorTest, MemoryOnlyOfferedAndTaskLaunched)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -1154,7 +1209,7 @@ TYPED_TEST(MasterAllocatorTest, Whitelist)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Future<Nothing> updateWhitelist1;
   EXPECT_CALL(allocator, updateWhitelist(Option<hashset<string>>(hosts)))
@@ -1193,7 +1248,7 @@ TYPED_TEST(MasterAllocatorTest, RoleTest)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.roles = Some("role2");
@@ -1286,7 +1341,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkReregistersFirst)
   {
     TestAllocator<TypeParam> allocator;
 
-    EXPECT_CALL(allocator, initialize(_, _, _, _));
+    EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
     Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
     ASSERT_SOME(master);
@@ -1343,7 +1398,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkReregistersFirst)
   {
     TestAllocator<TypeParam> allocator2;
 
-    EXPECT_CALL(allocator2, initialize(_, _, _, _));
+    EXPECT_CALL(allocator2, initialize(_, _, _, _, _));
 
     Future<Nothing> addFramework;
     EXPECT_CALL(allocator2, addFramework(_, _, _))
@@ -1410,7 +1465,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveReregistersFirst)
   {
     TestAllocator<TypeParam> allocator;
 
-    EXPECT_CALL(allocator, initialize(_, _, _, _));
+    EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
     Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
     ASSERT_SOME(master);
@@ -1466,7 +1521,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveReregistersFirst)
   {
     TestAllocator<TypeParam> allocator2;
 
-    EXPECT_CALL(allocator2, initialize(_, _, _, _));
+    EXPECT_CALL(allocator2, initialize(_, _, _, _, _));
 
     Future<Nothing> addSlave;
     EXPECT_CALL(allocator2, addSlave(_, _, _, _, _))
@@ -1519,7 +1574,7 @@ TYPED_TEST(MasterAllocatorTest, RebalancedForUpdatedWeights)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   // Start Mesos master.
   master::Flags masterFlags = this->CreateMasterFlags();

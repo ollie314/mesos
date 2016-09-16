@@ -88,7 +88,7 @@ TEST(FlagsTest, Load)
 {
   TestFlags flags;
 
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
     {"name1", Some("billy joel")},
     {"name2", Some("43")},
     {"name3", Some("false")},
@@ -137,7 +137,7 @@ TEST(FlagsTest, Add)
             "name9",
             "Also set name9");
 
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
     {"name6", Some("ben folds")},
     {"no-name7", None()},
     {"name9", Some("")}
@@ -185,7 +185,7 @@ TEST(FlagsTest, Alias)
             "value8");
 
   // Load with alias names.
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
      {"alias6", Some("foo")},
      {"no-alias7", None()},
      {"alias8", Some("bar")}
@@ -206,7 +206,7 @@ TEST(FlagsTest, Flags)
 {
   TestFlags flags;
 
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
     {"name1", Some("billy joel")},
     {"name2", Some("43")},
     {"name3", Some("false")},
@@ -413,7 +413,7 @@ TEST(FlagsTest, Stringification)
             "name8",
             "Optional name8");
 
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
     {"name2", Some("43")},
     {"no-name4", None()},
     {"name5", None()}
@@ -470,7 +470,7 @@ TEST(FlagsTest, EffectiveName)
             "value7");
 
   // Only load "name6" flag explicitly.
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
     {"alias6", Some("value6")}
   };
 
@@ -497,7 +497,7 @@ TEST(FlagsTest, DeprecationWarning)
             flags::DeprecatedName("alias6"),
             "Also set name6");
 
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
     {"alias6", Some("value6")}
   };
 
@@ -514,20 +514,54 @@ TEST(FlagsTest, DuplicatesFromEnvironment)
   TestFlags flags;
 
   os::setenv("FLAGSTEST_name1", "ben folds");
+  os::setenv("FLAGSTEST_name2", "50");
 
   const char* argv[] = {
     "/path/to/program",
     "--name1=billy joel"
   };
 
+  // `load(prefix, argc, argv)`.
   Try<Warnings> load = flags.load("FLAGSTEST_", arraySize(argv), argv);
   EXPECT_SOME(load);
   EXPECT_EQ(0, load->warnings.size());
 
   // The environment variables are overwritten by command line flags.
   EXPECT_EQ(flags.name1, "billy joel");
+  EXPECT_EQ(flags.name2, 50);
+
+  {
+    flags = TestFlags();
+    std::map<std::string, std::string> values;
+    values["name1"] = "billy joel";
+
+    // `load(map<string, string>, unknowns, prefix)`.
+    load = flags.load(values, false, "FLAGSTEST_");
+    EXPECT_SOME(load);
+    EXPECT_EQ(0, load->warnings.size());
+
+    EXPECT_EQ(flags.name1, "billy joel");
+    EXPECT_EQ(flags.name2, 50);
+  }
+
+  {
+    flags = TestFlags();
+    std::map<std::string, Option<std::string>> values;
+    values["name1"] = "billy joel";
+    values["name2"] = "51";
+
+    // `load(map<string, Option<string>, unknowns, prefix)`.
+    load = flags.load(values, false, "FLAGSTEST_");
+
+    EXPECT_SOME(load);
+    EXPECT_EQ(0, load->warnings.size());
+
+    EXPECT_EQ(flags.name1, "billy joel");
+    EXPECT_EQ(flags.name2, 51);
+  }
 
   os::unsetenv("FLAGSTEST_name1");
+  os::unsetenv("FLAGSTEST_name2");
 }
 
 
@@ -853,7 +887,7 @@ TEST(FlagsTest, Duration)
             "name7",
             "Also some amount of time");
 
-  const map<string, Option<string> > values = {
+  const map<string, Option<string>> values = {
     {"name6", Some("2mins")},
     {"name7", Some("3hrs")}
   };
@@ -887,7 +921,7 @@ TEST(FlagsTest, JSON)
 
   object.values["nested"] = nested;
 
-  map<string, Option<string> > values;
+  map<string, Option<string>> values;
   values["json"] = Some(stringify(object));
 
   ASSERT_SOME(flags.load(values));
@@ -925,7 +959,7 @@ TEST_F(FlagsFileTest, JSONFile)
   ASSERT_SOME(os::write(file, stringify(object)));
 
   // Read the JSON from the file.
-  map<string, Option<string> > values;
+  map<string, Option<string>> values;
   values["json"] = Some(file);
 
   ASSERT_SOME(flags.load(values));
@@ -949,7 +983,7 @@ TEST_F(FlagsFileTest, FilePrefix)
   ASSERT_SOME(os::write(file, "testing"));
 
   // Read the JSON from the file.
-  map<string, Option<string> > values;
+  map<string, Option<string>> values;
   values["something"] = Some("file://" + file);
 
   ASSERT_SOME(flags.load(values));

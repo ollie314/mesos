@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include <process/delay.hpp>
+#include <process/id.hpp>
 #include <process/process.hpp>
 #include <process/timer.hpp>
 
@@ -143,12 +144,14 @@ private:
 
   function<void(StatusUpdate)> forward_;
 
-  hashmap<FrameworkID, hashmap<TaskID, StatusUpdateStream*> > streams;
+  hashmap<FrameworkID, hashmap<TaskID, StatusUpdateStream*>> streams;
 };
 
 
 StatusUpdateManagerProcess::StatusUpdateManagerProcess(const Flags& _flags)
-  : flags(_flags), paused(false) {}
+  : ProcessBase(process::ID::generate("status-update-manager")),
+    flags(_flags),
+    paused(false) {}
 
 
 StatusUpdateManagerProcess::~StatusUpdateManagerProcess()
@@ -673,9 +676,13 @@ StatusUpdateStream::StatusUpdateStream(
     }
 
     // Open the updates file.
+    // NOTE: We don't use `O_SYNC` here because we only read this file
+    // if the host did not crash. `os::write` success implies the kernel
+    // will have flushed our data to the page cache. This is sufficient
+    // for the recovery scenarios we use this data for.
     Try<int> result = os::open(
         path.get(),
-        O_CREAT | O_WRONLY | O_APPEND | O_SYNC | O_CLOEXEC,
+        O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC,
         S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
     if (result.isError()) {

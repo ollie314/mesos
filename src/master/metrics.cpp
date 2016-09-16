@@ -93,6 +93,14 @@ Metrics::Metrics(const Master& master)
         "master/tasks_lost"),
     tasks_error(
         "master/tasks_error"),
+    tasks_dropped(
+        "master/tasks_dropped"),
+    tasks_unreachable(
+        "master/tasks_unreachable"),
+    tasks_gone(
+        "master/tasks_gone"),
+    tasks_gone_by_operator(
+        "master/tasks_gone_by_operator"),
     dropped_messages(
         "master/dropped_messages"),
     messages_register_framework(
@@ -181,7 +189,13 @@ Metrics::Metrics(const Master& master)
     slave_shutdowns_completed(
         "master/slave_shutdowns_completed"),
     slave_shutdowns_canceled(
-        "master/slave_shutdowns_canceled")
+        "master/slave_shutdowns_canceled"),
+    slave_unreachable_scheduled(
+        "master/slave_unreachable_scheduled"),
+    slave_unreachable_completed(
+        "master/slave_unreachable_completed"),
+    slave_unreachable_canceled(
+        "master/slave_unreachable_canceled")
 {
   // TODO(dhamon): Check return values of 'add'.
   process::metrics::add(uptime_secs);
@@ -208,6 +222,10 @@ Metrics::Metrics(const Master& master)
   process::metrics::add(tasks_killed);
   process::metrics::add(tasks_lost);
   process::metrics::add(tasks_error);
+  process::metrics::add(tasks_dropped);
+  process::metrics::add(tasks_unreachable);
+  process::metrics::add(tasks_gone);
+  process::metrics::add(tasks_gone_by_operator);
 
   process::metrics::add(dropped_messages);
 
@@ -266,6 +284,10 @@ Metrics::Metrics(const Master& master)
   process::metrics::add(slave_shutdowns_scheduled);
   process::metrics::add(slave_shutdowns_completed);
   process::metrics::add(slave_shutdowns_canceled);
+
+  process::metrics::add(slave_unreachable_scheduled);
+  process::metrics::add(slave_unreachable_completed);
+  process::metrics::add(slave_unreachable_canceled);
 
   // Create resource gauges.
   // TODO(dhamon): Set these up dynamically when adding a slave based on the
@@ -345,6 +367,10 @@ Metrics::~Metrics()
   process::metrics::remove(tasks_killed);
   process::metrics::remove(tasks_lost);
   process::metrics::remove(tasks_error);
+  process::metrics::remove(tasks_dropped);
+  process::metrics::remove(tasks_unreachable);
+  process::metrics::remove(tasks_gone);
+  process::metrics::remove(tasks_gone_by_operator);
 
   process::metrics::remove(dropped_messages);
 
@@ -403,6 +429,10 @@ Metrics::~Metrics()
   process::metrics::remove(slave_shutdowns_scheduled);
   process::metrics::remove(slave_shutdowns_completed);
   process::metrics::remove(slave_shutdowns_canceled);
+
+  process::metrics::remove(slave_unreachable_scheduled);
+  process::metrics::remove(slave_unreachable_completed);
+  process::metrics::remove(slave_unreachable_canceled);
 
   foreach (const Gauge& gauge, resources_total) {
     process::metrics::remove(gauge);

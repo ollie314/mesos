@@ -17,9 +17,7 @@
 #ifndef __TESTS_MESOS_HPP__
 #define __TESTS_MESOS_HPP__
 
-#include <map>
 #include <memory>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -40,10 +38,6 @@
 #include <mesos/fetcher/fetcher.hpp>
 
 #include <mesos/master/detector.hpp>
-
-#include <mesos/slave/container_logger.hpp>
-#include <mesos/slave/qos_controller.hpp>
-#include <mesos/slave/resource_estimator.hpp>
 
 #include <process/future.hpp>
 #include <process/gmock.hpp>
@@ -75,7 +69,6 @@
 #include "slave/slave.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
-#include "slave/containerizer/docker.hpp"
 #include "slave/containerizer/fetcher.hpp"
 
 #include "slave/containerizer/mesos/containerizer.hpp"
@@ -98,7 +91,8 @@ namespace mesos {
 namespace internal {
 namespace tests {
 
-constexpr char DEFAULT_HTTP_AUTHENTICATION_REALM[] = "test-realm";
+constexpr char READONLY_HTTP_AUTHENTICATION_REALM[] = "test-readonly-realm";
+constexpr char READWRITE_HTTP_AUTHENTICATION_REALM[] = "test-readwrite-realm";
 
 // Forward declarations.
 class MockExecutor;
@@ -144,7 +138,7 @@ protected:
 
   // TODO(bmahler): Consider adding a builder style interface, e.g.
   //
-  // Try<PID<Slave> > slave =
+  // Try<PID<Slave>> slave =
   //   Slave().With(flags)
   //          .With(executor)
   //          .With(containerizer)
@@ -159,7 +153,7 @@ protected:
   // injections.containerizer = containerizer;
   // injections.detector = detector;
   // injections.gc = gc;
-  // Try<PID<Slave> > slave = StartSlave(injections);
+  // Try<PID<Slave>> slave = StartSlave(injections);
 
   // Starts a slave with the specified detector and flags.
   virtual Try<process::Owned<cluster::Slave>> StartSlave(
@@ -593,13 +587,18 @@ inline Resource createDiskResource(
     const std::string& role,
     const Option<std::string>& persistenceID,
     const Option<std::string>& containerPath,
-    const Option<Resource::DiskInfo::Source>& source = None())
+    const Option<Resource::DiskInfo::Source>& source = None(),
+    bool isShared = false)
 {
   Resource resource = Resources::parse("disk", value, role).get();
 
   if (persistenceID.isSome() || containerPath.isSome() || source.isSome()) {
     resource.mutable_disk()->CopyFrom(
         createDiskInfo(persistenceID, containerPath, None(), None(), source));
+
+    if (isShared) {
+      resource.mutable_shared();
+    }
   }
 
   return resource;
@@ -615,7 +614,8 @@ inline Resource createPersistentVolume(
     const std::string& containerPath,
     const Option<std::string>& reservationPrincipal = None(),
     const Option<Resource::DiskInfo::Source>& source = None(),
-    const Option<std::string>& creatorPrincipal = None())
+    const Option<std::string>& creatorPrincipal = None(),
+    bool isShared = false)
 {
   Resource volume = Resources::parse(
       "disk",
@@ -635,6 +635,10 @@ inline Resource createPersistentVolume(
     volume.mutable_reservation()->set_principal(reservationPrincipal.get());
   }
 
+  if (isShared) {
+    volume.mutable_shared();
+  }
+
   return volume;
 }
 
@@ -646,7 +650,8 @@ inline Resource createPersistentVolume(
     const std::string& persistenceId,
     const std::string& containerPath,
     const Option<std::string>& reservationPrincipal = None(),
-    const Option<std::string>& creatorPrincipal = None())
+    const Option<std::string>& creatorPrincipal = None(),
+    bool isShared = false)
 {
   Option<Resource::DiskInfo::Source> source = None();
   if (volume.has_disk() && volume.disk().has_source()) {
@@ -664,6 +669,10 @@ inline Resource createPersistentVolume(
 
   if (reservationPrincipal.isSome()) {
     volume.mutable_reservation()->set_principal(reservationPrincipal.get());
+  }
+
+  if (isShared) {
+    volume.mutable_shared();
   }
 
   return volume;
@@ -715,7 +724,7 @@ inline hashmap<std::string, double> convertToHashmap(
 }
 
 
-// Helpers for creating reserve operations.
+// Helpers for creating offer operations.
 inline Offer::Operation RESERVE(const Resources& resources)
 {
   Offer::Operation operation;
@@ -725,7 +734,6 @@ inline Offer::Operation RESERVE(const Resources& resources)
 }
 
 
-// Helpers for creating unreserve operations.
 inline Offer::Operation UNRESERVE(const Resources& resources)
 {
   Offer::Operation operation;
@@ -735,7 +743,6 @@ inline Offer::Operation UNRESERVE(const Resources& resources)
 }
 
 
-// Helpers for creating offer operations.
 inline Offer::Operation CREATE(const Resources& volumes)
 {
   Offer::Operation operation;
@@ -1126,6 +1133,7 @@ public:
   MOCK_METHOD1_T(disconnected, void(Mesos*));
   MOCK_METHOD2_T(subscribed, void(Mesos*, const typename Event::Subscribed&));
   MOCK_METHOD2_T(launch, void(Mesos*, const typename Event::Launch&));
+  MOCK_METHOD2_T(launchGroup, void(Mesos*, const typename Event::LaunchGroup&));
   MOCK_METHOD2_T(kill, void(Mesos*, const typename Event::Kill&));
   MOCK_METHOD2_T(message, void(Mesos*, const typename Event::Message&));
   MOCK_METHOD1_T(shutdown, void(Mesos*));
@@ -1141,6 +1149,9 @@ public:
         break;
       case Event::LAUNCH:
         launch(mesos, event.launch());
+        break;
+      case Event::LAUNCH_GROUP:
+        launchGroup(mesos, event.launch_group());
         break;
       case Event::KILL:
         kill(mesos, event.kill());
@@ -1270,136 +1281,6 @@ using MockV1HTTPExecutor =
     mesos::v1::executor::Mesos, mesos::v1::executor::Event>;
 
 
-class MockGarbageCollector : public slave::GarbageCollector
-{
-public:
-  MockGarbageCollector();
-  virtual ~MockGarbageCollector();
-
-  MOCK_METHOD2(
-      schedule,
-      process::Future<Nothing>(const Duration& d, const std::string& path));
-  MOCK_METHOD1(
-      unschedule,
-      process::Future<bool>(const std::string& path));
-  MOCK_METHOD1(
-      prune,
-      void(const Duration& d));
-};
-
-
-class MockResourceEstimator : public mesos::slave::ResourceEstimator
-{
-public:
-  MockResourceEstimator();
-  virtual ~MockResourceEstimator();
-
-  MOCK_METHOD1(
-      initialize,
-      Try<Nothing>(const lambda::function<process::Future<ResourceUsage>()>&));
-
-  MOCK_METHOD0(
-      oversubscribable,
-      process::Future<Resources>());
-};
-
-
-// The MockQoSController is a stub which lets tests fill the
-// correction queue for a slave.
-class MockQoSController : public mesos::slave::QoSController
-{
-public:
-  MockQoSController();
-  virtual ~MockQoSController();
-
-  MOCK_METHOD1(
-      initialize,
-      Try<Nothing>(const lambda::function<process::Future<ResourceUsage>()>&));
-
-  MOCK_METHOD0(
-      corrections, process::Future<std::list<mesos::slave::QoSCorrection>>());
-};
-
-
-// Definition of a mock Slave to be used in tests with gmock, covering
-// potential races between runTask and killTask.
-class MockSlave : public slave::Slave
-{
-public:
-  MockSlave(
-      const slave::Flags& flags,
-      mesos::master::detector::MasterDetector* detector,
-      slave::Containerizer* containerizer,
-      const Option<mesos::slave::QoSController*>& qosController = None(),
-      const Option<mesos::Authorizer*>& authorizer = None());
-
-  virtual ~MockSlave();
-
-  MOCK_METHOD5(runTask, void(
-      const process::UPID& from,
-      const FrameworkInfo& frameworkInfo,
-      const FrameworkID& frameworkId,
-      const process::UPID& pid,
-      TaskInfo task));
-
-  void unmocked_runTask(
-      const process::UPID& from,
-      const FrameworkInfo& frameworkInfo,
-      const FrameworkID& frameworkId,
-      const process::UPID& pid,
-      TaskInfo task);
-
-  MOCK_METHOD3(_runTask, void(
-      const process::Future<bool>& future,
-      const FrameworkInfo& frameworkInfo,
-      const TaskInfo& task));
-
-  void unmocked__runTask(
-      const process::Future<bool>& future,
-      const FrameworkInfo& frameworkInfo,
-      const TaskInfo& task);
-
-  MOCK_METHOD2(killTask, void(
-      const process::UPID& from,
-      const KillTaskMessage& killTaskMessage));
-
-  void unmocked_killTask(
-      const process::UPID& from,
-      const KillTaskMessage& killTaskMessage);
-
-  MOCK_METHOD1(removeFramework, void(
-      slave::Framework* framework));
-
-  void unmocked_removeFramework(
-      slave::Framework* framework);
-
-  MOCK_METHOD1(__recover, void(
-      const process::Future<Nothing>& future));
-
-  void unmocked___recover(
-      const process::Future<Nothing>& future);
-
-  MOCK_METHOD0(qosCorrections, void());
-
-  void unmocked_qosCorrections();
-
-  MOCK_METHOD1(_qosCorrections, void(
-      const process::Future<std::list<
-          mesos::slave::QoSCorrection>>& correction));
-
-  MOCK_METHOD0(usage, process::Future<ResourceUsage>());
-
-  process::Future<ResourceUsage> unmocked_usage();
-
-private:
-  Files files;
-  MockGarbageCollector gc;
-  MockResourceEstimator resourceEstimator;
-  MockQoSController qosController;
-  slave::StatusUpdateManager* statusUpdateManager;
-};
-
-
 // Definition of a mock FetcherProcess to be used in tests with gmock.
 class MockFetcherProcess : public slave::FetcherProcess
 {
@@ -1445,277 +1326,6 @@ public:
 };
 
 
-// Definition of a mock ContainerLogger to be used in tests with gmock.
-class MockContainerLogger : public mesos::slave::ContainerLogger
-{
-public:
-  MockContainerLogger();
-  virtual ~MockContainerLogger();
-
-  MOCK_METHOD0(initialize, Try<Nothing>(void));
-
-  MOCK_METHOD2(
-      recover,
-      process::Future<Nothing>(const ExecutorInfo&, const std::string&));
-
-  MOCK_METHOD2(
-      prepare,
-      process::Future<mesos::slave::ContainerLogger::SubprocessInfo>(
-          const ExecutorInfo&, const std::string&));
-};
-
-
-// Definition of a mock Docker to be used in tests with gmock.
-class MockDocker : public Docker
-{
-public:
-  MockDocker(
-      const std::string& path,
-      const std::string& socket,
-      const Option<JSON::Object>& config = None());
-  virtual ~MockDocker();
-
-  MOCK_CONST_METHOD9(
-      run,
-      process::Future<Option<int>>(
-          const mesos::ContainerInfo&,
-          const mesos::CommandInfo&,
-          const std::string&,
-          const std::string&,
-          const std::string&,
-          const Option<mesos::Resources>&,
-          const Option<std::map<std::string, std::string>>&,
-          const process::Subprocess::IO&,
-          const process::Subprocess::IO&));
-
-  MOCK_CONST_METHOD2(
-      ps,
-      process::Future<std::list<Docker::Container>>(
-          bool, const Option<std::string>&));
-
-  MOCK_CONST_METHOD3(
-      pull,
-      process::Future<Docker::Image>(
-          const std::string&,
-          const std::string&,
-          bool));
-
-  MOCK_CONST_METHOD3(
-      stop,
-      process::Future<Nothing>(
-          const std::string&,
-          const Duration&,
-          bool));
-
-  MOCK_CONST_METHOD2(
-      inspect,
-      process::Future<Docker::Container>(
-          const std::string&,
-          const Option<Duration>&));
-
-  process::Future<Option<int>> _run(
-      const mesos::ContainerInfo& containerInfo,
-      const mesos::CommandInfo& commandInfo,
-      const std::string& name,
-      const std::string& sandboxDirectory,
-      const std::string& mappedDirectory,
-      const Option<mesos::Resources>& resources,
-      const Option<std::map<std::string, std::string>>& env,
-      const process::Subprocess::IO& stdout,
-      const process::Subprocess::IO& stderr) const
-  {
-    return Docker::run(
-        containerInfo,
-        commandInfo,
-        name,
-        sandboxDirectory,
-        mappedDirectory,
-        resources,
-        env,
-        stdout,
-        stderr);
-  }
-
-  process::Future<std::list<Docker::Container>> _ps(
-      bool all,
-      const Option<std::string>& prefix) const
-  {
-    return Docker::ps(all, prefix);
-  }
-
-  process::Future<Docker::Image> _pull(
-      const std::string& directory,
-      const std::string& image,
-      bool force) const
-  {
-    return Docker::pull(directory, image, force);
-  }
-
-  process::Future<Nothing> _stop(
-      const std::string& containerName,
-      const Duration& timeout,
-      bool remove) const
-  {
-    return Docker::stop(containerName, timeout, remove);
-  }
-
-  process::Future<Docker::Container> _inspect(
-      const std::string& containerName,
-      const Option<Duration>& retryInterval)
-  {
-    return Docker::inspect(containerName, retryInterval);
-  }
-};
-
-
-// Definition of a mock DockerContainerizer to be used in tests with gmock.
-class MockDockerContainerizer : public slave::DockerContainerizer {
-public:
-  MockDockerContainerizer(
-      const slave::Flags& flags,
-      slave::Fetcher* fetcher,
-      const process::Owned<mesos::slave::ContainerLogger>& logger,
-      process::Shared<Docker> docker);
-
-  MockDockerContainerizer(
-      const process::Owned<slave::DockerContainerizerProcess>& process);
-
-  virtual ~MockDockerContainerizer();
-
-  void initialize()
-  {
-    // NOTE: See TestContainerizer::setup for why we use
-    // 'EXPECT_CALL' and 'WillRepeatedly' here instead of
-    // 'ON_CALL' and 'WillByDefault'.
-    EXPECT_CALL(*this, launch(_, _, _, _, _, _, _))
-      .WillRepeatedly(Invoke(this, &MockDockerContainerizer::_launchExecutor));
-
-    EXPECT_CALL(*this, launch(_, _, _, _, _, _, _, _))
-      .WillRepeatedly(Invoke(this, &MockDockerContainerizer::_launch));
-
-    EXPECT_CALL(*this, update(_, _))
-      .WillRepeatedly(Invoke(this, &MockDockerContainerizer::_update));
-  }
-
-  MOCK_METHOD7(
-      launch,
-      process::Future<bool>(
-          const ContainerID&,
-          const ExecutorInfo&,
-          const std::string&,
-          const Option<std::string>&,
-          const SlaveID&,
-          const process::PID<slave::Slave>&,
-          bool checkpoint));
-
-  MOCK_METHOD8(
-      launch,
-      process::Future<bool>(
-          const ContainerID&,
-          const TaskInfo&,
-          const ExecutorInfo&,
-          const std::string&,
-          const Option<std::string>&,
-          const SlaveID&,
-          const process::PID<slave::Slave>&,
-          bool checkpoint));
-
-  MOCK_METHOD2(
-      update,
-      process::Future<Nothing>(
-          const ContainerID&,
-          const Resources&));
-
-  // Default 'launch' implementation (necessary because we can't just
-  // use &slave::DockerContainerizer::launch with 'Invoke').
-  process::Future<bool> _launch(
-      const ContainerID& containerId,
-      const TaskInfo& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const slave::PID<slave::Slave>& slavePid,
-      bool checkpoint)
-  {
-    return slave::DockerContainerizer::launch(
-        containerId,
-        taskInfo,
-        executorInfo,
-        directory,
-        user,
-        slaveId,
-        slavePid,
-        checkpoint);
-  }
-
-  process::Future<bool> _launchExecutor(
-      const ContainerID& containerId,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const slave::PID<slave::Slave>& slavePid,
-      bool checkpoint)
-  {
-    return slave::DockerContainerizer::launch(
-        containerId,
-        executorInfo,
-        directory,
-        user,
-        slaveId,
-        slavePid,
-        checkpoint);
-  }
-
-  process::Future<Nothing> _update(
-      const ContainerID& containerId,
-      const Resources& resources)
-  {
-    return slave::DockerContainerizer::update(
-        containerId,
-        resources);
-  }
-};
-
-
-// Definition of a mock DockerContainerizerProcess to be used in tests
-// with gmock.
-class MockDockerContainerizerProcess : public slave::DockerContainerizerProcess
-{
-public:
-  MockDockerContainerizerProcess(
-      const slave::Flags& flags,
-      slave::Fetcher* fetcher,
-      const process::Owned<mesos::slave::ContainerLogger>& logger,
-      const process::Shared<Docker>& docker);
-
-  virtual ~MockDockerContainerizerProcess();
-
-  MOCK_METHOD2(
-      fetch,
-      process::Future<Nothing>(
-          const ContainerID& containerId,
-          const SlaveID& slaveId));
-
-  MOCK_METHOD1(
-      pull,
-      process::Future<Nothing>(const ContainerID& containerId));
-
-  process::Future<Nothing> _fetch(
-      const ContainerID& containerId,
-      const SlaveID& slaveId)
-  {
-    return slave::DockerContainerizerProcess::fetch(containerId, slaveId);
-  }
-
-  process::Future<Nothing> _pull(const ContainerID& containerId)
-  {
-    return slave::DockerContainerizerProcess::pull(containerId);
-  }
-};
-
-
 // Definition of a MockAuthorizer that can be used in tests with gmock.
 class MockAuthorizer : public Authorizer
 {
@@ -1731,62 +1341,6 @@ public:
           const Option<authorization::Subject>& subject,
           const authorization::Action& action));
 };
-
-
-class OfferEqMatcher
-  : public ::testing::MatcherInterface<const std::vector<Offer>&>
-{
-public:
-  OfferEqMatcher(int _cpus, int _mem)
-    : cpus(_cpus), mem(_mem) {}
-
-  virtual bool MatchAndExplain(
-      const std::vector<Offer>& offers,
-      ::testing::MatchResultListener* listener) const
-  {
-    double totalCpus = 0;
-    double totalMem = 0;
-
-    foreach (const Offer& offer, offers) {
-      foreach (const Resource& resource, offer.resources()) {
-        if (resource.name() == "cpus") {
-          totalCpus += resource.scalar().value();
-        } else if (resource.name() == "mem") {
-          totalMem += resource.scalar().value();
-        }
-      }
-    }
-
-    bool matches = totalCpus == cpus && totalMem == mem;
-
-    if (!matches) {
-      *listener << totalCpus << " cpus and " << totalMem << "mem";
-    }
-
-    return matches;
-  }
-
-  virtual void DescribeTo(::std::ostream* os) const
-  {
-    *os << "contains " << cpus << " cpus and " << mem << " mem";
-  }
-
-  virtual void DescribeNegationTo(::std::ostream* os) const
-  {
-    *os << "does not contain " << cpus << " cpus and "  << mem << " mem";
-  }
-
-private:
-  int cpus;
-  int mem;
-};
-
-
-inline const ::testing::Matcher<const std::vector<Offer>&> OfferEq(
-    int cpus, int mem)
-{
-  return MakeMatcher(new OfferEqMatcher(cpus, mem));
-}
 
 
 ACTION_P(SendStatusUpdateFromTask, state)

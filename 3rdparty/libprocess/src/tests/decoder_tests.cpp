@@ -15,6 +15,7 @@
 #include <deque>
 #include <string>
 
+#include <process/owned.hpp>
 #include <process/socket.hpp>
 
 #include <stout/gtest.hpp>
@@ -25,6 +26,7 @@ namespace http = process::http;
 
 using process::DataDecoder;
 using process::Future;
+using process::Owned;
 using process::ResponseDecoder;
 using process::StreamingResponseDecoder;
 
@@ -50,7 +52,7 @@ TEST(DecoderTest, Request)
   ASSERT_FALSE(decoder.failed());
   ASSERT_EQ(1, requests.size());
 
-  http::Request* request = requests[0];
+  Owned<http::Request> request(requests[0]);
   EXPECT_EQ("GET", request->method);
 
   EXPECT_EQ("/path/file.json", request->url.path);
@@ -66,8 +68,6 @@ TEST(DecoderTest, Request)
   EXPECT_SOME_EQ("localhost", request->headers.get("Host"));
   EXPECT_SOME_EQ("close", request->headers.get("Connection"));
   EXPECT_SOME_EQ("compress, gzip", request->headers.get("Accept-Encoding"));
-
-  delete request;
 }
 
 
@@ -89,10 +89,9 @@ TEST(DecoderTest, RequestHeaderContinuation)
   ASSERT_FALSE(decoder.failed());
   ASSERT_EQ(1, requests.size());
 
-  http::Request* request = requests[0];
+  Owned<http::Request> request(requests[0]);
   EXPECT_SOME_EQ("compress,                 gzip",
                  request->headers.get("Accept-Encoding"));
-  delete request;
 }
 
 
@@ -113,12 +112,10 @@ TEST(DecoderTest, RequestHeaderCaseInsensitive)
   ASSERT_FALSE(decoder.failed());
   ASSERT_EQ(1, requests.size());
 
-  http::Request* request = requests[0];
+  Owned<http::Request> request(requests[0]);
   EXPECT_FALSE(request->keepAlive);
 
   EXPECT_SOME_EQ("compress, gzip", request->headers.get("Accept-Encoding"));
-
-  delete request;
 }
 
 
@@ -138,15 +135,13 @@ TEST(DecoderTest, Response)
   ASSERT_FALSE(decoder.failed());
   ASSERT_EQ(1, responses.size());
 
-  http::Response* response = responses[0];
+  Owned<http::Response> response(responses[0]);
 
   EXPECT_EQ("200 OK", response->status);
   EXPECT_EQ(http::Response::BODY, response->type);
   EXPECT_EQ("hi", response->body);
 
   EXPECT_EQ(3, response->headers.size());
-
-  delete response;
 }
 
 
@@ -170,7 +165,7 @@ TEST(DecoderTest, StreamingResponse)
   EXPECT_TRUE(decoder.writingBody());
   ASSERT_EQ(1, responses.size());
 
-  http::Response* response = responses[0];
+  Owned<http::Response> response(responses[0]);
 
   EXPECT_EQ("200 OK", response->status);
   EXPECT_EQ(3, response->headers.size());
@@ -222,7 +217,7 @@ TEST(DecoderTest, StreamingResponseFailure)
   EXPECT_TRUE(decoder.writingBody());
 
   ASSERT_EQ(1, responses.size());
-  http::Response* response = responses[0];
+  Owned<http::Response> response(responses[0]);
 
   EXPECT_EQ("200 OK", response->status);
   EXPECT_EQ(3, response->headers.size());

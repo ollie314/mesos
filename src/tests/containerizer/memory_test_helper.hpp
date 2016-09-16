@@ -31,11 +31,13 @@ namespace tests {
 // The abstraction for controlling the memory usage of a subprocess.
 // TODO(chzhcn): Currently, this helper is only supposed to be used by
 // one thread. Consider making it thread safe.
-class MemoryTestHelper
+class MemoryTestHelper : public Subcommand
 {
 public:
-  MemoryTestHelper() {}
-  ~MemoryTestHelper();
+  static const char NAME[];
+
+  MemoryTestHelper() : Subcommand(NAME) {}
+  virtual ~MemoryTestHelper();
 
   // Spawns a subprocess.
   // TODO(chzhcn): Consider returning a future instead of blocking.
@@ -60,24 +62,15 @@ public:
   // TODO(chzhcn): Consider returning a future instead of blocking.
   Try<Nothing> increasePageCache(const Bytes& size = Megabytes(1));
 
+protected:
+  // The main function of the subprocess. It runs in a loop and
+  // executes commands passed from stdin.
+  virtual int execute();
+
 private:
   Try<Nothing> requestAndWait(const std::string& request);
 
   Option<process::Subprocess> s;
-};
-
-
-// The actual subprocess behind MemoryTestHelper. It runs in a loop
-// and executes commands passed from stdin.
-class MemoryTestHelperMain : public Subcommand
-{
-public:
-  static const char NAME[];
-
-  MemoryTestHelperMain() : Subcommand(NAME) {}
-
-protected:
-  virtual int execute();
 };
 
 } // namespace tests {

@@ -41,6 +41,9 @@
 #include "slave/containerizer/mesos/linux_launcher.hpp"
 
 #include "slave/containerizer/mesos/isolators/filesystem/linux.hpp"
+
+#include "slave/containerizer/mesos/isolators/volume/image.hpp"
+
 #include "slave/containerizer/mesos/provisioner/backend.hpp"
 #include "slave/containerizer/mesos/provisioner/paths.hpp"
 #include "slave/containerizer/mesos/provisioner/backends/copy.hpp"
@@ -56,6 +59,7 @@ using process::Owned;
 using process::PID;
 using process::Shared;
 
+using std::map;
 using std::string;
 using std::vector;
 
@@ -72,10 +76,12 @@ using mesos::internal::slave::Provisioner;
 using mesos::internal::slave::ProvisionerProcess;
 using mesos::internal::slave::Slave;
 using mesos::internal::slave::Store;
+using mesos::internal::slave::VolumeImageIsolatorProcess;
 
 using mesos::master::detector::MasterDetector;
 
 using mesos::slave::ContainerLogger;
+using mesos::slave::ContainerTermination;
 using mesos::slave::Isolator;
 
 namespace mesos {
@@ -143,14 +149,25 @@ protected:
         stores,
         backends));
 
-    Owned<Provisioner> provisioner(new Provisioner(provisionerProcess));
+    Owned<Provisioner> _provisioner(new Provisioner(provisionerProcess));
+    Shared<Provisioner> provisioner = _provisioner.share();
 
-    Try<Isolator*> isolator = LinuxFilesystemIsolatorProcess::create(flags);
+    Try<Isolator*> linuxIsolator =
+      LinuxFilesystemIsolatorProcess::create(flags);
 
-    if (isolator.isError()) {
+    if (linuxIsolator.isError()) {
       return Error(
           "Failed to create LinuxFilesystemIsolatorProcess: " +
-          isolator.error());
+          linuxIsolator.error());
+    }
+
+    Try<Isolator*> imageIsolator =
+      VolumeImageIsolatorProcess::create(flags, provisioner);
+
+    if (imageIsolator.isError()) {
+      return Error(
+          "Failed to create VolumeImageIsolatorProcess: " +
+          imageIsolator.error());
     }
 
     Try<Launcher*> launcher = LinuxLauncher::create(flags);
@@ -175,7 +192,8 @@ protected:
             Owned<ContainerLogger>(logger.get()),
             Owned<Launcher>(launcher.get()),
             provisioner,
-            {Owned<Isolator>(isolator.get())}));
+            {Owned<Isolator>(linuxIsolator.get()),
+             Owned<Isolator>(imageIsolator.get())}));
   }
 
   ContainerInfo createContainerInfo(
@@ -257,11 +275,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ChangeRootFilesystem)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -269,9 +288,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ChangeRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
-
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -717,13 +734,13 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_RecoverOrphanedPersistentVolume)
 
   // Wait until slave recovery is complete.
   Future<Nothing> _recover = FUTURE_DISPATCH(_, &Slave::_recover);
-  AWAIT_READY(_recover);
+  AWAIT_READY_FOR(_recover, Seconds(60));
 
   // Wait until the containerizer's recovery is done too.
   // This is called once orphans are cleaned up.  But this future is not
   // directly tied to the `Slave::_recover` future above.
   _recover = FUTURE_DISPATCH(_, &MesosContainerizerProcess::___recover);
-  AWAIT_READY(_recover);
+  AWAIT_READY_FOR(_recover, Seconds(60));
 
   Try<fs::MountInfoTable> table = fs::MountInfoTable::read();
   ASSERT_SOME(table);
@@ -768,11 +785,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_Metrics)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -789,9 +807,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_Metrics)
   containerizer.get()->destroy(containerId);
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
-
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Executor was killed.
@@ -829,11 +845,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromSandbox)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -841,9 +858,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromSandbox)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
-
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -883,11 +898,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromHost)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -895,9 +911,58 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromHost)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  AWAIT_READY(wait);
 
+  // Check the executor exited correctly.
+  EXPECT_TRUE(wait.get().has_status());
+  EXPECT_EQ(0, wait.get().status());
+}
+
+
+// This test verifies that a file volume with an absolute host
+// path as well as an absolute container path is properly mounted
+// in the container's mount namespace.
+TEST_F(LinuxFilesystemIsolatorTest, ROOT_FileVolumeFromHost)
+{
+  slave::Flags flags = CreateSlaveFlags();
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  Try<Owned<MesosContainerizer>> containerizer = createContainerizer(
+      flags,
+      {{"test_image", path::join(os::getcwd(), "test_image")}});
+
+  ASSERT_SOME(containerizer);
+
+  ExecutorInfo executor = CREATE_EXECUTOR_INFO(
+      "test_executor",
+      "test -f /tmp/test/file.txt");
+
+  const string file = path::join(os::getcwd(), "file");
+  ASSERT_SOME(os::touch(file));
+
+  executor.mutable_container()->CopyFrom(createContainerInfo(
+      "test_image",
+      {createVolumeFromHostPath("/tmp/test/file.txt", file, Volume::RW)}));
+
+  const string directory = path::join(os::getcwd(), "sandbox");
+  ASSERT_SOME(os::mkdir(directory));
+
+  Future<bool> launch = containerizer.get()->launch(
+      containerId,
+      None(),
+      executor,
+      directory,
+      None(),
+      SlaveID(),
+      map<string, string>(),
+      false);
+
+  AWAIT_READY_FOR(launch, Seconds(60));
+
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -935,11 +1000,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromHostSandboxMountPoint)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -947,9 +1013,58 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromHostSandboxMountPoint)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  AWAIT_READY(wait);
 
+  // Check the executor exited correctly.
+  EXPECT_TRUE(wait.get().has_status());
+  EXPECT_EQ(0, wait.get().status());
+}
+
+
+// This test verifies that a file volume with an absolute host path
+// and a relative container path is properly mounted in the container's
+// mount namespace. The mount point will be created in the sandbox.
+TEST_F(LinuxFilesystemIsolatorTest, ROOT_FileVolumeFromHostSandboxMountPoint)
+{
+  slave::Flags flags = CreateSlaveFlags();
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  Try<Owned<MesosContainerizer>> containerizer = createContainerizer(
+      flags,
+      {{"test_image", path::join(os::getcwd(), "test_image")}});
+
+  ASSERT_SOME(containerizer);
+
+  ExecutorInfo executor = CREATE_EXECUTOR_INFO(
+      "test_executor",
+      "test -f mountpoint/file.txt");
+
+  const string file = path::join(os::getcwd(), "file");
+  ASSERT_SOME(os::touch(file));
+
+  executor.mutable_container()->CopyFrom(createContainerInfo(
+      "test_image",
+      {createVolumeFromHostPath("mountpoint/file.txt", file, Volume::RW)}));
+
+  const string directory = path::join(os::getcwd(), "sandbox");
+  ASSERT_SOME(os::mkdir(directory));
+
+  Future<bool> launch = containerizer.get()->launch(
+      containerId,
+      None(),
+      executor,
+      directory,
+      None(),
+      SlaveID(),
+      map<string, string>(),
+      false);
+
+  AWAIT_READY_FOR(launch, Seconds(60));
+
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -1002,11 +1117,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_PersistentVolumeWithRootFilesystem)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -1014,9 +1130,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_PersistentVolumeWithRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
-
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -1075,11 +1189,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_PersistentVolumeWithoutRootFilesystem)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -1087,9 +1202,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_PersistentVolumeWithoutRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
-
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -1129,11 +1242,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -1141,9 +1255,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
-
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -1183,11 +1295,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
 
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -1195,8 +1308,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(240));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
 
   // Because destroy rootfs spents a lot of time, we use 30s as timeout here.
   AWAIT_READY_FOR(wait, Seconds(30));
@@ -1267,11 +1379,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_MultipleContainers)
 
   Future<bool> launch1 = containerizer.get()->launch(
       containerId1,
+      None(),
       executor1,
       directory1,
       None(),
       slaveId,
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Wait for the launch to complete.
@@ -1295,11 +1408,12 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_MultipleContainers)
 
   Future<bool> launch2 = containerizer.get()->launch(
       containerId2,
+      None(),
       executor2,
       directory2,
       None(),
       slaveId,
-      PID<Slave>(),
+      map<string, string>(),
       false);
 
   // Need to wait for Rootfs copy.
@@ -1308,10 +1422,8 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_MultipleContainers)
   containerizer.get()->destroy(containerId1);
 
   // Wait on the containers.
-  Future<containerizer::Termination> wait1 =
-    containerizer.get()->wait(containerId1);
-  Future<containerizer::Termination> wait2 =
-    containerizer.get()->wait(containerId2);
+  Future<ContainerTermination> wait1 = containerizer.get()->wait(containerId1);
+  Future<ContainerTermination> wait2 = containerizer.get()->wait(containerId2);
 
   AWAIT_READY_FOR(wait1, Seconds(60));
   AWAIT_READY_FOR(wait2, Seconds(60));
@@ -1358,13 +1470,22 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_SandboxEnvironmentVariable)
 
   executor.mutable_container()->CopyFrom(createContainerInfo("test_image"));
 
+  map<string, string> environment = executorEnvironment(
+      flags,
+      executor,
+      directory,
+      SlaveID(),
+      PID<Slave>(),
+      false);
+
   Future<bool> launch = containerizer.get()->launch(
       containerId,
+      None(),
       executor,
       directory,
       None(),
       SlaveID(),
-      PID<Slave>(),
+      environment,
       false);
 
   // Wait for the launch to complete.
@@ -1372,9 +1493,7 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_SandboxEnvironmentVariable)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
-
+  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.

@@ -20,6 +20,7 @@
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
+#include <process/id.hpp>
 
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
@@ -31,11 +32,14 @@
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/composing.hpp"
 
+using namespace process;
+
 using std::list;
+using std::map;
 using std::string;
 using std::vector;
 
-using namespace process;
+using mesos::slave::ContainerTermination;
 
 namespace mesos {
 namespace internal {
@@ -48,7 +52,8 @@ class ComposingContainerizerProcess
 public:
   ComposingContainerizerProcess(
       const vector<Containerizer*>& containerizers)
-    : containerizers_(containerizers) {}
+    : ProcessBase(process::ID::generate("composing-containerizer")),
+      containerizers_(containerizers) {}
 
   virtual ~ComposingContainerizerProcess();
 
@@ -57,21 +62,12 @@ public:
 
   Future<bool> launch(
       const ContainerID& containerId,
+      const Option<TaskInfo>& taskInfo,
       const ExecutorInfo& executorInfo,
       const string& directory,
       const Option<string>& user,
       const SlaveID& slaveId,
-      const PID<Slave>& slavePid,
-      bool checkpoint);
-
-  Future<bool> launch(
-      const ContainerID& containerId,
-      const TaskInfo& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const string& directory,
-      const Option<string>& user,
-      const SlaveID& slaveId,
-      const PID<Slave>& slavePid,
+      const map<string, string>& environment,
       bool checkpoint);
 
   Future<Nothing> update(
@@ -84,7 +80,7 @@ public:
   Future<ContainerStatus> status(
       const ContainerID& containerId);
 
-  Future<containerizer::Termination> wait(
+  Future<ContainerTermination> wait(
       const ContainerID& containerId);
 
   void destroy(const ContainerID& containerId);
@@ -106,7 +102,7 @@ private:
       const string& directory,
       const Option<string>& user,
       const SlaveID& slaveId,
-      const PID<Slave>& slavePid,
+      const map<string, string>& environment,
       bool checkpoint,
       vector<Containerizer*>::iterator containerizer,
       bool launched);
@@ -164,33 +160,12 @@ Future<Nothing> ComposingContainerizer::recover(
 
 Future<bool> ComposingContainerizer::launch(
     const ContainerID& containerId,
+    const Option<TaskInfo>& taskInfo,
     const ExecutorInfo& executorInfo,
     const string& directory,
     const Option<string>& user,
     const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
-    bool checkpoint)
-{
-  return dispatch(process,
-                  &ComposingContainerizerProcess::launch,
-                  containerId,
-                  executorInfo,
-                  directory,
-                  user,
-                  slaveId,
-                  slavePid,
-                  checkpoint);
-}
-
-
-Future<bool> ComposingContainerizer::launch(
-    const ContainerID& containerId,
-    const TaskInfo& taskInfo,
-    const ExecutorInfo& executorInfo,
-    const string& directory,
-    const Option<string>& user,
-    const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
+    const map<string, string>& environment,
     bool checkpoint)
 {
   return dispatch(process,
@@ -201,7 +176,7 @@ Future<bool> ComposingContainerizer::launch(
                   directory,
                   user,
                   slaveId,
-                  slavePid,
+                  environment,
                   checkpoint);
 }
 
@@ -231,7 +206,7 @@ Future<ContainerStatus> ComposingContainerizer::status(
 }
 
 
-Future<containerizer::Termination> ComposingContainerizer::wait(
+Future<ContainerTermination> ComposingContainerizer::wait(
     const ContainerID& containerId)
 {
   return dispatch(process, &ComposingContainerizerProcess::wait, containerId);
@@ -314,52 +289,6 @@ Future<Nothing> ComposingContainerizerProcess::___recover()
 }
 
 
-Future<bool> ComposingContainerizerProcess::launch(
-    const ContainerID& containerId,
-    const ExecutorInfo& executorInfo,
-    const string& directory,
-    const Option<string>& user,
-    const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
-    bool checkpoint)
-{
-  if (containers_.contains(containerId)) {
-    return Failure("Container '" + containerId.value() +
-                   "' is already launching");
-  }
-
-  // Try each containerizer. If none of them handle the
-  // TaskInfo/ExecutorInfo then return a Failure.
-  vector<Containerizer*>::iterator containerizer = containerizers_.begin();
-
-  Container* container = new Container();
-  container->state = LAUNCHING;
-  container->containerizer = *containerizer;
-  containers_[containerId] = container;
-
-  return (*containerizer)->launch(
-      containerId,
-      executorInfo,
-      directory,
-      user,
-      slaveId,
-      slavePid,
-      checkpoint)
-    .then(defer(self(),
-                &Self::_launch,
-                containerId,
-                None(),
-                executorInfo,
-                directory,
-                user,
-                slaveId,
-                slavePid,
-                checkpoint,
-                containerizer,
-                lambda::_1));
-}
-
-
 Future<bool> ComposingContainerizerProcess::_launch(
     const ContainerID& containerId,
     const Option<TaskInfo>& taskInfo,
@@ -367,7 +296,7 @@ Future<bool> ComposingContainerizerProcess::_launch(
     const string& directory,
     const Option<string>& user,
     const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
+    const map<string, string>& environment,
     bool checkpoint,
     vector<Containerizer*>::iterator containerizer,
     bool launched)
@@ -399,49 +328,39 @@ Future<bool> ComposingContainerizerProcess::_launch(
 
   container->containerizer = *containerizer;
 
-  Future<bool> f = taskInfo.isSome() ?
-      (*containerizer)->launch(
-          containerId,
-          taskInfo.get(),
-          executorInfo,
-          directory,
-          user,
-          slaveId,
-          slavePid,
-          checkpoint) :
-      (*containerizer)->launch(
-          containerId,
-          executorInfo,
-          directory,
-          user,
-          slaveId,
-          slavePid,
-          checkpoint);
-
-  return f.then(
-      defer(self(),
-            &Self::_launch,
-            containerId,
-            taskInfo,
-            executorInfo,
-            directory,
-            user,
-            slaveId,
-            slavePid,
-            checkpoint,
-            containerizer,
-            lambda::_1));
+  return (*containerizer)->launch(
+      containerId,
+      taskInfo,
+      executorInfo,
+      directory,
+      user,
+      slaveId,
+      environment,
+      checkpoint)
+    .then(defer(
+        self(),
+        &Self::_launch,
+        containerId,
+        taskInfo,
+        executorInfo,
+        directory,
+        user,
+        slaveId,
+        environment,
+        checkpoint,
+        containerizer,
+        lambda::_1));
 }
 
 
 Future<bool> ComposingContainerizerProcess::launch(
     const ContainerID& containerId,
-    const TaskInfo& taskInfo,
+    const Option<TaskInfo>& taskInfo,
     const ExecutorInfo& executorInfo,
     const string& directory,
     const Option<string>& user,
     const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
+    const map<string, string>& environment,
     bool checkpoint)
 {
   if (containers_.contains(containerId)) {
@@ -465,7 +384,7 @@ Future<bool> ComposingContainerizerProcess::launch(
       directory,
       user,
       slaveId,
-      slavePid,
+      environment,
       checkpoint)
     .then(defer(self(),
                 &Self::_launch,
@@ -475,7 +394,7 @@ Future<bool> ComposingContainerizerProcess::launch(
                 directory,
                 user,
                 slaveId,
-                slavePid,
+                environment,
                 checkpoint,
                 containerizer,
                 lambda::_1));
@@ -517,7 +436,7 @@ Future<ContainerStatus> ComposingContainerizerProcess::status(
 }
 
 
-Future<containerizer::Termination> ComposingContainerizerProcess::wait(
+Future<ContainerTermination> ComposingContainerizerProcess::wait(
     const ContainerID& containerId)
 {
   if (!containers_.contains(containerId)) {

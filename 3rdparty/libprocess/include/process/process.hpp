@@ -151,6 +151,33 @@ protected:
       size_t length = 0);
 
   /**
+   * Describes the behavior of the `link` call when the target `pid`
+   * points to a remote process. This enum has no effect if the target
+   * `pid` points to a local process.
+   */
+  enum class RemoteConnection
+  {
+    /**
+     * If a persistent socket to the target `pid` does not exist,
+     * a new link is created. If a persistent socket already exists,
+     * `link` will subscribe this process to the existing link.
+     *
+     * This is the default behavior.
+     */
+    REUSE,
+
+    /**
+     * If a persistent socket to the target `pid` does not exist,
+     * a new link is created. If a persistent socket already exists,
+     * `link` create a new socket connection with the target `pid`
+     * and *atomically* swap the existing link with the new link.
+     *
+     * Existing linkers will remain linked, albeit via the new socket.
+     */
+    RECONNECT,
+  };
+
+  /**
    * Links with the specified `UPID`.
    *
    * Linking with a process from within the same OS process is
@@ -162,7 +189,9 @@ protected:
    * remote linked process cannot be determined; we handle this
    * situation by generating an ExitedEvent.
    */
-  UPID link(const UPID& pid);
+  UPID link(
+      const UPID& pid,
+      const RemoteConnection remote = RemoteConnection::REUSE);
 
   /**
    * Any function which takes a "from" `UPID` and a message body as
@@ -454,9 +483,14 @@ protected:
  * for it (e.g., a logging directory) via environment variables.
  *
  * @param delegate Process to receive root HTTP requests.
- * @param authenticationRealm The authentication realm that libprocess-level
- *     HTTP endpoints will be installed under, if any. If this realm is not
- *     specified, endpoints will be installed without authentication.
+ * @param readwriteAuthenticationRealm The authentication realm that read-write
+ *     libprocess-level HTTP endpoints will be installed under, if any.
+ *     If this realm is not specified, read-write endpoints will be installed
+ *     without authentication.
+ * @param readonlyAuthenticationRealm The authentication realm that read-only
+ *     libprocess-level HTTP endpoints will be installed under, if any.
+ *     If this realm is not specified, read-only endpoints will be installed
+ *     without authentication.
  * @return `true` if this was the first invocation of `process::initialize()`,
  *     or `false` if it was not the first invocation.
  *
@@ -464,7 +498,8 @@ protected:
  */
 bool initialize(
     const Option<std::string>& delegate = None(),
-    const Option<std::string>& authenticationRealm = None());
+    const Option<std::string>& readwriteAuthenticationRealm = None(),
+    const Option<std::string>& readonlyAuthenticationRealm = None());
 
 
 /**

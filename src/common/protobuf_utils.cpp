@@ -14,6 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifdef __WINDOWS__
+#include <stout/internal/windows/grp.hpp>
+#include <stout/internal/windows/pwd.hpp>
+#else
+#include <grp.h>
+#include <pwd.h>
+#endif // __WINDOWS__
+
 #include <mesos/slave/isolator.hpp>
 
 #include <mesos/type_utils.hpp>
@@ -22,10 +30,17 @@
 #include <process/pid.hpp>
 
 #include <stout/adaptor.hpp>
+#include <stout/duration.hpp>
 #include <stout/foreach.hpp>
 #include <stout/net.hpp>
 #include <stout/stringify.hpp>
 #include <stout/uuid.hpp>
+
+#include <stout/os/permissions.hpp>
+
+#ifdef __WINDOWS__
+#include <stout/windows.hpp>
+#endif // __WINDOWS__
 
 #include "common/protobuf_utils.hpp"
 
@@ -44,13 +59,34 @@ namespace mesos {
 namespace internal {
 namespace protobuf {
 
+bool frameworkHasCapability(
+    const FrameworkInfo& framework,
+    FrameworkInfo::Capability::Type capability)
+{
+  foreach (const FrameworkInfo::Capability& c,
+           framework.capabilities()) {
+    if (c.type() == capability) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
 bool isTerminalState(const TaskState& state)
 {
+  // TODO(neilc): Revise/rename this function. LOST, UNREACHABLE, and
+  // GONE_BY_OPERATOR are not truly "terminal".
   return (state == TASK_FINISHED ||
           state == TASK_FAILED ||
           state == TASK_KILLED ||
           state == TASK_LOST ||
-          state == TASK_ERROR);
+          state == TASK_ERROR ||
+          state == TASK_UNREACHABLE ||
+          state == TASK_DROPPED ||
+          state == TASK_GONE ||
+          state == TASK_GONE_BY_OPERATOR);
 }
 
 
@@ -284,6 +320,34 @@ TimeInfo getCurrentTime()
   TimeInfo timeInfo;
   timeInfo.set_nanoseconds(process::Clock::now().duration().ns());
   return timeInfo;
+}
+
+
+FileInfo createFileInfo(const string& path, const struct stat& s)
+{
+  FileInfo file;
+  file.set_path(path);
+  file.set_nlink(s.st_nlink);
+  file.set_size(s.st_size);
+  file.mutable_mtime()->set_nanoseconds(Seconds((s.st_mtime)).ns());
+  file.set_mode(s.st_mode);
+
+  // NOTE: `getpwuid` and `getgrgid` return `nullptr` on Windows.
+  passwd* p = getpwuid(s.st_uid);
+  if (p != nullptr) {
+    file.set_uid(p->pw_name);
+  } else {
+    file.set_uid(stringify(s.st_uid));
+  }
+
+  struct group* g = getgrgid(s.st_gid);
+  if (g != nullptr) {
+    file.set_gid(g->gr_name);
+  } else {
+    file.set_gid(stringify(s.st_gid));
+  }
+
+  return file;
 }
 
 namespace slave {

@@ -21,6 +21,8 @@
 
 #include <mesos/resources.hpp>
 
+#include <mesos/appc/spec.hpp>
+
 #include <mesos/docker/v1.hpp>
 
 #include <mesos/slave/isolator.hpp> // For ContainerState.
@@ -58,6 +60,9 @@ struct ProvisionInfo
 
   // Docker v1 image manifest.
   Option<::docker::spec::v1::ImageManifest> dockerManifest;
+
+  // Appc image manifest.
+  Option<::appc::spec::ImageManifest> appcManifest;
 };
 
 
@@ -73,26 +78,25 @@ public:
   // NOTE: Made 'virtual' for mocking and testing.
   virtual ~Provisioner();
 
-  // Recover root filesystems for containers from the run states and
-  // the orphan containers (known to the launcher but not known to the
-  // slave) detected by the launcher. This function is also
-  // responsible for cleaning up any intermediate artifacts (e.g.
-  // directories) to not leak anything.
+  // Recover root filesystems for containers from the known
+  // containers (forked by the launcher) detected by the
+  // launcher. This function is also responsible for cleaning
+  // up any intermediate artifacts (e.g. directories) to not
+  // leak anything.
   virtual process::Future<Nothing> recover(
-      const std::list<mesos::slave::ContainerState>& states,
-      const hashset<ContainerID>& orphans);
+      const hashset<ContainerID>& knownContainerIds) const;
 
   // Provision a root filesystem for the container using the specified
   // image and return the absolute path to the root filesystem.
   virtual process::Future<ProvisionInfo> provision(
       const ContainerID& containerId,
-      const Image& image);
+      const Image& image) const;
 
   // Destroy a previously provisioned root filesystem. Assumes that
   // all references (e.g., mounts, open files) to the provisioned
   // filesystem have been removed. Return false if there is no
   // provisioned root filesystem for the given container.
-  virtual process::Future<bool> destroy(const ContainerID& containerId);
+  virtual process::Future<bool> destroy(const ContainerID& containerId) const;
 
 protected:
   Provisioner() {} // For creating mock object.
@@ -116,8 +120,7 @@ public:
       const hashmap<std::string, process::Owned<Backend>>& backends);
 
   process::Future<Nothing> recover(
-      const std::list<mesos::slave::ContainerState>& states,
-      const hashset<ContainerID>& orphans);
+      const hashset<ContainerID>& knownContainerIds);
 
   process::Future<ProvisionInfo> provision(
       const ContainerID& containerId,

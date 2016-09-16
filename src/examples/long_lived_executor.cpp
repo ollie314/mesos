@@ -111,6 +111,11 @@ protected:
           break;
         }
 
+        case Event::LAUNCH_GROUP: {
+          // TODO(vinod): Implement this.
+          break;
+        }
+
         case Event::ACKNOWLEDGED: {
           // Remove the corresponding update.
           updates.erase(UUID::fromBytes(event.acknowledged().uuid()).get());
@@ -177,6 +182,7 @@ protected:
     status.mutable_executor_id()->CopyFrom(executorId);
     status.set_state(state);
     status.set_source(TaskStatus::SOURCE_EXECUTOR);
+    status.set_timestamp(process::Clock::now().secs());
     status.set_uuid(uuid.toBytes());
 
     Call call;

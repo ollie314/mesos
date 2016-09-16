@@ -1583,14 +1583,14 @@ TYPED_TEST(AuthorizationTest, ViewFramework)
   ASSERT_SOME(create);
   Owned<Authorizer> authorizer(create.get());
 
-  // Create FrameworkInfo with a generic user as object to authorized.
+  // Create FrameworkInfo with a generic user as object to be authorized.
   FrameworkInfo frameworkInfo;
   {
     frameworkInfo.set_user("user");
     frameworkInfo.set_name("f");
   }
 
-  // Create FrameworkInfo with user "bar" as object to authorized.
+  // Create FrameworkInfo with user "bar" as object to be authorized.
   FrameworkInfo frameworkInfoBar;
   {
     frameworkInfoBar.set_user("bar");
@@ -1768,14 +1768,14 @@ TYPED_TEST(AuthorizationTest, ViewTask)
     taskBar.set_user("bar");
   }
 
-  // Create FrameworkInfo with a generic user as object to authorized.
+  // Create FrameworkInfo with a generic user as object to be authorized.
   FrameworkInfo frameworkInfo;
   {
     frameworkInfo.set_user("user");
     frameworkInfo.set_name("f");
   }
 
-  // Create FrameworkInfo with user "bar" as object to authorized.
+  // Create FrameworkInfo with user "bar" as object to be authorized.
   FrameworkInfo frameworkInfoBar;
   {
     frameworkInfoBar.set_user("bar");
@@ -2001,14 +2001,14 @@ TYPED_TEST(AuthorizationTest, ViewExecutor)
     executorInfoNoUser.mutable_command()->set_value("echo hello");
   }
 
-  // Create FrameworkInfo with a generic user as object to authorized.
+  // Create FrameworkInfo with a generic user as object to be authorized.
   FrameworkInfo frameworkInfo;
   {
     frameworkInfo.set_user("user");
     frameworkInfo.set_name("f");
   }
 
-  // Create FrameworkInfo with user "bar" as object to authorized.
+  // Create FrameworkInfo with user "bar" as object to be authorized.
   FrameworkInfo frameworkInfoBar;
   {
     frameworkInfoBar.set_user("bar");
@@ -2086,7 +2086,7 @@ TYPED_TEST(AuthorizationTest, ViewExecutor)
 }
 
 
-// This tests the authorization of sandboxe access.
+// This tests the authorization of sandbox access.
 TYPED_TEST(AuthorizationTest, SandBoxAccess)
 {
   // Setup ACLs.
@@ -2154,14 +2154,14 @@ TYPED_TEST(AuthorizationTest, SandBoxAccess)
     executorInfoNoUser.mutable_command()->set_value("echo hello");
   }
 
-  // Create FrameworkInfo with a generic user as object to authorized.
+  // Create FrameworkInfo with a generic user as object to be authorized.
   FrameworkInfo frameworkInfo;
   {
     frameworkInfo.set_user("user");
     frameworkInfo.set_name("f");
   }
 
-  // Create FrameworkInfo with user "bar" as object to authorized.
+  // Create FrameworkInfo with user "bar" as object to be authorized.
   FrameworkInfo frameworkInfoBar;
   {
     frameworkInfoBar.set_user("bar");
@@ -2249,7 +2249,7 @@ TYPED_TEST(AuthorizationTest, OptionalObject)
   ACLs acls;
 
   {
-    // "foo" principal can tardown `ANY` framework
+    // "foo" principal can teardown `ANY` framework
     mesos::ACL::TeardownFramework* acl = acls.add_teardown_frameworks();
     acl->mutable_principals()->add_values("foo");
     acl->mutable_framework_principals()->set_type(mesos::ACL::Entity::ANY);
@@ -2285,6 +2285,169 @@ TYPED_TEST(AuthorizationTest, OptionalObject)
     request.mutable_subject()->set_value("bar");
 
     AWAIT_EXPECT_FALSE(authorizer.get()->authorized(request));
+  }
+}
+
+
+TYPED_TEST(AuthorizationTest, ViewFlags)
+{
+  // Setup ACLs.
+  ACLs acls;
+
+  {
+    // "foo" principal can see the flags.
+    mesos::ACL::ViewFlags* acl = acls.add_view_flags();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_flags()->set_type(mesos::ACL::Entity::ANY);
+  }
+
+  {
+    // Nobody else can see the flags.
+    mesos::ACL::ViewFlags* acl = acls.add_view_flags();
+    acl->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+    acl->mutable_flags()->set_type(mesos::ACL::Entity::NONE);
+  }
+
+  // Create an `Authorizer` with the ACLs.
+  Try<Authorizer*> create = TypeParam::create(parameterize(acls));
+  ASSERT_SOME(create);
+  Owned<Authorizer> authorizer(create.get());
+
+  {
+    authorization::Request request;
+    request.set_action(authorization::VIEW_FLAGS);
+    request.mutable_subject()->set_value("foo");
+
+    AWAIT_EXPECT_TRUE(authorizer.get()->authorized(request));
+  }
+
+  {
+    authorization::Request request;
+    request.set_action(authorization::VIEW_FLAGS);
+    request.mutable_subject()->set_value("bar");
+    AWAIT_EXPECT_FALSE(authorizer.get()->authorized(request));
+  }
+
+  // Test that no authorizer is created with invalid flags.
+  {
+    ACLs invalid;
+
+    mesos::ACL::ViewFlags* acl = invalid.add_view_flags();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_flags()->add_values("yoda");
+
+    Try<Authorizer*> create = TypeParam::create(parameterize(invalid));
+    EXPECT_ERROR(create);
+  }
+}
+
+
+// This tests the authorization of ACLs used for unreserve
+// operations on dynamically reserved resources.
+TYPED_TEST(AuthorizationTest, ValidateEndpoints)
+{
+  {
+    ACLs acls;
+
+    mesos::ACL::GetEndpoint* acl = acls.add_get_endpoints();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_paths()->add_values("/frameworks");
+
+    // Create an `Authorizer` with the ACLs.
+    Try<Authorizer*> create = TypeParam::create(parameterize(acls));
+    EXPECT_ERROR(create);
+  }
+
+  {
+    ACLs acls;
+
+    mesos::ACL::GetEndpoint* acl = acls.add_get_endpoints();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_paths()->add_values("/frameworks");
+    acl->mutable_paths()->add_values("/monitor/statistics");
+    acl->mutable_paths()->add_values("/containers");
+
+    // Create an `Authorizer` with the ACLs.
+    Try<Authorizer*> create = TypeParam::create(parameterize(acls));
+    EXPECT_ERROR(create);
+  }
+
+  {
+    ACLs acls;
+
+    mesos::ACL::GetEndpoint* acl = acls.add_get_endpoints();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_paths()->add_values("/monitor/statistics");
+    acl->mutable_paths()->add_values("/monitor/statistics.json");
+    acl->mutable_paths()->add_values("/containers");
+
+    // Create an `Authorizer` with the ACLs.
+    Try<Authorizer*> create = TypeParam::create(parameterize(acls));
+    ASSERT_SOME(create);
+    delete create.get();
+  }
+}
+
+
+// This tests the authorization of requests to ViewRole.
+TYPED_TEST(AuthorizationTest, ViewRole)
+{
+  // Setup ACLs.
+  ACLs acls;
+
+  {
+    // "foo" principal can view `ANY` role.
+    mesos::ACL::ViewRole* acl = acls.add_view_roles();
+    acl->mutable_principals()->add_values("foo");
+    acl->mutable_roles()->set_type(mesos::ACL::Entity::ANY);
+  }
+
+  {
+    // "bar" principal can view role `bar`.
+    mesos::ACL::ViewRole* acl = acls.add_view_roles();
+    acl->mutable_principals()->add_values("bar");
+    acl->mutable_roles()->add_values("bar");
+  }
+
+  {
+    // No other principal can view any role.
+    mesos::ACL::ViewRole* acl = acls.add_view_roles();
+    acl->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+    acl->mutable_roles()->set_type(mesos::ACL::Entity::NONE);
+  }
+
+  // Create an `Authorizer` with the ACLs.
+  Try<Authorizer*> create = TypeParam::create(parameterize(acls));
+  ASSERT_SOME(create);
+  Owned<Authorizer> authorizer(create.get());
+
+  // Check that principal "foo" can view any role.
+  {
+    authorization::Request request;
+    request.set_action(authorization::VIEW_ROLE);
+    request.mutable_subject()->set_value("foo");
+
+    AWAIT_EXPECT_TRUE(authorizer.get()->authorized(request));
+  }
+
+  // Check that principal "bar" cannot see role `foo`.
+  {
+    authorization::Request request;
+    request.set_action(authorization::VIEW_ROLE);
+    request.mutable_subject()->set_value("bar");
+    request.mutable_object()->set_value("foo");
+
+    AWAIT_EXPECT_FALSE(authorizer.get()->authorized(request));
+  }
+
+  // Check that principal "bar" can see role `bar`.
+  {
+    authorization::Request request;
+    request.set_action(authorization::VIEW_ROLE);
+    request.mutable_subject()->set_value("bar");
+    request.mutable_object()->set_value("bar");
+
+    AWAIT_EXPECT_TRUE(authorizer.get()->authorized(request));
   }
 }
 

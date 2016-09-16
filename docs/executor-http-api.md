@@ -5,7 +5,26 @@ layout: documentation
 
 # Executor HTTP API
 
-Mesos 0.28.0 added **experimental** support for V1 Executor HTTP API.
+A Mesos executor can be built in two different ways:
+
+1. By using the `ExecutorDriver` C++ interface. The `ExecutorDriver` handles the
+details of communicating with the Mesos agent. Executor developers implement
+custom executor logic by registering callbacks with the `ExecutorDriver` for
+significant events, such as when a new task launch request is received. Because
+the `ExecutorDriver` interface is written in C++, this typically requires that
+executor developers either use C++ or use a C++ binding to their language of
+choice (e.g., JNI when using JVM-based languages).
+
+2. By using the new HTTP API. This allows Mesos executors to be developed
+without using C++ or a native client library; instead, a custom executor
+interacts with the Mesos agent via HTTP requests, as described below. Although
+it is theoretically possible to use the HTTP executor API "directly" (e.g., by
+using a generic HTTP library), most executor developers should use a library for
+their language of choice that manages the details of the HTTP API; see the
+document on [HTTP API client libraries](api-client-libraries.md) for a list.
+
+The v1 Executor HTTP API was introduced in Mesos 0.28.0. As of Mesos 1.0, it is
+considered stable and is the recommended way to develop new Mesos executors.
 
 
 ## Overview
@@ -325,7 +344,8 @@ The following environment variables are set by the agent that can be used by the
 
 * `MESOS_FRAMEWORK_ID`: `FrameworkID` of the scheduler needed as part of the `SUBSCRIBE` call.
 * `MESOS_EXECUTOR_ID`: `ExecutorID` of the executor needed as part of the `SUBSCRIBE` call.
-* `MESOS_DIRECTORY`: Path to the working directory for the executor.
+* `MESOS_DIRECTORY`: Path to the working directory for the executor on the host filesystem (deprecated).
+* `MESOS_SANDBOX`: Path to the mapped sandbox inside of the container (determined by the agent flag `sandbox_directory`) for either mesos container with image or docker container. For the case of command task without image specified, it is the path to the sandbox on the host filesystem, which is identical to `MESOS_DIRECTORY`. `MESOS_DIRECTORY` is always the sandbox on the host filesystem.
 * `MESOS_AGENT_ENDPOINT`: agent endpoint i.e. ip:port to be used by the executor to connect to the agent.
 * `MESOS_CHECKPOINT`: If set to true, denotes that framework has checkpointing enabled.
 * `MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD`: Amount of time the agent would wait for an executor to shut down (e.g., 60secs, 3mins etc.) after sending a `SHUTDOWN` event.

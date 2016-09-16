@@ -22,14 +22,13 @@
 #include <iomanip>
 #include <list>
 #include <memory>
+#include <set>
 #include <sstream>
 
 #include <mesos/module.hpp>
 #include <mesos/roles.hpp>
 
 #include <mesos/authentication/authenticator.hpp>
-
-#include <mesos/authentication/http/basic_authenticator_factory.hpp>
 
 #include <mesos/authorizer/authorizer.hpp>
 
@@ -38,7 +37,6 @@
 #include <mesos/master/detector.hpp>
 
 #include <mesos/module/authenticator.hpp>
-#include <mesos/module/http_authenticator.hpp>
 
 #include <mesos/scheduler/scheduler.hpp>
 
@@ -68,6 +66,7 @@
 #include <stout/option.hpp>
 #include <stout/path.hpp>
 #include <stout/stringify.hpp>
+#include <stout/unreachable.hpp>
 #include <stout/utils.hpp>
 #include <stout/uuid.hpp>
 
@@ -92,7 +91,10 @@
 
 #include "watcher/whitelist_watcher.hpp"
 
+using google::protobuf::RepeatedPtrField;
+
 using std::list;
+using std::set;
 using std::shared_ptr;
 using std::string;
 using std::vector;
@@ -122,15 +124,11 @@ namespace mesos {
 namespace internal {
 namespace master {
 
-namespace authentication = process::http::authentication;
-
 using mesos::allocator::Allocator;
 
 using mesos::master::contender::MasterContender;
 
 using mesos::master::detector::MasterDetector;
-
-using mesos::http::authentication::BasicAuthenticatorFactory;
 
 static bool isValidFailoverTimeout(const FrameworkInfo& frameworkinfo);
 
@@ -236,7 +234,7 @@ protected:
     }
 
     shuttingDown = acquire.onAny(defer(self(), &Self::_shutdown));
-    ++metrics->slave_shutdowns_scheduled;
+    ++metrics->slave_unreachable_scheduled;
   }
 
   void _shutdown()
@@ -251,7 +249,7 @@ protected:
       LOG(INFO) << "Shutting down agent " << slaveId
                 << " due to health check timeout";
 
-      ++metrics->slave_shutdowns_completed;
+      ++metrics->slave_unreachable_completed;
 
       dispatch(master,
                &Master::shutdownSlave,
@@ -261,7 +259,7 @@ protected:
       LOG(INFO) << "Canceling shutdown of agent " << slaveId
                 << " since a pong is received!";
 
-      ++metrics->slave_shutdowns_canceled;
+      ++metrics->slave_unreachable_canceled;
     }
 
     shuttingDown = None();
@@ -541,75 +539,26 @@ void Master::initialize()
   }
 #endif // HAS_AUTHENTICATION
 
-  // TODO(arojas): Consider creating a factory function for the instantiation
-  // of the HTTP authenticator the same way the allocator does.
-  vector<string> httpAuthenticatorNames =
-    strings::split(flags.http_authenticators, ",");
+  if (flags.authenticate_http_readonly) {
+    Try<Nothing> result = initializeHttpAuthenticators(
+        READONLY_HTTP_AUTHENTICATION_REALM,
+        strings::split(flags.http_authenticators, ","),
+        credentials);
 
-  // At least the default authenticator is always specified.
-  // Passing an empty string into the `http_authenticators`
-  // flag is considered an error.
-  if (httpAuthenticatorNames.empty()) {
-    EXIT(EXIT_FAILURE) << "No HTTP authenticator specified";
-  }
-  if (httpAuthenticatorNames.size() > 1) {
-    EXIT(EXIT_FAILURE) << "Multiple HTTP authenticators not supported";
-  }
-  if (httpAuthenticatorNames[0] != DEFAULT_HTTP_AUTHENTICATOR &&
-      !modules::ModuleManager::contains<authentication::Authenticator>(
-          httpAuthenticatorNames[0])) {
-    EXIT(EXIT_FAILURE)
-      << "HTTP authenticator '" << httpAuthenticatorNames[0] << "' not"
-      << " found. Check the spelling (compare to '"
-      << DEFAULT_HTTP_AUTHENTICATOR << "') or verify that the"
-      << " authenticator was loaded successfully (see --modules)";
-  }
-
-  Option<authentication::Authenticator*> httpAuthenticator;
-
-  if (flags.authenticate_http) {
-    if (httpAuthenticatorNames[0] == DEFAULT_HTTP_AUTHENTICATOR) {
-      if (credentials.isNone()) {
-        EXIT(EXIT_FAILURE)
-          << "No credentials provided for the default '"
-          << DEFAULT_HTTP_AUTHENTICATOR << "' HTTP authenticator";
-      }
-
-      LOG(INFO) << "Using default '" << DEFAULT_HTTP_AUTHENTICATOR
-                << "' HTTP authenticator";
-
-      Try<authentication::Authenticator*> authenticator =
-        BasicAuthenticatorFactory::create(
-            DEFAULT_HTTP_AUTHENTICATION_REALM,
-            credentials.get());
-      if (authenticator.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Could not create HTTP authenticator module '"
-          << httpAuthenticatorNames[0] << "': " << authenticator.error();
-      }
-
-      httpAuthenticator = authenticator.get();
-    } else {
-      Try<authentication::Authenticator*> module =
-        modules::ModuleManager::create<authentication::Authenticator>(
-            httpAuthenticatorNames[0]);
-      if (module.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Could not create HTTP authenticator module '"
-          << httpAuthenticatorNames[0] << "': " << module.error();
-      }
-      LOG(INFO) << "Using '" << httpAuthenticatorNames[0]
-                << "' HTTP authenticator";
-      httpAuthenticator = module.get();
+    if (result.isError()) {
+      EXIT(EXIT_FAILURE) << result.error();
     }
   }
 
-  if (httpAuthenticator.isSome() && httpAuthenticator.get() != nullptr) {
-    // Ownership of the `httpAuthenticator` is passed to libprocess.
-    process::http::authentication::setAuthenticator(
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
-        Owned<authentication::Authenticator>(httpAuthenticator.get()));
-    httpAuthenticator = None();
+  if (flags.authenticate_http_readwrite) {
+    Try<Nothing> result = initializeHttpAuthenticators(
+        READWRITE_HTTP_AUTHENTICATION_REALM,
+        strings::split(flags.http_authenticators, ","),
+        credentials);
+
+    if (result.isError()) {
+      EXIT(EXIT_FAILURE) << result.error();
+    }
   }
 
   if (flags.authenticate_http_frameworks) {
@@ -621,84 +570,14 @@ void Master::initialize()
         << "in conjunction with `--authenticate_http_frameworks`";
     }
 
-    vector<string> httpFrameworkAuthenticatorNames =
-      strings::split(flags.http_framework_authenticators.get(), ",");
+    Try<Nothing> result = initializeHttpAuthenticators(
+        DEFAULT_HTTP_FRAMEWORK_AUTHENTICATION_REALM,
+        strings::split(flags.http_framework_authenticators.get(), ","),
+        credentials);
 
-    // Passing an empty string into the `http_framework_authenticators`
-    // flag is considered an error.
-    if (httpFrameworkAuthenticatorNames.empty()) {
-      EXIT(EXIT_FAILURE) << "No HTTP framework authenticator specified";
+    if (result.isError()) {
+      EXIT(EXIT_FAILURE) << result.error();
     }
-
-    if (httpFrameworkAuthenticatorNames.size() > 1) {
-      EXIT(EXIT_FAILURE) << "Multiple HTTP framework authenticators not "
-                         << "supported";
-    }
-
-    if (httpFrameworkAuthenticatorNames[0] != DEFAULT_HTTP_AUTHENTICATOR &&
-        !modules::ModuleManager::contains<authentication::Authenticator>(
-            httpFrameworkAuthenticatorNames[0])) {
-      EXIT(EXIT_FAILURE)
-        << "HTTP framework authenticator '"
-        << httpFrameworkAuthenticatorNames[0]
-        << "' not found. Check the spelling (compare to '"
-        << DEFAULT_HTTP_AUTHENTICATOR << "') or verify that the"
-        << " authenticator was loaded successfully (see --modules)";
-    }
-
-    Option<authentication::Authenticator*> httpFrameworkAuthenticator;
-
-    if (httpFrameworkAuthenticatorNames[0] == DEFAULT_HTTP_AUTHENTICATOR) {
-      if (credentials.isNone()) {
-        EXIT(EXIT_FAILURE)
-          << "No credentials provided for the default '"
-          << DEFAULT_HTTP_AUTHENTICATOR << "' HTTP framework authenticator";
-      }
-
-      LOG(INFO) << "Using default '" << DEFAULT_HTTP_AUTHENTICATOR
-                << "' HTTP framework authenticator";
-
-      Try<authentication::Authenticator*> authenticator =
-        BasicAuthenticatorFactory::create(
-            DEFAULT_HTTP_FRAMEWORK_AUTHENTICATION_REALM,
-            credentials.get());
-
-      if (authenticator.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Could not create HTTP framework authenticator module '"
-          << httpFrameworkAuthenticatorNames[0] << "': "
-          << authenticator.error();
-      }
-
-      httpFrameworkAuthenticator = authenticator.get();
-    } else {
-      Try<authentication::Authenticator*> module =
-        modules::ModuleManager::create<authentication::Authenticator>(
-            httpFrameworkAuthenticatorNames[0]);
-
-      if (module.isError()) {
-        EXIT(EXIT_FAILURE)
-          << "Could not create HTTP framework authenticator module '"
-          << httpFrameworkAuthenticatorNames[0] << "': " << module.error();
-      }
-
-      LOG(INFO) << "Using '" << httpFrameworkAuthenticatorNames[0]
-                << "' HTTP framework authenticator";
-
-      httpFrameworkAuthenticator = module.get();
-    }
-
-    CHECK_SOME(httpFrameworkAuthenticator);
-
-    if (httpFrameworkAuthenticator.get() != nullptr) {
-      // Ownership of the `httpFrameworkAuthenticator` is passed to libprocess.
-      process::http::authentication::setAuthenticator(
-          DEFAULT_HTTP_FRAMEWORK_AUTHENTICATION_REALM,
-          Owned<authentication::Authenticator>(
-              httpFrameworkAuthenticator.get()));
-    }
-
-    httpFrameworkAuthenticator = None();
   }
 
   if (authorizer.isSome()) {
@@ -826,7 +705,8 @@ void Master::initialize()
       flags.allocation_interval,
       defer(self(), &Master::offer, lambda::_1, lambda::_2),
       defer(self(), &Master::inverseOffer, lambda::_1, lambda::_2),
-      weights);
+      weights,
+      flags.fair_sharing_excluded_resource_names);
 
   // Parse the whitelist. Passing Allocator::updateWhitelist()
   // callback is safe because we shut down the whitelistWatcher in
@@ -918,6 +798,7 @@ void Master::initialize()
       &ReregisterSlaveMessage::checkpointed_resources,
       &ReregisterSlaveMessage::executor_infos,
       &ReregisterSlaveMessage::tasks,
+      &ReregisterSlaveMessage::frameworks,
       &ReregisterSlaveMessage::completed_frameworks,
       &ReregisterSlaveMessage::version);
 
@@ -966,7 +847,7 @@ void Master::initialize()
         // TODO(benh): Is this authentication realm sufficient or do
         // we need some kind of hybrid if we expect both schedulers
         // and operators/tooling to use this endpoint?
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::API_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -982,7 +863,7 @@ void Master::initialize()
           return http.scheduler(request, principal);
         });
   route("/create-volumes",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::CREATE_VOLUMES_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -990,7 +871,7 @@ void Master::initialize()
           return http.createVolumes(request, principal);
         });
   route("/destroy-volumes",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::DESTROY_VOLUMES_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -998,7 +879,7 @@ void Master::initialize()
           return http.destroyVolumes(request, principal);
         });
   route("/frameworks",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::FRAMEWORKS_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1006,7 +887,7 @@ void Master::initialize()
           return http.frameworks(request, principal);
         });
   route("/flags",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::FLAGS_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1024,7 +905,7 @@ void Master::initialize()
           return http.redirect(request);
         });
   route("/reserve",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::RESERVE_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1034,7 +915,7 @@ void Master::initialize()
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle on 0.26.
   route("/roles.json",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::ROLES_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1042,7 +923,7 @@ void Master::initialize()
           return http.roles(request, principal);
         });
   route("/roles",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::ROLES_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1050,7 +931,7 @@ void Master::initialize()
           return http.roles(request, principal);
         });
   route("/teardown",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::TEARDOWN_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1058,7 +939,7 @@ void Master::initialize()
           return http.teardown(request, principal);
         });
   route("/slaves",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::SLAVES_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1068,7 +949,7 @@ void Master::initialize()
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle on 0.26.
   route("/state.json",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1076,7 +957,7 @@ void Master::initialize()
           return http.state(request, principal);
         });
   route("/state",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1084,7 +965,7 @@ void Master::initialize()
           return http.state(request, principal);
         });
   route("/state-summary",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::STATESUMMARY_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1094,7 +975,7 @@ void Master::initialize()
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle.
   route("/tasks.json",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::TASKS_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1102,7 +983,7 @@ void Master::initialize()
           return http.tasks(request, principal);
         });
   route("/tasks",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::TASKS_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1110,7 +991,7 @@ void Master::initialize()
           return http.tasks(request, principal);
         });
   route("/maintenance/schedule",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::MAINTENANCE_SCHEDULE_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1118,7 +999,7 @@ void Master::initialize()
           return http.maintenanceSchedule(request, principal);
         });
   route("/maintenance/status",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READONLY_HTTP_AUTHENTICATION_REALM,
         Http::MAINTENANCE_STATUS_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1126,7 +1007,7 @@ void Master::initialize()
           return http.maintenanceStatus(request, principal);
         });
   route("/machine/down",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::MACHINE_DOWN_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1134,7 +1015,7 @@ void Master::initialize()
           return http.machineDown(request, principal);
         });
   route("/machine/up",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::MACHINE_UP_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1142,7 +1023,7 @@ void Master::initialize()
           return http.machineUp(request, principal);
         });
   route("/unreserve",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::UNRESERVE_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1150,7 +1031,7 @@ void Master::initialize()
           return http.unreserve(request, principal);
         });
   route("/quota",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::QUOTA_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1158,7 +1039,7 @@ void Master::initialize()
           return http.quota(request, principal);
         });
   route("/weights",
-        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        READWRITE_HTTP_AUTHENTICATION_REALM,
         Http::WEIGHTS_HELP(),
         [this](const process::http::Request& request,
                const Option<string>& principal) {
@@ -1254,6 +1135,10 @@ void Master::finalize()
       // been removed.
       removeInverseOffer(inverseOffer);
     }
+
+    // Remove pending tasks from the slave. Don't bother
+    // recovering the resources in the allocator.
+    slave->pendingTasks.clear();
 
     // Terminate the slave observer.
     terminate(slave->observer);
@@ -1430,7 +1315,7 @@ void Master::_exited(Framework* framework)
 }
 
 
-Future<bool> Master::authorizeLogAccess(const Option<std::string>& principal)
+Future<bool> Master::authorizeLogAccess(const Option<string>& principal)
 {
   if (authorizer.isNone()) {
     return true;
@@ -1721,7 +1606,7 @@ Future<Nothing> Master::_recover(const Registry& registry)
 
   if (registry.weights_size() != 0) {
     vector<WeightInfo> weightInfos;
-    hashmap<std::string, double> registry_weights;
+    hashmap<string, double> registry_weights;
 
     // Save the weights.
     foreach (const Registry::Weight& weight, registry.weights()) {
@@ -1743,7 +1628,7 @@ Future<Nothing> Master::_recover(const Registry& registry)
       // Before recovering weights from the registry, the allocator was already
       // initialized with `--weights`, so here we need to reset (to 1.0)
       // weights in the allocator that are not overridden by the registry.
-      foreachkey (const std::string& role, weights) {
+      foreachkey (const string& role, weights) {
         if (!registry_weights.contains(role)) {
           WeightInfo weightInfo;
           weightInfo.set_role(role);
@@ -1766,7 +1651,7 @@ Future<Nothing> Master::_recover(const Registry& registry)
     // Initialize the registry with `--weights` flag when bootstrapping
     // the cluster.
     vector<WeightInfo> weightInfos;
-    foreachpair (const std::string& role, double weight, weights) {
+    foreachpair (const string& role, double weight, weights) {
       WeightInfo weightInfo;
       weightInfo.set_role(role);
       weightInfo.set_weight(weight);
@@ -1777,8 +1662,8 @@ Future<Nothing> Master::_recover(const Registry& registry)
 
   // Recovery is now complete!
   LOG(INFO) << "Recovered " << registry.slaves().slaves().size() << " agents"
-            << " from the Registry (" << Bytes(registry.ByteSize()) << ")"
-            << " ; allowing " << flags.agent_reregister_timeout
+            << " from the registry (" << Bytes(registry.ByteSize()) << ")"
+            << "; allowing " << flags.agent_reregister_timeout
             << " for agents to re-register";
 
   return Nothing();
@@ -1837,18 +1722,14 @@ void Master::recoveredSlavesTimeout(const Registry& registry)
       acquire = slaves.limiter.get()->acquire();
     }
 
-    // Need to disambiguate for the compiler.
-    // TODO(bmahler): With C++11, just call removeSlave from within
-    // a lambda function to avoid the need to disambiguate.
-    Nothing (Master::*removeSlave)(const Registry::Slave&) = &Self::removeSlave;
     const string failure = "Agent removal rate limit acquisition failed";
 
     acquire
-      .then(defer(self(), removeSlave, slave))
+      .then(defer(self(), &Self::removeSlave, slave))
       .onFailed(lambda::bind(fail, failure, lambda::_1))
       .onDiscarded(lambda::bind(fail, failure, "discarded"));
 
-    ++metrics->slave_shutdowns_scheduled;
+    ++metrics->slave_unreachable_scheduled;
   }
 }
 
@@ -1861,8 +1742,7 @@ Nothing Master::removeSlave(const Registry::Slave& slave)
               << slave.info().id() << " (" << slave.info().hostname() << ")"
               << " since it re-registered!";
 
-    ++metrics->slave_shutdowns_canceled;
-
+    ++metrics->slave_unreachable_canceled;
     return Nothing();
   }
 
@@ -1871,7 +1751,7 @@ Nothing Master::removeSlave(const Registry::Slave& slave)
                << " within " << flags.agent_reregister_timeout
                << " after master failover; removing it from the registrar";
 
-  ++metrics->slave_shutdowns_completed;
+  ++metrics->slave_unreachable_completed;
   ++metrics->recovery_slave_removals;
 
   slaves.recovered.erase(slave.info().id());
@@ -1968,15 +1848,6 @@ void Master::detected(const Future<Option<MasterInfo>>& _leader)
   bool wasElected = elected();
   leader = _leader.get();
 
-  LOG(INFO) << "The newly elected leader is "
-            << (leader.isSome()
-                ? (leader.get().pid() + " with id " + leader.get().id())
-                : "None");
-
-  if (wasElected && !elected()) {
-    EXIT(EXIT_FAILURE) << "Lost leadership... committing suicide!";
-  }
-
   if (elected()) {
     electedTime = Clock::now();
 
@@ -1991,6 +1862,16 @@ void Master::detected(const Future<Option<MasterInfo>>& _leader)
       // This happens if there is a ZK blip that causes a re-election
       // but the same leading master is elected as leader.
       LOG(INFO) << "Re-elected as the leading master";
+    }
+  } else {
+    // A different node has been elected as the leading master.
+    LOG(INFO) << "The newly elected leader is "
+              << (leader.isSome()
+                  ? (leader.get().pid() + " with id " + leader.get().id())
+                  : "None");
+
+    if (wasElected) {
+      EXIT(EXIT_FAILURE) << "Lost leadership... committing suicide!";
     }
   }
 
@@ -3153,7 +3034,7 @@ Future<bool> Master::authorizeReserveResources(
   }
 
   return await(authorizations)
-      .then([](const std::list<Future<bool>>& authorizations)
+      .then([](const list<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3206,7 +3087,7 @@ Future<bool> Master::authorizeUnreserveResources(
   }
 
   return await(authorizations)
-      .then([](const std::list<Future<bool>>& authorizations)
+      .then([](const list<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3258,7 +3139,7 @@ Future<bool> Master::authorizeCreateVolume(
   }
 
   return await(authorizations)
-      .then([](const std::list<Future<bool>>& authorizations)
+      .then([](const list<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3310,7 +3191,7 @@ Future<bool> Master::authorizeDestroyVolume(
   }
 
   return await(authorizations)
-      .then([](const std::list<Future<bool>>& authorizations)
+      .then([](const list<Future<bool>>& authorizations)
             -> Future<bool> {
         // Compute a disjunction.
         foreach (const Future<bool>& authorization, authorizations) {
@@ -3376,6 +3257,9 @@ void Master::accept(
         ++metrics->messages_launch_tasks;
       } else {
         ++metrics->messages_decline_offers;
+        LOG(WARNING) << "Implicitly declining offers: " << accept.offer_ids()
+                     << " in ACCEPT call for framework " << framework->id()
+                     << " as the launch operation specified no tasks";
       }
     }
 
@@ -3399,16 +3283,19 @@ void Master::accept(
     foreach (const OfferID& offerId, accept.offer_ids()) {
       Offer* offer = getOffer(offerId);
       if (offer != nullptr) {
-        slaveId = offer->slave_id();
-        offeredResources += offer->resources();
-
+        // Don't bother adding resources to `offeredResources` in case
+        // validation failed; just recover them.
         if (error.isSome()) {
           allocator->recoverResources(
               offer->framework_id(),
               offer->slave_id(),
               offer->resources(),
               None());
+        } else {
+          slaveId = offer->slave_id();
+          offeredResources += offer->resources();
         }
+
         removeOffer(offer);
         continue;
       }
@@ -3430,11 +3317,21 @@ void Master::accept(
                  << "': " << error.get().message;
 
     foreach (const Offer::Operation& operation, accept.operations()) {
-      if (operation.type() != Offer::Operation::LAUNCH) {
+      if (operation.type() != Offer::Operation::LAUNCH &&
+          operation.type() != Offer::Operation::LAUNCH_GROUP) {
         continue;
       }
 
-      foreach (const TaskInfo& task, operation.launch().task_infos()) {
+      const RepeatedPtrField<TaskInfo>& tasks = [&]() {
+        if (operation.type() == Offer::Operation::LAUNCH) {
+          return operation.launch().task_infos();
+        } else if (operation.type() == Offer::Operation::LAUNCH_GROUP) {
+          return operation.launch_group().task_group().tasks();
+        }
+        UNREACHABLE();
+      }();
+
+      foreach (const TaskInfo& task, tasks) {
         const StatusUpdate& update = protobuf::createStatusUpdate(
             framework->id(),
             task.slave_id(),
@@ -3469,21 +3366,39 @@ void Master::accept(
   list<Future<bool>> futures;
   foreach (const Offer::Operation& operation, accept.operations()) {
     switch (operation.type()) {
-      case Offer::Operation::LAUNCH: {
+      case Offer::Operation::LAUNCH:
+      case Offer::Operation::LAUNCH_GROUP: {
+        const RepeatedPtrField<TaskInfo>& tasks = [&]() {
+          if (operation.type() == Offer::Operation::LAUNCH) {
+            return operation.launch().task_infos();
+          } else if (operation.type() == Offer::Operation::LAUNCH_GROUP) {
+            return operation.launch_group().task_group().tasks();
+          }
+          UNREACHABLE();
+        }();
+
         // Authorize the tasks. A task is in 'framework->pendingTasks'
-        // before it is authorized.
-        foreach (const TaskInfo& task, operation.launch().task_infos()) {
+        // and 'slave->pendingTasks' before it is authorized.
+        foreach (const TaskInfo& task, tasks) {
           futures.push_back(authorizeTask(task, framework));
 
-          // Add to pending tasks.
+          // Add to the framework's list of pending tasks.
           //
-          // NOTE: The task ID here hasn't been validated yet, but it
-          // doesn't matter. If the task ID is not valid, the task won't
-          // be launched anyway. If two tasks have the same ID, the second
-          // one will not be put into 'framework->pendingTasks', therefore
-          // will not be launched.
+          // NOTE: If two tasks have the same ID, the second one will
+          // not be put into 'framework->pendingTasks', therefore
+          // will not be launched (and TASK_ERROR will be sent).
+          // Unfortunately, we can't tell the difference between a
+          // duplicate TaskID and getting killed while pending
+          // (removed from the map). So it's possible that we send
+          // a TASK_ERROR after a TASK_KILLED (see _accept())!
           if (!framework->pendingTasks.contains(task.task_id())) {
             framework->pendingTasks[task.task_id()] = task;
+          }
+
+          // Add to the slave's list of pending tasks.
+          if (!slave->pendingTasks.contains(framework->id()) ||
+              !slave->pendingTasks[framework->id()].contains(task.task_id())) {
+            slave->pendingTasks[framework->id()][task.task_id()] = task;
           }
         }
         break;
@@ -3546,6 +3461,12 @@ void Master::accept(
 
         break;
       }
+
+      case Offer::Operation::UNKNOWN: {
+        // TODO(vinod): Send an error event to the scheduler?
+        LOG(ERROR) << "Ignoring unknown offer operation";
+        break;
+      }
     }
   }
 
@@ -3591,11 +3512,21 @@ void Master::_accept(
 
   if (slave == nullptr || !slave->connected) {
     foreach (const Offer::Operation& operation, accept.operations()) {
-      if (operation.type() != Offer::Operation::LAUNCH) {
+      if (operation.type() != Offer::Operation::LAUNCH &&
+          operation.type() != Offer::Operation::LAUNCH_GROUP) {
         continue;
       }
 
-      foreach (const TaskInfo& task, operation.launch().task_infos()) {
+      const RepeatedPtrField<TaskInfo>& tasks = [&]() {
+        if (operation.type() == Offer::Operation::LAUNCH) {
+          return operation.launch().task_infos();
+        } else {
+          CHECK_EQ(Offer::Operation::LAUNCH_GROUP, operation.type());
+          return operation.launch_group().task_group().tasks();
+        }
+      }();
+
+      foreach (const TaskInfo& task, tasks) {
         const TaskStatus::Reason reason =
             slave == nullptr ? TaskStatus::REASON_SLAVE_REMOVED
                           : TaskStatus::REASON_SLAVE_DISCONNECTED;
@@ -3634,6 +3565,25 @@ void Master::_accept(
   // updated offered resources here. When a task is successfully
   // launched, we remove its resource from offered resources.
   Resources _offeredResources = offeredResources;
+
+  // We keep track of the shared resources from the offers separately.
+  // `offeredSharedResources` can be modified by CREATE/DESTROY but we
+  // don't remove from it when a task is successfully launched so this
+  // variable always tracks the *total* amount. We do this to support
+  // validation of tasks involving shared resources. See comments in
+  // the LAUNCH case below.
+  Resources offeredSharedResources = offeredResources.shared();
+
+  // Maintain a list of operations to pass to the allocator.
+  // Note that this list could be different than `accept.operations()`
+  // because:
+  // 1) We drop invalid operations.
+  // 2) For LAUNCH operations we change the operation to drop invalid tasks.
+  // 3) We don't pass LAUNCH_GROUP to the allocator as we don't currently
+  //    support use cases that require the allocator to be aware of it.
+  //
+  // The operation order should remain unchanged.
+  vector<Offer::Operation> operations;
 
   // The order of `authorizations` must match the order of the operations in
   // `accept.operations()`, as they are iterated through simultaneously.
@@ -3694,7 +3644,10 @@ void Master::_accept(
                   << operation.reserve().resources() << " from framework "
                   << *framework << " to agent " << *slave;
 
-        apply(framework, slave, operation);
+        _apply(slave, operation);
+
+        operations.push_back(operation);
+
         break;
       }
 
@@ -3746,7 +3699,10 @@ void Master::_accept(
                   << operation.unreserve().resources() << " from framework "
                   << *framework << " to agent " << *slave;
 
-        apply(framework, slave, operation);
+        _apply(slave, operation);
+
+        operations.push_back(operation);
+
         break;
       }
 
@@ -3795,12 +3751,16 @@ void Master::_accept(
         }
 
         _offeredResources = resources.get();
+        offeredSharedResources = _offeredResources.shared();
 
         LOG(INFO) << "Applying CREATE operation for volumes "
                   << operation.create().volumes() << " from framework "
                   << *framework << " to agent " << *slave;
 
-        apply(framework, slave, operation);
+        _apply(slave, operation);
+
+        operations.push_back(operation);
+
         break;
       }
 
@@ -3831,11 +3791,26 @@ void Master::_accept(
 
         // Make sure this destroy operation is valid.
         Option<Error> error = validation::operation::validate(
-            operation.destroy(), slave->checkpointedResources);
+            operation.destroy(),
+            slave->checkpointedResources,
+            slave->usedResources,
+            slave->pendingTasks);
 
         if (error.isSome()) {
           drop(framework, operation, error.get().message);
           continue;
+        }
+
+        // If any offer from this slave contains a volume that needs
+        // to be destroyed, we should process it, but we should also
+        // rescind those offers.
+        foreach (Offer* offer, utils::copy(slave->offers)) {
+          const Resources& offered = offer->resources();
+          foreach (const Resource& volume, operation.destroy().volumes()) {
+            if (offered.contains(volume)) {
+              removeOffer(offer, true);
+            }
+          }
         }
 
         Try<Resources> resources = _offeredResources.apply(operation);
@@ -3845,30 +3820,49 @@ void Master::_accept(
         }
 
         _offeredResources = resources.get();
+        offeredSharedResources = _offeredResources.shared();
 
         LOG(INFO) << "Applying DESTROY operation for volumes "
-                  << operation.create().volumes() << " from framework "
+                  << operation.destroy().volumes() << " from framework "
                   << *framework << " to agent " << *slave;
 
-        apply(framework, slave, operation);
+        _apply(slave, operation);
+
+        operations.push_back(operation);
+
         break;
       }
 
       case Offer::Operation::LAUNCH: {
+        // For the LAUNCH operation we drop invalid tasks. Therefore
+        // we create a new copy with only the valid tasks to pass to
+        // the allocator.
+        Offer::Operation _operation;
+        _operation.set_type(Offer::Operation::LAUNCH);
+
         foreach (const TaskInfo& task, operation.launch().task_infos()) {
           Future<bool> authorization = authorizations.front();
           authorizations.pop_front();
 
-          // NOTE: The task will not be in 'pendingTasks' if
-          // 'killTask()' for the task was called before we are here.
-          // No need to launch the task if it's no longer pending.
-          // However, we still need to check the authorization result
-          // and do the validation so that we can send status update
-          // in case the task has duplicated ID.
-          bool pending = framework->pendingTasks.contains(task.task_id());
+          // The task will not be in `pendingTasks` if it has been
+          // killed in the interim. No need to send TASK_KILLED in
+          // this case as it has already been sent. Note however that
+          // we cannot currently distinguish between the task being
+          // killed and the task having a duplicate TaskID within
+          // `pendingTasks`. Therefore we must still validate the task
+          // to ensure we send the TASK_ERROR in the case that it has a
+          // duplicate TaskID.
+          //
+          // TODO(bmahler): We may send TASK_ERROR after a TASK_KILLED
+          // if a task was killed (removed from `pendingTasks`) *and*
+          // the task is invalid or unauthorized here.
 
-          // Remove from pending tasks.
+          bool pending = framework->pendingTasks.contains(task.task_id());
           framework->pendingTasks.erase(task.task_id());
+          slave->pendingTasks[framework->id()].erase(task.task_id());
+          if (slave->pendingTasks[framework->id()].empty()) {
+            slave->pendingTasks.erase(framework->id());
+          }
 
           CHECK(!authorization.isDiscarded());
 
@@ -3902,7 +3896,7 @@ void Master::_accept(
 
             forward(update, UPID(), framework);
 
-            continue;
+            continue; // Continue to the next task.
           }
 
           // Validate the task.
@@ -3917,11 +3911,20 @@ void Master::_accept(
                 ->mutable_framework_id()->CopyFrom(framework->id());
           }
 
+          // We add back offered shared resources for validation even if they
+          // are already consumed by other tasks in the same ACCEPT call. This
+          // allows these tasks to use more copies of the same shared resource
+          // than those being offered. e.g., 2 tasks can be launched on 1 copy
+          // of a shared persistent volume from the offer; 3 tasks can be
+          // launched on 2 copies of a shared persistent volume from 2 offers.
+          Resources available =
+            _offeredResources.nonShared() + offeredSharedResources;
+
           const Option<Error>& validationError = validation::task::validate(
               task_,
               framework,
               slave,
-              _offeredResources);
+              available);
 
           if (validationError.isSome()) {
             const StatusUpdate& update = protobuf::createStatusUpdate(
@@ -3943,12 +3946,17 @@ void Master::_accept(
 
             forward(update, UPID(), framework);
 
-            continue;
+            continue; // Continue to the next task.
           }
 
           // Add task.
           if (pending) {
-            _offeredResources -= addTask(task_, framework, slave);
+            const Resources consumed = addTask(task_, framework, slave);
+
+            CHECK(available.contains(consumed))
+              << available << " does not contain " << consumed;
+
+            _offeredResources -= consumed;
 
             // TODO(bmahler): Consider updating this log message to
             // indicate when the executor is also being launched.
@@ -3977,14 +3985,207 @@ void Master::_accept(
 
             send(slave->pid, message);
           }
+
+          _operation.mutable_launch()->add_task_infos()->CopyFrom(task);
         }
+
+        operations.push_back(_operation);
+
         break;
       }
 
-      default:
-        LOG(ERROR) << "Unsupported offer operation " << operation.type();
+      case Offer::Operation::LAUNCH_GROUP: {
+        // We must ensure that the entire group can be launched. This
+        // means all tasks in the group must be authorized and valid.
+        // If any tasks in the group have been killed in the interim
+        // we must kill the entire group.
+        const ExecutorInfo& executor = operation.launch_group().executor();
+        const TaskGroupInfo& taskGroup = operation.launch_group().task_group();
+
+        // Note that we do not fill in the `ExecutorInfo.framework_id`
+        // since we do not have to support backwards compatiblity like
+        // in the `Launch` operation case.
+
+        // TODO(bmahler): Consider injecting some default (cpus, mem, disk)
+        // resources when the framework omits the executor resources.
+
+        // See if there are any validation or authorization errors.
+        // Note that we'll only report the first error we encounter
+        // for the group.
+        //
+        // TODO(anindya_sinha): If task group uses shared resources, this
+        // validation needs to be enhanced to accommodate multiple copies
+        // of shared resources across tasks within the task group.
+        Option<Error> error =
+          validation::task::group::validate(
+              taskGroup, executor, framework, slave, _offeredResources);
+
+        Option<TaskStatus::Reason> reason = None();
+
+        if (error.isSome()) {
+          reason = TaskStatus::REASON_TASK_GROUP_INVALID;
+        } else {
+          foreach (const TaskInfo& task, taskGroup.tasks()) {
+            Future<bool> authorization = authorizations.front();
+            authorizations.pop_front();
+
+            CHECK(!authorization.isDiscarded());
+
+            if (authorization.isFailed()) {
+              error = Error("Failed to authorize task"
+                            " '" + stringify(task.task_id()) + "'"
+                            ": " + authorization.failure());
+
+              reason = TaskStatus::REASON_TASK_GROUP_UNAUTHORIZED;
+
+              break;
+            }
+
+            if (!authorization.get()) {
+              string user = framework->info.user(); // Default user.
+              if (task.has_command() && task.command().has_user()) {
+                user = task.command().user();
+              }
+
+              error = Error("Task '" + stringify(task.task_id()) + "'"
+                            " is not authorized to launch as"
+                            " user '" + user + "'");
+
+              reason = TaskStatus::REASON_TASK_GROUP_UNAUTHORIZED;
+
+              break;
+            }
+          }
+        }
+
+        if (error.isSome()) {
+          CHECK_SOME(reason);
+
+          // NOTE: If some of these invalid or unauthorized tasks were
+          // killed already, here we end up sending a TASK_ERROR after
+          // having already sent TASK_KILLED.
+          foreach (const TaskInfo& task, taskGroup.tasks()) {
+            const StatusUpdate& update = protobuf::createStatusUpdate(
+                framework->id(),
+                task.slave_id(),
+                task.task_id(),
+                TASK_ERROR,
+                TaskStatus::SOURCE_MASTER,
+                None(),
+                error->message,
+                reason.get());
+
+            metrics->tasks_error++;
+
+            metrics->incrementTasksStates(
+                TASK_ERROR, TaskStatus::SOURCE_MASTER, reason.get());
+
+            forward(update, UPID(), framework);
+          }
+
+          continue;
+        }
+
+        // Remove all the tasks from being pending. If any of the tasks
+        // have been killed in the interim, we will send TASK_KILLED
+        // for all other tasks in the group, since a TaskGroup must
+        // be delivered in its entirety.
+        hashset<TaskID> killed;
+        foreach (const TaskInfo& task, taskGroup.tasks()) {
+          bool pending = framework->pendingTasks.contains(task.task_id());
+          framework->pendingTasks.erase(task.task_id());
+
+          if (!pending) {
+            killed.insert(task.task_id());
+          }
+        }
+
+        // If task(s) were killed, send TASK_KILLED for
+        // all of the remaining tasks.
+        //
+        // TODO(bmahler): Do this killing when processing
+        // the `Kill` call, rather than doing it here.
+        if (!killed.empty()) {
+          foreach (const TaskInfo& task, taskGroup.tasks()) {
+            if (!killed.contains(task.task_id())) {
+              const StatusUpdate& update = protobuf::createStatusUpdate(
+                  framework->id(),
+                  task.slave_id(),
+                  task.task_id(),
+                  TASK_KILLED,
+                  TaskStatus::SOURCE_MASTER,
+                  None(),
+                  "A task within the task group was killed before"
+                  " delivery to the agent");
+
+              metrics->tasks_killed++;
+
+              // TODO(bmahler): Increment the task state source metric,
+              // we currently cannot because it requires each source
+              // requires a reason.
+
+              forward(update, UPID(), framework);
+            }
+          }
+
+          continue;
+        }
+
+        // Now launch the task group!
+        RunTaskGroupMessage message;
+        message.mutable_framework()->CopyFrom(framework->info);
+        message.mutable_executor()->CopyFrom(executor);
+        message.mutable_task_group()->CopyFrom(taskGroup);
+
+        set<TaskID> taskIds;
+        Resources totalResources;
+
+        for (int i = 0; i < message.task_group().tasks().size(); ++i) {
+          TaskInfo* task = message.mutable_task_group()->mutable_tasks(i);
+
+          taskIds.insert(task->task_id());
+          totalResources += task->resources();
+
+          const Resources consumed = addTask(*task, framework, slave);
+
+          CHECK(_offeredResources.contains(consumed))
+            << _offeredResources << " does not contain " << consumed;
+
+          _offeredResources -= consumed;
+
+          if (HookManager::hooksAvailable()) {
+            // Set labels retrieved from label-decorator hooks.
+            task->mutable_labels()->CopyFrom(
+                HookManager::masterLaunchTaskLabelDecorator(
+                    *task,
+                    framework->info,
+                    slave->info));
+          }
+        }
+
+        LOG(INFO) << "Launching task group " << stringify(taskIds)
+                  << " of framework " << *framework
+                  << " with resources " << totalResources
+                  << " on agent " << *slave;
+
+        send(slave->pid, message);
         break;
+      }
+
+      case Offer::Operation::UNKNOWN: {
+        LOG(ERROR) << "Ignoring unknown offer operation";
+        break;
+      }
     }
+  }
+
+  // Update the allocator based on the offer operations.
+  if (!operations.empty()) {
+    allocator->updateAllocation(
+        frameworkId,
+        slaveId,
+        offeredResources,
+        operations);
   }
 
   if (!_offeredResources.empty()) {
@@ -4221,6 +4422,17 @@ void Master::kill(Framework* framework, const scheduler::Call::Kill& kill)
   if (framework->pendingTasks.contains(taskId)) {
     // Remove from pending tasks.
     framework->pendingTasks.erase(taskId);
+
+    if (slaveId.isSome()) {
+      Slave* slave = slaves.registered.get(slaveId.get());
+
+      if (slave != nullptr) {
+        slave->pendingTasks[framework->id()].erase(taskId);
+        if (slave->pendingTasks[framework->id()].empty()) {
+          slave->pendingTasks.erase(framework->id());
+        }
+      }
+    }
 
     const StatusUpdate& update = protobuf::createStatusUpdate(
         framework->id(),
@@ -4692,6 +4904,7 @@ void Master::_registerSlave(
     const string& version,
     const Future<bool>& admit)
 {
+  CHECK(slaves.registering.contains(pid));
   slaves.registering.erase(pid);
 
   CHECK(!admit.isDiscarded());
@@ -4752,6 +4965,7 @@ void Master::reregisterSlave(
     const vector<Resource>& checkpointedResources,
     const vector<ExecutorInfo>& executorInfos,
     const vector<Task>& tasks,
+    const vector<FrameworkInfo>& frameworks,
     const vector<Archive::Framework>& completedFrameworks,
     const string& version)
 {
@@ -4769,6 +4983,7 @@ void Master::reregisterSlave(
                      checkpointedResources,
                      executorInfos,
                      tasks,
+                     frameworks,
                      completedFrameworks,
                      version));
     return;
@@ -4887,7 +5102,7 @@ void Master::reregisterSlave(
 
     // Inform the agent of the master's version of its checkpointed
     // resources and the new framework pids for its tasks.
-    __reregisterSlave(slave, tasks);
+    __reregisterSlave(slave, tasks, frameworks);
 
     return;
   }
@@ -4922,6 +5137,7 @@ void Master::reregisterSlave(
                  checkpointedResources,
                  executorInfos,
                  tasks,
+                 frameworks,
                  completedFrameworks,
                  version,
                  lambda::_1));
@@ -4934,10 +5150,12 @@ void Master::_reregisterSlave(
     const vector<Resource>& checkpointedResources,
     const vector<ExecutorInfo>& executorInfos,
     const vector<Task>& tasks,
+    const vector<FrameworkInfo>& frameworks,
     const vector<Archive::Framework>& completedFrameworks,
     const string& version,
     const Future<bool>& readmit)
 {
+  CHECK(slaves.reregistering.contains(slaveInfo.id()));
   slaves.reregistering.erase(slaveInfo.id());
 
   CHECK(!readmit.isDiscarded());
@@ -4992,18 +5210,26 @@ void Master::_reregisterSlave(
     LOG(INFO) << "Re-registered agent " << *slave
               << " with " << slave->info.resources();
 
-    __reregisterSlave(slave, tasks);
+    __reregisterSlave(slave, tasks, frameworks);
   }
 }
 
 
-void Master::__reregisterSlave(Slave* slave, const vector<Task>& tasks)
+void Master::__reregisterSlave(
+    Slave* slave,
+    const vector<Task>& tasks,
+    const vector<FrameworkInfo>& frameworks)
 {
   CHECK_NOTNULL(slave);
 
   // Send the latest framework pids to the slave.
   hashset<FrameworkID> ids;
 
+  // TODO(joerg84): Remove this after a deprecation cycle starting
+  // with the 1.0 release. It is only required if an older
+  // (pre 1.0 agent) reregisters with a newer master.
+  // In that case the agent does not have the 'frameworks' message
+  // set which is used below to retrieve the framework information.
   foreach (const Task& task, tasks) {
     Framework* framework = getFramework(task.framework_id());
 
@@ -5019,6 +5245,31 @@ void Master::__reregisterSlave(Slave* slave, const vector<Task>& tasks)
       send(slave->pid, message);
 
       ids.insert(framework->id());
+    }
+  }
+
+  foreach (const FrameworkInfo& frameworkInfo, frameworks) {
+    CHECK(frameworkInfo.has_id());
+    Framework* framework = getFramework(frameworkInfo.id());
+
+    if (framework != nullptr && !ids.contains(framework->id())) {
+      UpdateFrameworkMessage message;
+      message.mutable_framework_id()->MergeFrom(framework->id());
+
+      // TODO(anand): We set 'pid' to UPID() for http frameworks
+      // as 'pid' was made optional in 0.24.0. In 0.25.0, we
+      // no longer have to set pid here for http frameworks.
+      message.set_pid(framework->pid.getOrElse(UPID()));
+
+      send(slave->pid, message);
+
+      ids.insert(framework->id());
+    } else {
+      // The framework hasn't yet reregistered with the master,
+      // hence we store the 'FrameworkInfo' in the recovered list.
+      // TODO(joerg84): Consider recovering this information from
+      // registrar instead of from agents.
+      this->frameworks.recovered[frameworkInfo.id()] = frameworkInfo;
     }
   }
 
@@ -5221,16 +5472,6 @@ void Master::statusUpdate(StatusUpdate update, const UPID& pid)
     return;
   }
 
-  Framework* framework = getFramework(update.framework_id());
-
-  if (framework == nullptr) {
-    LOG(WARNING) << "Ignoring status update " << update
-                 << " from agent " << *slave
-                 << " because the framework is unknown";
-    metrics->invalid_status_updates++;
-    return;
-  }
-
   LOG(INFO) << "Status update " << update << " from agent " << *slave;
 
   // We ensure that the uuid of task status matches the update's uuid, in case
@@ -5242,8 +5483,21 @@ void Master::statusUpdate(StatusUpdate update, const UPID& pid)
     update.mutable_status()->set_uuid(update.uuid());
   }
 
-  // Forward the update to the framework.
-  forward(update, pid, framework);
+  bool validStatusUpdate = true;
+
+  Framework* framework = getFramework(update.framework_id());
+
+  // A framework might not have re-registered upon a master failover or
+  // got disconnected.
+  if (framework != nullptr && framework->connected) {
+    forward(update, pid, framework);
+  } else {
+    validStatusUpdate = false;
+    LOG(WARNING) << "Received status update " << update << " from agent "
+                 << *slave << " for "
+                 << (framework == nullptr ? "an unknown " : "a disconnected ")
+                 << "framework";
+  }
 
   // Lookup the task and see if we need to update anything locally.
   Task* task = slave->getTask(update.framework_id(), update.status().task_id());
@@ -5262,7 +5516,8 @@ void Master::statusUpdate(StatusUpdate update, const UPID& pid)
     removeTask(task);
   }
 
-  metrics->valid_status_updates++;
+  validStatusUpdate
+    ? metrics->valid_status_updates++ : metrics->invalid_status_updates++;
 }
 
 
@@ -5280,6 +5535,18 @@ void Master::forward(
                   : "");
   } else {
     LOG(INFO) << "Forwarding status update " << update;
+  }
+
+  // The task might not exist in master's memory (e.g., failed task validation).
+  Task* task = framework->getTask(update.status().task_id());
+  if (task != nullptr) {
+    // Set the status update state and uuid for the task. Note that
+    // master-generated updates are terminal and do not have a uuid
+    // (in which case the master also calls `removeTask()`).
+    if (update.has_uuid()) {
+      task->set_status_update_state(update.status().state());
+      task->set_status_update_uuid(update.status().uuid());
+    }
   }
 
   StatusUpdateMessage message;
@@ -5389,8 +5656,9 @@ void Master::shutdown(
 void Master::shutdownSlave(const SlaveID& slaveId, const string& message)
 {
   if (!slaves.registered.contains(slaveId)) {
-    // Possible when the SlaveObserver dispatched to shutdown a slave,
-    // but exited() was already called for this slave.
+    // Possible when the SlaveObserver dispatches a message to
+    // shutdown a slave but the slave is concurrently removed for
+    // another reason (e.g., `UnregisterSlaveMessage` is received).
     LOG(WARNING) << "Unable to shutdown unknown agent " << slaveId;
     return;
   }
@@ -5999,6 +6267,7 @@ void Master::_authenticate(
     authenticated.put(pid, future.get().get());
   }
 
+  CHECK(authenticating.contains(pid));
   authenticating.erase(pid);
 }
 
@@ -6177,6 +6446,11 @@ void Master::addFramework(Framework* framework)
     << "Framework " << *framework << " already exists!";
 
   frameworks.registered[framework->id()] = framework;
+
+  // Remove from 'frameworks.recovered' if necessary.
+  if (frameworks.recovered.contains(framework->id())) {
+    frameworks.recovered.erase(framework->id());
+  }
 
   if (framework->pid.isSome()) {
     link(framework->pid.get());
@@ -6383,8 +6657,11 @@ void Master::removeFramework(Framework* framework)
     allocator->deactivateFramework(framework->id());
   }
 
-  // Tell slaves to shutdown the framework.
   foreachvalue (Slave* slave, slaves.registered) {
+    // Remove the pending tasks from the slave.
+    slave->pendingTasks.erase(framework->id());
+
+    // Tell slaves to shutdown the framework.
     ShutdownFrameworkMessage message;
     message.mutable_framework_id()->MergeFrom(framework->id());
     send(slave->pid, message);
@@ -6510,6 +6787,11 @@ void Master::removeFramework(Framework* framework)
   // Remove the framework.
   frameworks.registered.erase(framework->id());
   allocator->removeFramework(framework->id());
+
+  // Remove from 'frameworks.recovered' if necessary.
+  if (frameworks.recovered.contains(framework->id())) {
+    frameworks.recovered.erase(framework->id());
+  }
 
   // The completedFramework buffer now owns the framework pointer.
   frameworks.completed.push_back(shared_ptr<Framework>(framework));
@@ -6735,6 +7017,9 @@ void Master::removeSlave(
     removeInverseOffer(inverseOffer, true); // Rescind!
   }
 
+  // Remove the pending tasks from the slave.
+  slave->pendingTasks.clear();
+
   // Mark the slave as being removed.
   slaves.removing.insert(slave->id);
   slaves.registered.remove(slave);
@@ -6776,6 +7061,7 @@ void Master::_removeSlave(
     const string& message,
     Option<Counter> reason)
 {
+  CHECK(slaves.removing.contains(slaveInfo.id()));
   slaves.removing.erase(slaveInfo.id());
 
   CHECK(!removed.isDiscarded());
@@ -6883,14 +7169,6 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     }
   }
 
-  // Set the status update state and uuid for the task. Note that
-  // master-generated updates are terminal and do not have a uuid
-  // (in which case the master also calls `removeTask()`).
-  if (update.has_uuid()) {
-    task->set_status_update_state(status.state());
-    task->set_status_update_uuid(update.uuid());
-  }
-
   // TODO(brenden): Consider wiping the `message` field?
   if (task->statuses_size() > 0 &&
       task->statuses(task->statuses_size() - 1).state() == status.state()) {
@@ -6931,12 +7209,42 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     }
 
     switch (status.state()) {
-      case TASK_FINISHED: ++metrics->tasks_finished; break;
-      case TASK_FAILED:   ++metrics->tasks_failed;   break;
-      case TASK_KILLED:   ++metrics->tasks_killed;   break;
-      case TASK_LOST:     ++metrics->tasks_lost;     break;
-      case TASK_ERROR:    ++metrics->tasks_error;    break;
-      default:                                       break;
+      case TASK_FINISHED:
+        ++metrics->tasks_finished;
+        break;
+      case TASK_FAILED:
+        ++metrics->tasks_failed;
+        break;
+      case TASK_KILLED:
+        ++metrics->tasks_killed;
+        break;
+      case TASK_LOST:
+        ++metrics->tasks_lost;
+        break;
+      case TASK_ERROR:
+        ++metrics->tasks_error;
+        break;
+      case TASK_UNREACHABLE:
+        ++metrics->tasks_unreachable;
+        break;
+      case TASK_DROPPED:
+        ++metrics->tasks_dropped;
+        break;
+      case TASK_GONE:
+        ++metrics->tasks_gone;
+        break;
+      case TASK_GONE_BY_OPERATOR:
+        ++metrics->tasks_gone_by_operator;
+        break;
+      case TASK_STARTING:
+      case TASK_STAGING:
+      case TASK_RUNNING:
+      case TASK_KILLING:
+        break;
+      case TASK_UNKNOWN:
+        // Should not happen.
+        LOG(FATAL) << "Unexpected TASK_UNKNOWN for in-memory task";
+        break;
     }
 
     if (status.has_reason()) {
@@ -7006,7 +7314,7 @@ void Master::removeExecutor(
             << " of framework " << frameworkId << " on agent " << *slave;
 
   allocator->recoverResources(
-    frameworkId, slave->id, executor.resources(), None());
+      frameworkId, slave->id, executor.resources(), None());
 
   Framework* framework = getFramework(frameworkId);
   if (framework != nullptr) { // The framework might not be re-registered yet.
@@ -7014,20 +7322,6 @@ void Master::removeExecutor(
   }
 
   slave->removeExecutor(frameworkId, executorId);
-}
-
-
-void Master::apply(
-    Framework* framework,
-    Slave* slave,
-    const Offer::Operation& operation)
-{
-  CHECK_NOTNULL(framework);
-  CHECK_NOTNULL(slave);
-
-  allocator->updateAllocation(framework->id(), slave->id, {operation});
-
-  _apply(slave, operation);
 }
 
 
@@ -7523,8 +7817,8 @@ void Master::Subscribers::send(const mesos::master::Event& event)
   VLOG(1) << "Notifying all active subscribers about " << event.type() << " "
           << "event";
 
-  foreachvalue (Subscriber subscriber, subscribed) {
-    subscriber.http.send<mesos::master::Event, v1::master::Event>(event);
+  foreachvalue (const Owned<Subscriber>& subscriber, subscribed) {
+    subscriber->http.send<mesos::master::Event, v1::master::Event>(event);
   }
 }
 
@@ -7542,18 +7836,18 @@ void Master::exited(const UUID& id)
 
 void Master::subscribe(HttpConnection http)
 {
-  Subscribers::Subscriber subscriber{http};
-
-  subscribers.subscribed.put(http.streamId, subscriber);
-
-  LOG(INFO) << "Added subscriber: " << subscriber.http.streamId << " to the "
+  LOG(INFO) << "Added subscriber: " << http.streamId << " to the "
             << "list of active subscribers";
 
-  subscriber.http.closed()
+  http.closed()
     .onAny(defer(self(),
-           [this, subscriber](const Future<Nothing>&) {
-             exited(subscriber.http.streamId);
+           [this, http](const Future<Nothing>&) {
+             exited(http.streamId);
            }));
+
+  subscribers.subscribed.put(
+      http.streamId,
+      Owned<Subscribers::Subscriber>(new Subscribers::Subscriber{http}));
 }
 
 } // namespace master {

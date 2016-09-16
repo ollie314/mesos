@@ -49,8 +49,20 @@ LT_INIT
 LT_LANG([C++])
 LT_OUTPUT
 
+# Save the configure arguments so we can pass them to any third-party
+# libraries that we might run configure on (see
+# 3rdparty/Makefile.am). One downside of our strategy for shipping
+# and building third-party libraries is that we can't expose options
+# from nested third-party configure scripts.
+CONFIGURE_ARGS="$ac_configure_args"
+AC_SUBST(CONFIGURE_ARGS)
+
+AM_CONDITIONAL([STANDALONE_STOUT], [true])
+
 AC_CONFIG_FILES([Makefile])
 AC_CONFIG_FILES([include/Makefile])
+AC_CONFIG_FILES([3rdparty/Makefile])
+AC_CONFIG_FILES([3rdparty/gmock_sources.cc])
 
 ###############################################################################
 # Optional features.
@@ -101,6 +113,13 @@ AC_ARG_WITH([boost],
                            package in lieu of an installed version at a
                            location prefixed by the given path]),
             [without_bundled_boost=yes], [])
+
+AC_ARG_WITH([elfio],
+            AS_HELP_STRING([--with-elfio@<:@=DIR@:>@],
+                           [excludes building and using the bundled ELFIO
+                           package in lieu of an installed version at a
+                           location prefixed by the given path]),
+            [without_bundled_elfio=yes], [])
 
 AC_ARG_WITH([glog],
             AS_HELP_STRING([--with-glog@<:@=DIR@:>@],
@@ -281,6 +300,34 @@ fi
 AM_CONDITIONAL([WITH_BUNDLED_BOOST], [test "x$with_bundled_boost" = "xyes"])
 
 
+# If the user has asked not to include the bundled ELFIO headers,
+# check to see if the path to the ELFIO headers has been specified. If
+# it has, make sure that the path is absolute. If everything is in
+# order, add this path to the CPPFLAGS.
+if test "x$without_bundled_elfio" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  if test -n "`echo $with_elfio`"; then
+    if test "$with_elfio" = "${with_elfio#/}"; then
+      AC_MSG_ERROR([The path passed to --with-elfio must be absolute.])
+    fi
+     CPPFLAGS="-I${with_elfio} $CPPFLAGS"
+  fi
+
+  AC_CHECK_HEADERS([elfio/elfio.h], [],
+                   [AC_MSG_ERROR([Cannot find the ELFIO headers
+-------------------------------------------------------------------
+You have requested the use of a non-bundled ELFIO but no suitable
+ELFIO headers could be found. Make sure these headers are either
+installed on the system or the path passed via --with-elfio is correct.
+-------------------------------------------------------------------
+  ])])
+else
+  with_bundled_elfio=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_ELFIO], [test "x$with_bundled_elfio" = "xyes"])
+
+
 # Include directories used by package managers (e.g., MacPorts).
 if test "x$enable_bundled" != "xyes" && \
    test "x$OS_NAME" = "xdarwin"; then
@@ -378,6 +425,7 @@ else
 fi
 
 AM_CONDITIONAL([WITH_BUNDLED_GMOCK], [test "x$with_bundled_gmock" = "xyes"])
+AM_CONDITIONAL([LINKGTEST], [test "check_gtest" = "xyes"])
 AC_SUBST([GMOCKSRC])
 AC_SUBST([GTESTSRC])
 

@@ -134,7 +134,7 @@ TEST_P(PartitionTest, PartitionedSlave)
     AWAIT_READY(ping);
     pings++;
     if (pings == masterFlags.max_agent_ping_timeouts) {
-     break;
+      break;
     }
     ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
     Clock::advance(masterFlags.agent_ping_timeout);
@@ -148,6 +148,8 @@ TEST_P(PartitionTest, PartitionedSlave)
   slave->reset();
 
   JSON::Object stats = Metrics();
+  EXPECT_EQ(1, stats.values["master/slave_unreachable_scheduled"]);
+  EXPECT_EQ(1, stats.values["master/slave_unreachable_completed"]);
   EXPECT_EQ(1, stats.values["master/slave_removals"]);
   EXPECT_EQ(1, stats.values["master/slave_removals/reason_unhealthy"]);
 
@@ -265,19 +267,18 @@ TEST_P(PartitionTest, PartitionedSlaveReregistration)
     AWAIT_READY(ping);
     pings++;
     if (pings == masterFlags.max_agent_ping_timeouts) {
-     break;
+      break;
     }
     ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
     Clock::advance(masterFlags.agent_ping_timeout);
-    Clock::settle();
   }
 
   Clock::advance(masterFlags.agent_ping_timeout);
-  Clock::settle();
 
   // The master will have notified the framework of the lost task.
   AWAIT_READY(lostStatus);
   EXPECT_EQ(TASK_LOST, lostStatus.get().state());
+  EXPECT_EQ(TaskStatus::REASON_SLAVE_REMOVED, lostStatus.get().reason());
 
   // Wait for the master to attempt to shut down the slave.
   AWAIT_READY(shutdownMessage);
@@ -391,15 +392,13 @@ TEST_P(PartitionTest, PartitionedSlaveStatusUpdates)
     AWAIT_READY(ping);
     pings++;
     if (pings == masterFlags.max_agent_ping_timeouts) {
-     break;
+      break;
     }
     ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
     Clock::advance(masterFlags.agent_ping_timeout);
-    Clock::settle();
   }
 
   Clock::advance(masterFlags.agent_ping_timeout);
-  Clock::settle();
 
   // Wait for the master to attempt to shut down the slave.
   AWAIT_READY(shutdownMessage);
@@ -542,19 +541,18 @@ TEST_P(PartitionTest, PartitionedSlaveExitedExecutor)
     AWAIT_READY(ping);
     pings++;
     if (pings == masterFlags.max_agent_ping_timeouts) {
-     break;
+      break;
     }
     ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
     Clock::advance(masterFlags.agent_ping_timeout);
-    Clock::settle();
   }
 
   Clock::advance(masterFlags.agent_ping_timeout);
-  Clock::settle();
 
   // The master will have notified the framework of the lost task.
   AWAIT_READY(lostStatus);
   EXPECT_EQ(TASK_LOST, lostStatus.get().state());
+  EXPECT_EQ(TaskStatus::REASON_SLAVE_REMOVED, lostStatus.get().reason());
 
   // Wait for the master to attempt to shut down the slave.
   AWAIT_READY(shutdownMessage);
@@ -653,7 +651,7 @@ TEST_F(OneWayPartitionTest, MasterToScheduler)
   StandaloneMasterDetector detector(master.get()->pid);
   TestingMesosSchedulerDriver driver(&sched, &detector, frameworkInfo);
 
-  Future<process::Message> frameworkRegisteredMessage =
+  Future<Message> frameworkRegisteredMessage =
     FUTURE_MESSAGE(Eq(FrameworkRegisteredMessage().GetTypeName()), _, _);
 
   Future<Nothing> registered;

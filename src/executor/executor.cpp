@@ -38,6 +38,7 @@
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
+#include <stout/unreachable.hpp>
 #include <stout/uuid.hpp>
 
 #include "common/http.hpp"
@@ -477,7 +478,10 @@ protected:
       // Backoff and reconnect only if framework checkpointing is enabled.
       backoff();
     } else {
-      shutdown();
+      Event event;
+      event.set_type(Event::SHUTDOWN);
+
+      receive(event, true);
     }
   }
 

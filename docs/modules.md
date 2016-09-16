@@ -180,7 +180,7 @@ Mesos 0.23.0.
 
 The Result<T> return values before and after Mesos 0.23.0 means:
 
-<table>
+<table class="table table-striped">
 <tr>
 <th>State</th>
 <th>Before (0.22.x)</th>
@@ -204,7 +204,7 @@ object</td>
 </tr>
 </table>
 
-To load a hook into Mesos, you need to
+To load a hook into Mesos, you need to:
 
 - introduce it to Mesos by listing it in the `--modules` configuration,
 
@@ -221,6 +221,31 @@ For example, the following command will run the Mesos agent with the
 Isolator modules enable experimenting with specialized isolation and monitoring
 capabilities. Examples of these could be 3rdparty resource isolation mechanisms
 for GPGPU hardware, networking, etc.
+
+### Master Contender and Detector
+
+Contender and Detector modules enable developers to implement custom leader
+election and master detection mechanisms, other than relying on Zookeeper by
+default.
+
+An example for such modules could be to use distributed Key-Value storage such
+as [etcd](https://coreos.com/etcd/) and [consul](https://www.consul.io/).
+
+To load custom contender and detector module, you need to:
+
+- Supply `--modules` when running Mesos master,
+
+- Specify selected contender and detector modules with `--master_contender` and
+`--master_detector` flags on Mesos Master and `--master_detector` on Mesos Slave.
+
+For example, the following command runs Mesos master with
+`org_apache_mesos_TestMasterContender` and `org_apache_mesos_TestMasterDetector`:
+
+`./bin/mesos-master.sh --modules="file://<path-to-modules-config>.json" --master_contender=org_apache_mesos_TestMasterContender --master_detector=org_apache_mesos_TestMasterDetector`
+
+And this one runs Mesos slave with `org_apache_mesos_TestMasterDetector`:
+
+`./bin/mesos-slave.sh --modules="file://<path-to-modules-config>.json" --master_detector=org_apache_mesos_TestMasterDetector`
 
 ## Writing Mesos modules
 
@@ -306,7 +331,7 @@ package naming scheme
 
 For example:
 
-<table>
+<table class="table table-striped">
 <tr>
 <th> Module Name </th> <th> Module Domain name </th> <th> Module Symbol Name </th>
 </tr>
@@ -351,7 +376,7 @@ must exist between the various versions:
 
 `  kind version <= Library version <= Mesos version`
 
-<table>
+<table class="table table-striped">
 <tr>
 <td>Mesos </td> <td>kind version </td> <td> Library </td> <td>Is module loadable </td> <td>Reason </td>
 </tr>

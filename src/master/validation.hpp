@@ -75,11 +75,24 @@ Option<Error> validate(
 } // namespace resource {
 
 
+namespace executor {
+
+// Functions in this namespace are only exposed for testing.
+namespace internal {
+
+// Validates that fields are properly set depending on the type of the executor.
+Option<Error> validateType(const ExecutorInfo& executor);
+
+} // namespace internal {
+} // namespace executor {
+
+
 namespace task {
 
 // Validates a task that a framework attempts to launch within the
 // offered resources. Returns an optional error which will cause the
-// master to send a failed status update back to the framework.
+// master to send a `TASK_ERROR` status update back to the framework.
+//
 // NOTE: This function must be called sequentially for each task, and
 // each task needs to be launched before the next can be validated.
 Option<Error> validate(
@@ -92,13 +105,51 @@ Option<Error> validate(
 // Functions in this namespace are only exposed for testing.
 namespace internal {
 
-// Validates resources of the task and executor (if present).
+// Validates resources of the task.
 Option<Error> validateResources(const TaskInfo& task);
+
+// Validates resources of the task and its executor.
+Option<Error> validateTaskAndExecutorResources(const TaskInfo& task);
 
 // Validates the kill policy of the task.
 Option<Error> validateKillPolicy(const TaskInfo& task);
 
+// Validates the health check of the task.
+Option<Error> validateHealthCheck(const TaskInfo& task);
+
 } // namespace internal {
+
+namespace group {
+
+// Validates a task group that a framework attempts to launch within the
+// offered resources. Returns an optional error which will cause the
+// master to send a `TASK_ERROR` status updates for *all* the tasks in
+// the task group back to the framework.
+//
+// NOTE: Validation error of *any* task will cause all the tasks in the task
+// group to be rejected by the master.
+Option<Error> validate(
+    const TaskGroupInfo& taskGroup,
+    const ExecutorInfo& executor,
+    Framework* framework,
+    Slave* slave,
+    const Resources& offered);
+
+
+// Functions in this namespace are only exposed for testing.
+namespace internal {
+
+// Validates that the resources specified by
+// the task group and its executor are valid.
+//
+// TODO(vinod): Consolidate this with `validateTaskAndExecutorResources()`.
+Option<Error> validateTaskGroupAndExecutorResources(
+    const TaskGroupInfo& taskGroup,
+    const ExecutorInfo& executor);
+
+} // namespace internal {
+
+} // namespace group {
 
 } // namespace task {
 
@@ -151,9 +202,13 @@ Option<Error> validate(
 
 // Validates the DESTROY operation. We need slave's checkpointed
 // resources to validate that the volumes to destroy actually exist.
+// We also check that the volumes are not being used, or not assigned
+// to any pending task.
 Option<Error> validate(
     const Offer::Operation::Destroy& destroy,
-    const Resources& checkpointedResources);
+    const Resources& checkpointedResources,
+    const hashmap<FrameworkID, Resources>& usedResources,
+    const hashmap<FrameworkID, hashmap<TaskID, TaskInfo>>& pendingTasks);
 
 } // namespace operation {
 

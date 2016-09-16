@@ -16,6 +16,8 @@
 
 #include <set>
 
+#include <process/id.hpp>
+
 #include <stout/os/strerror.hpp>
 
 #include "linux/ns.hpp"
@@ -40,7 +42,8 @@ namespace slave {
 
 SharedFilesystemIsolatorProcess::SharedFilesystemIsolatorProcess(
     const Flags& _flags)
-  : flags(_flags) {}
+  : ProcessBase(process::ID::generate("shared-filesystem-isolator")),
+    flags(_flags) {}
 
 
 SharedFilesystemIsolatorProcess::~SharedFilesystemIsolatorProcess() {}
@@ -203,7 +206,7 @@ Future<Option<ContainerLaunchInfo>> SharedFilesystemIsolatorProcess::prepare(
       }
     }
 
-    launchInfo.add_commands()->set_value(
+    launchInfo.add_pre_exec_commands()->set_value(
         "mount -n --bind " + hostPath + " " + volume.container_path());
   }
 

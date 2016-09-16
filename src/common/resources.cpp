@@ -36,6 +36,7 @@
 #include <stout/lambda.hpp>
 #include <stout/protobuf.hpp>
 #include <stout/strings.hpp>
+#include <stout/unreachable.hpp>
 
 using std::map;
 using std::ostream;
@@ -207,6 +208,11 @@ bool operator==(const Resource& left, const Resource& right)
     return false;
   }
 
+  // Check SharedInfo.
+  if (left.has_shared() != right.has_shared()) {
+    return false;
+  }
+
   if (left.type() == Value::SCALAR) {
     return left.scalar() == right.scalar();
   } else if (left.type() == Value::RANGES) {
@@ -232,6 +238,17 @@ namespace internal {
 // different name, type or role are not addable.
 static bool addable(const Resource& left, const Resource& right)
 {
+  // Check SharedInfo.
+  if (left.has_shared() != right.has_shared()) {
+    return false;
+  }
+
+  // For shared resources, they can be added only if left == right.
+  if (left.has_shared()) {
+    return left == right;
+  }
+
+  // Now, we verify if the two non-shared resources can be added.
   if (left.name() != right.name() ||
       left.type() != right.type() ||
       left.role() != right.role()) {
@@ -253,18 +270,18 @@ static bool addable(const Resource& left, const Resource& right)
   if (left.has_disk()) {
     if (left.disk() != right.disk()) { return false; }
 
-    // Two Resources that represent exclusive 'MOUNT' disks cannot be
-    // added together; this would defeat the exclusivity.
+    // Two non-shared resources that represent exclusive 'MOUNT' disks
+    // cannot be added together; this would defeat the exclusivity.
     if (left.disk().has_source() &&
         left.disk().source().type() == Resource::DiskInfo::Source::MOUNT) {
       return false;
     }
 
     // TODO(jieyu): Even if two Resource objects with DiskInfo have
-    // the same persistence ID, they cannot be added together. In
-    // fact, this shouldn't happen if we do not add resources from
-    // different namespaces (e.g., across slave). Consider adding a
-    // warning.
+    // the same persistence ID, they cannot be added together if they
+    // are non-shared. In fact, this shouldn't happen if we do not
+    // add resources from different namespaces (e.g., across slave).
+    // Consider adding a warning.
     if (left.disk().has_persistence()) {
       return false;
     }
@@ -289,6 +306,17 @@ static bool addable(const Resource& left, const Resource& right)
 // contain "right".
 static bool subtractable(const Resource& left, const Resource& right)
 {
+  // Check SharedInfo.
+  if (left.has_shared() != right.has_shared()) {
+    return false;
+  }
+
+  // For shared resources, they can be subtracted only if left == right.
+  if (left.has_shared()) {
+    return left == right;
+  }
+
+  // Now, we verify if the two non-shared resources can be subtracted.
   if (left.name() != right.name() ||
       left.type() != right.type() ||
       left.role() != right.role()) {
@@ -310,8 +338,8 @@ static bool subtractable(const Resource& left, const Resource& right)
   if (left.has_disk()) {
     if (left.disk() != right.disk()) { return false; }
 
-    // Two Resources that represent exclusive 'MOUNT' disks cannot be
-    // subtracted from eachother if they are not the exact same mount;
+    // Two resources that represent exclusive 'MOUNT' disks cannot be
+    // subtracted from each other if they are not the exact same mount;
     // this would defeat the exclusivity.
     if (left.disk().has_source() &&
         left.disk().source().type() == Resource::DiskInfo::Source::MOUNT &&
@@ -319,8 +347,8 @@ static bool subtractable(const Resource& left, const Resource& right)
       return false;
     }
 
-    // NOTE: For Resource objects that have DiskInfo, we can only do
-    // subtraction if they are equal.
+    // NOTE: For Resource objects that have DiskInfo, we can only subtract
+    // if they are equal.
     if (left.disk().has_persistence() && left != right) {
       return false;
     }
@@ -340,7 +368,7 @@ static bool contains(const Resource& left, const Resource& right)
 {
   // NOTE: This is a necessary condition for 'contains'.
   // 'subtractable' will verify name, role, type, ReservationInfo,
-  // DiskInfo and RevocableInfo compatibility.
+  // DiskInfo, SharedInfo and RevocableInfo compatibility.
   if (!subtractable(left, right)) {
     return false;
   }
@@ -419,7 +447,7 @@ static Option<Error> validateCommandLineResources(const Resources& resources)
  * @return A `Try` containing a Resources object if conversion was successful,
  *     or an Error otherwise.
  */
-static Try<Resources> convertJSON(
+inline Try<Resources> convertJSON(
     const JSON::Array& resourcesJSON,
     const string& defaultRole)
 {
@@ -455,7 +483,7 @@ static Try<Resources> convertJSON(
       return Error("Some JSON resources were empty: " + stringify(resource));
     }
 
-    result += resource;
+    result.add(resource);
   }
 
   return result;
@@ -569,9 +597,6 @@ Try<Resources> Resources::parse(
 
     result = resources.get();
   } else {
-    VLOG(1) << "Parsing resources as JSON failed: " << text << "\n"
-            << "Trying semicolon-delimited string format instead";
-
     foreach (const string& token, strings::tokenize(text, ";")) {
       vector<string> pair = strings::tokenize(token, ":");
       if (pair.size() != 2) {
@@ -720,6 +745,19 @@ Option<Error> Resources::validate(const Resource& resource)
     return error;
   }
 
+  // Check that shareability is enabled for supported resource types.
+  // For now, it is for persistent volumes only.
+  // NOTE: We need to modify this once we extend shareability to other
+  // resource types.
+  if (resource.has_shared()) {
+    if (resource.name() != "disk") {
+      return Error("Resource " + resource.name() + " cannot be shared");
+    }
+
+    if (!resource.has_disk() || !resource.disk().has_persistence()) {
+      return Error("Only persistent volumes can be shared");
+    }
+  }
   return None();
 }
 
@@ -789,9 +827,115 @@ bool Resources::isRevocable(const Resource& resource)
 }
 
 
+bool Resources::isShared(const Resource& resource)
+{
+  return resource.has_shared();
+}
+
+
 /////////////////////////////////////////////////
 // Public member functions.
 /////////////////////////////////////////////////
+
+Option<Error> Resources::Resource_::validate() const
+{
+  if (isShared() && sharedCount.get() < 0) {
+    return Error("Invalid shared resource: count < 0");
+  }
+
+  return Resources::validate(resource);
+}
+
+
+bool Resources::Resource_::isEmpty() const
+{
+  if (isShared() && sharedCount.get() == 0) {
+    return true;
+  }
+
+  return Resources::isEmpty(resource);
+}
+
+
+bool Resources::Resource_::contains(const Resource_& that) const
+{
+  // Both Resource_ objects should have the same sharedness.
+  if (isShared() != that.isShared()) {
+    return false;
+  }
+
+  // Assuming the wrapped Resource objects are equal, the 'contains'
+  // relationship is determined by the relationship of the counters
+  // for shared resources.
+  if (isShared()) {
+    return sharedCount.get() >= that.sharedCount.get() &&
+           resource == that.resource;
+  }
+
+  // For non-shared resources just compare the protobufs.
+  return internal::contains(resource, that.resource);
+}
+
+
+Resources::Resource_& Resources::Resource_::operator+=(const Resource_& that)
+{
+  // This function assumes that the 'resource' fields are addable.
+
+  if (!isShared()) {
+    resource += that.resource;
+  } else {
+    // 'addable' makes sure both 'resource' fields are shared and
+    // equal, so we just need to sum up the counters here.
+    CHECK_SOME(sharedCount);
+    CHECK_SOME(that.sharedCount);
+
+    sharedCount = sharedCount.get() + that.sharedCount.get();
+  }
+
+  return *this;
+}
+
+
+Resources::Resource_& Resources::Resource_::operator-=(const Resource_& that)
+{
+  // This function assumes that the 'resource' fields are subtractable.
+
+  if (!isShared()) {
+    resource -= that.resource;
+  } else {
+    // 'subtractable' makes sure both 'resource' fields are shared and
+    // equal, so we just need to subtract the counters here.
+    CHECK_SOME(sharedCount);
+    CHECK_SOME(that.sharedCount);
+
+    sharedCount = sharedCount.get() - that.sharedCount.get();
+  }
+
+  return *this;
+}
+
+
+bool Resources::Resource_::operator==(const Resource_& that) const
+{
+  // Both Resource_ objects should have the same sharedness.
+  if (isShared() != that.isShared()) {
+    return false;
+  }
+
+  // For shared resources to be equal, the shared counts need to match.
+  if (isShared() && (sharedCount.get() != that.sharedCount.get())) {
+    return false;
+  }
+
+  return resource == that.resource;
+}
+
+
+bool Resources::Resource_::operator!=(const Resource_& that) const
+{
+  return !(*this == that);
+}
+
 
 Resources::Resources(const Resource& resource)
 {
@@ -822,15 +966,17 @@ bool Resources::contains(const Resources& that) const
 {
   Resources remaining = *this;
 
-  foreach (const Resource& resource, that.resources) {
+  foreach (const Resource_& resource_, that.resources) {
     // NOTE: We use _contains because Resources only contain valid
     // Resource objects, and we don't want the performance hit of the
     // validity check.
-    if (!remaining._contains(resource)) {
+    if (!remaining._contains(resource_)) {
       return false;
     }
 
-    remaining -= resource;
+    if (isPersistentVolume(resource_.resource)) {
+      remaining.subtract(resource_);
+    }
   }
 
   return true;
@@ -842,7 +988,21 @@ bool Resources::contains(const Resource& that) const
   // NOTE: We must validate 'that' because invalid resources can lead
   // to false positives here (e.g., "cpus:-1" will return true). This
   // is because 'contains' assumes resources are valid.
-  return validate(that).isNone() && _contains(that);
+  return validate(that).isNone() && _contains(Resource_(that));
+}
+
+
+size_t Resources::count(const Resource& that) const
+{
+  foreach (const Resource_& resource_, resources) {
+    if (resource_.resource == that) {
+      // Return 1 for non-shared resources because non-shared
+      // Resource objects in Resources are unique.
+      return resource_.isShared() ? resource_.sharedCount.get() : 1;
+    }
+  }
+
+  return 0;
 }
 
 
@@ -850,9 +1010,9 @@ Resources Resources::filter(
     const lambda::function<bool(const Resource&)>& predicate) const
 {
   Resources result;
-  foreach (const Resource& resource, resources) {
-    if (predicate(resource)) {
-      result += resource;
+  foreach (const Resource_& resource_, resources) {
+    if (predicate(resource_.resource)) {
+      result.add(resource_);
     }
   }
   return result;
@@ -863,9 +1023,9 @@ hashmap<string, Resources> Resources::reservations() const
 {
   hashmap<string, Resources> result;
 
-  foreach (const Resource& resource, resources) {
-    if (isReserved(resource)) {
-      result[resource.role()] += resource;
+  foreach (const Resource_& resource_, resources) {
+    if (isReserved(resource_.resource)) {
+      result[resource_.resource.role()].add(resource_);
     }
   }
 
@@ -904,20 +1064,33 @@ Resources Resources::nonRevocable() const
 }
 
 
+Resources Resources::shared() const
+{
+  return filter(isShared);
+}
+
+
+Resources Resources::nonShared() const
+{
+  return filter(
+      [](const Resource& resource) { return !isShared(resource); });
+}
+
+
 Resources Resources::flatten(
     const string& role,
     const Option<Resource::ReservationInfo>& reservation) const
 {
   Resources flattened;
 
-  foreach (Resource resource, resources) {
-    resource.set_role(role);
+  foreach (Resource_ resource_, resources) {
+    resource_.resource.set_role(role);
     if (reservation.isNone()) {
-      resource.clear_reservation();
+      resource_.resource.clear_reservation();
     } else {
-      resource.mutable_reservation()->CopyFrom(reservation.get());
+      resource_.resource.mutable_reservation()->CopyFrom(reservation.get());
     }
-    flattened += resource;
+    flattened += resource_;
   }
 
   return flattened;
@@ -933,7 +1106,8 @@ Resources Resources::createStrippedScalarQuantity() const
       Resource scalar = resource;
       scalar.clear_reservation();
       scalar.clear_disk();
-      stripped += scalar;
+      scalar.clear_shared();
+      stripped.add(scalar);
     }
   }
 
@@ -969,6 +1143,10 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
       // Launch operation does not alter the offered resources.
       break;
 
+    case Offer::Operation::LAUNCH_GROUP:
+      // LaunchGroup operation does not alter the offered resources.
+      break;
+
     case Offer::Operation::RESERVE: {
       Option<Error> error = validate(operation.reserve().resources());
       if (error.isSome()) {
@@ -990,7 +1168,7 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
         }
 
         result -= unreserved;
-        result += reserved;
+        result.add(reserved);
       }
       break;
     }
@@ -1015,7 +1193,7 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
 
         Resources unreserved = Resources(reserved).flatten();
 
-        result -= reserved;
+        result.subtract(reserved);
         result += unreserved;
       }
       break;
@@ -1049,12 +1227,17 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
           stripped.clear_disk();
         }
 
+        // Since we only allow persistent volumes to be shared, the
+        // original resource must be non-shared.
+        stripped.clear_shared();
+
         if (!result.contains(stripped)) {
-          return Error("Invalid CREATE Operation: Insufficient disk resources");
+          return Error("Invalid CREATE Operation: Insufficient disk resources"
+                       " for persistent volume " + stringify(volume));
         }
 
-        result -= stripped;
-        result += volume;
+        result.subtract(stripped);
+        result.add(volume);
       }
       break;
     }
@@ -1088,14 +1271,18 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
           stripped.clear_disk();
         }
 
-        result -= volume;
-        result += stripped;
+        // Since we only allow persistent volumes to be shared, we
+        // return the resource to non-shared state after destroy.
+        stripped.clear_shared();
+
+        result.subtract(volume);
+        result.add(stripped);
       }
       break;
     }
 
-    default:
-      return Error("Unknown offer operation " + stringify(operation.type()));
+    case Offer::Operation::UNKNOWN:
+      return Error("Unknown offer operation");
   }
 
   // The following are sanity checks to ensure the amount of each type of
@@ -1287,10 +1474,10 @@ Option<Value::Ranges> Resources::ephemeral_ports() const
 // Private member functions.
 /////////////////////////////////////////////////
 
-bool Resources::_contains(const Resource& that) const
+bool Resources::_contains(const Resource_& that) const
 {
-  foreach (const Resource& resource, resources) {
-    if (internal::contains(resource, that)) {
+  foreach (const Resource_& resource_, resources) {
+    if (resource_.contains(that)) {
       return true;
     }
   }
@@ -1313,21 +1500,21 @@ Option<Resources> Resources::find(const Resource& target) const
   };
 
   foreach (const auto& predicate, predicates) {
-    foreach (const Resource& resource, total.filter(predicate)) {
+    foreach (const Resource_& resource_, total.filter(predicate)) {
       // Need to flatten to ignore the roles in contains().
-      Resources flattened = Resources(resource).flatten();
+      Resources flattened = Resources(resource_.resource).flatten();
 
       if (flattened.contains(remaining)) {
         // The target has been found, return the result.
-        if (!resource.has_reservation()) {
-          return found + remaining.flatten(resource.role());
+        if (!resource_.resource.has_reservation()) {
+          return found + remaining.flatten(resource_.resource.role());
         } else {
-          return found +
-                 remaining.flatten(resource.role(), resource.reservation());
+          return found + remaining.flatten(
+              resource_.resource.role(), resource_.resource.reservation());
         }
       } else if (remaining.contains(flattened)) {
-        found += resource;
-        total -= resource;
+        found.add(resource_);
+        total.subtract(resource_);
         remaining -= flattened;
         break;
       }
@@ -1342,9 +1529,14 @@ Option<Resources> Resources::find(const Resource& target) const
 // Overloaded operators.
 /////////////////////////////////////////////////
 
-Resources::operator const RepeatedPtrField<Resource>&() const
+Resources::operator const RepeatedPtrField<Resource>() const
 {
-  return resources;
+  RepeatedPtrField<Resource> all;
+  foreach(const Resource& resource, resources) {
+    all.Add()->CopyFrom(resource);
+  }
+
+  return all;
 }
 
 
@@ -1357,6 +1549,14 @@ bool Resources::operator==(const Resources& that) const
 bool Resources::operator!=(const Resources& that) const
 {
   return !(*this == that);
+}
+
+
+Resources Resources::operator+(const Resource_& that) const
+{
+  Resources result = *this;
+  result += that;
+  return result;
 }
 
 
@@ -1376,23 +1576,41 @@ Resources Resources::operator+(const Resources& that) const
 }
 
 
-Resources& Resources::operator+=(const Resource& that)
+void Resources::add(const Resource_& that)
 {
-  if (validate(that).isNone() && !isEmpty(that)) {
-    bool found = false;
-    foreach (Resource& resource, resources) {
-      if (internal::addable(resource, that)) {
-        resource += that;
-        found = true;
-        break;
-      }
-    }
+  if (that.isEmpty()) {
+    return;
+  }
 
-    // Cannot be combined with any existing Resource object.
-    if (!found) {
-      resources.Add()->CopyFrom(that);
+  bool found = false;
+  foreach (Resource_& resource_, resources) {
+    if (internal::addable(resource_.resource, that)) {
+      resource_ += that;
+      found = true;
+      break;
     }
   }
+
+  // Cannot be combined with any existing Resource object.
+  if (!found) {
+    resources.push_back(that);
+  }
+}
+
+
+Resources& Resources::operator+=(const Resource_& that)
+{
+  if (that.validate().isNone()) {
+    add(that);
+  }
+
+  return *this;
+}
+
+
+Resources& Resources::operator+=(const Resource& that)
+{
+  *this += Resource_(that);
 
   return *this;
 }
@@ -1400,11 +1618,19 @@ Resources& Resources::operator+=(const Resource& that)
 
 Resources& Resources::operator+=(const Resources& that)
 {
-  foreach (const Resource& resource, that.resources) {
-    *this += resource;
+  foreach (const Resource_& resource_, that) {
+    add(resource_);
   }
 
   return *this;
+}
+
+
+Resources Resources::operator-(const Resource_& that) const
+{
+  Resources result = *this;
+  result -= that;
+  return result;
 }
 
 
@@ -1424,31 +1650,59 @@ Resources Resources::operator-(const Resources& that) const
 }
 
 
-Resources& Resources::operator-=(const Resource& that)
+void Resources::subtract(const Resource_& that)
 {
-  if (validate(that).isNone() && !isEmpty(that)) {
-    for (int i = 0; i < resources.size(); i++) {
-      Resource* resource = resources.Mutable(i);
+  if (that.isEmpty()) {
+    return;
+  }
 
-      if (internal::subtractable(*resource, that)) {
-        *resource -= that;
+  for (size_t i = 0; i < resources.size(); i++) {
+    Resource_& resource_ = resources[i];
 
-        // Remove the resource if it becomes invalid or zero. We need
-        // to do the validation because we want to strip negative
-        // scalar Resource object.
-        if (validate(*resource).isSome() || isEmpty(*resource)) {
-          // As `resources` is not ordered, and erasing an element
-          // from the middle using `DeleteSubrange` is expensive, we
-          // swap with the last element and then shrink the
-          // 'RepeatedPtrField' by one.
-          resources.Mutable(i)->Swap(resources.Mutable(resources.size() - 1));
-          resources.RemoveLast();
-        }
+    if (internal::subtractable(resource_.resource, that)) {
+      resource_ -= that;
 
-        break;
+      // Remove the resource if it has become negative or empty.
+      // Note that a negative resource means the caller is
+      // subtracting more than they should!
+      //
+      // TODO(gyliu513): Provide a stronger interface to avoid
+      // silently allowing this to occur.
+
+      // A "negative" Resource_ either has a negative sharedCount or
+      // a negative scalar value.
+      bool negative =
+        (resource_.isShared() && resource_.sharedCount.get() < 0) ||
+        (resource_.resource.type() == Value::SCALAR &&
+         resource_.resource.scalar().value() < 0);
+
+      if (negative || resource_.isEmpty()) {
+        // As `resources` is not ordered, and erasing an element
+        // from the middle is expensive, we swap with the last element
+        // and then shrink the vector by one.
+        resources[i] = resources.back();
+        resources.pop_back();
       }
+
+      break;
     }
   }
+}
+
+
+Resources& Resources::operator-=(const Resource_& that)
+{
+  if (that.validate().isNone()) {
+    subtract(that);
+  }
+
+  return *this;
+}
+
+
+Resources& Resources::operator-=(const Resource& that)
+{
+  *this -= Resource_(that);
 
   return *this;
 }
@@ -1456,11 +1710,24 @@ Resources& Resources::operator-=(const Resource& that)
 
 Resources& Resources::operator-=(const Resources& that)
 {
-  foreach (const Resource& resource, that.resources) {
-    *this -= resource;
+  foreach (const Resource_& resource_, that) {
+    subtract(resource_);
   }
 
   return *this;
+}
+
+
+ostream& operator<<(ostream& stream, const Resource::DiskInfo::Source& source)
+{
+  switch (source.type()) {
+    case Resource::DiskInfo::Source::MOUNT:
+      return stream << "MOUNT:" + source.mount().root();
+    case Resource::DiskInfo::Source::PATH:
+      return stream << "PATH:" + source.path().root();
+  }
+
+  UNREACHABLE();
 }
 
 
@@ -1490,7 +1757,14 @@ ostream& operator<<(ostream& stream, const Volume& volume)
 
 ostream& operator<<(ostream& stream, const Resource::DiskInfo& disk)
 {
+  if (disk.has_source()) {
+    stream << disk.source();
+  }
+
   if (disk.has_persistence()) {
+    if (disk.has_source()) {
+      stream << ",";
+    }
     stream << disk.persistence().id();
   }
 
@@ -1556,6 +1830,10 @@ ostream& operator<<(ostream& stream, const Resource& resource)
     stream << "{REV}";
   }
 
+  if (resource.has_shared()) {
+    stream << "<SHARED>";
+  }
+
   stream << ":";
 
   switch (resource.type()) {
@@ -1565,6 +1843,17 @@ ostream& operator<<(ostream& stream, const Resource& resource)
     default:
       LOG(FATAL) << "Unexpected Value type: " << resource.type();
       break;
+  }
+
+  return stream;
+}
+
+
+ostream& operator<<(ostream& stream, const Resources::Resource_& resource_)
+{
+  stream << resource_.resource;
+  if (resource_.isShared()) {
+    stream << "<" << resource_.sharedCount.get() << ">";
   }
 
   return stream;

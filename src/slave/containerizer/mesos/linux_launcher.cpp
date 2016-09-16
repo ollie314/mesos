@@ -54,6 +54,9 @@ namespace mesos {
 namespace internal {
 namespace slave {
 
+constexpr char LINUX_LAUNCHER_NAME[] = "linux";
+
+
 static ContainerID container(const string& cgroup)
 {
   string basename = Path(cgroup).basename();
@@ -270,7 +273,7 @@ Try<pid_t> LinuxLauncher::fork(
     const process::Subprocess::IO& in,
     const process::Subprocess::IO& out,
     const process::Subprocess::IO& err,
-    const Option<flags::FlagsBase>& flags,
+    const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<int>& namespaces,
     vector<Subprocess::Hook> parentHooks)
@@ -363,6 +366,31 @@ Future<Nothing> LinuxLauncher::destroy(const ContainerID& containerId)
       freezerHierarchy,
       cgroup(containerId),
       cgroups::DESTROY_TIMEOUT);
+}
+
+
+Future<ContainerStatus> LinuxLauncher::status(const ContainerID& containerId)
+{
+  if (!pids.contains(containerId)) {
+    return Failure("Container does not exist!");
+  }
+
+  ContainerStatus status;
+  status.set_executor_pid(pids[containerId]);
+
+  return status;
+}
+
+
+string LinuxLauncher::getExitStatusCheckpointPath(
+    const ContainerID& containerId)
+{
+  return path::join(
+      flags.runtime_dir,
+      "launcher",
+      LINUX_LAUNCHER_NAME,
+      buildPathFromHierarchy(containerId, "containers"),
+      "exit_status");
 }
 
 

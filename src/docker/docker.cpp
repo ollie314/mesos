@@ -17,13 +17,19 @@
 #include <map>
 #include <vector>
 
+#include <stout/error.hpp>
+#include <stout/foreach.hpp>
+#include <stout/json.hpp>
 #include <stout/lambda.hpp>
 #include <stout/os.hpp>
+#include <stout/path.hpp>
 #include <stout/result.hpp>
 #include <stout/strings.hpp>
+#include <stout/stringify.hpp>
 
 #include <stout/os/killtree.hpp>
 #include <stout/os/read.hpp>
+#include <stout/os/write.hpp>
 
 #include <process/check.hpp>
 #include <process/collect.hpp>
@@ -37,8 +43,7 @@
 #include "linux/cgroups.hpp"
 #endif // __linux__
 
-#include "slave/containerizer/mesos/isolators/cgroups/cpushare.hpp"
-#include "slave/containerizer/mesos/isolators/cgroups/mem.hpp"
+#include "slave/containerizer/mesos/isolators/cgroups/constants.hpp"
 
 #include "slave/constants.hpp"
 
@@ -99,7 +104,7 @@ Try<Owned<Docker>> Docker::create(
     bool validate,
     const Option<JSON::Object>& config)
 {
-  if (!strings::startsWith(socket, "/")) {
+  if (!path::absolute(socket)) {
     return Error("Invalid Docker socket path: " + socket);
   }
 
@@ -349,7 +354,50 @@ Try<Docker::Container> Docker::Container::create(const string& output)
     }
   }
 
-  return Docker::Container(output, id, name, optionalPid, started, ipAddress);
+  vector<Device> devices;
+
+  Result<JSON::Array> devicesArray =
+    json.find<JSON::Array>("HostConfig.Devices");
+
+  if (devicesArray.isError()) {
+    return Error("Failed to parse HostConfig.Devices: " + devicesArray.error());
+  }
+
+  if (devicesArray.isSome()) {
+    foreach (const JSON::Value& entry, devicesArray->values) {
+      if (!entry.is<JSON::Object>()) {
+        return Error("Malformed HostConfig.Devices"
+                     " entry '" + stringify(entry) + "'");
+      }
+
+      JSON::Object object = entry.as<JSON::Object>();
+
+      Result<JSON::String> hostPath =
+        object.at<JSON::String>("PathOnHost");
+      Result<JSON::String> containerPath =
+        object.at<JSON::String>("PathInContainer");
+      Result<JSON::String> permissions =
+        object.at<JSON::String>("CgroupPermissions");
+
+      if (!hostPath.isSome() ||
+          !containerPath.isSome() ||
+          !permissions.isSome()) {
+        return Error("Malformed HostConfig.Devices entry"
+                     " '" + stringify(object) + "'");
+      }
+
+      Device device;
+      device.hostPath = Path(hostPath->value);
+      device.containerPath = Path(containerPath->value);
+      device.access.read = strings::contains(permissions->value, "r");
+      device.access.write = strings::contains(permissions->value, "w");
+      device.access.mknod = strings::contains(permissions->value, "m");
+
+      devices.push_back(device);
+    }
+  }
+
+  return Container(output, id, name, optionalPid, started, ipAddress, devices);
 }
 
 
@@ -422,7 +470,7 @@ Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
           return Error("Unexpected Env format for 'ContainerConfig.Env'");
         }
 
-        if (result.count(tokens[0])) {
+        if (result.count(tokens[0]) > 0) {
           return Error("Unexpected duplicate environment variables '"
                         + tokens[0] + "'");
         }
@@ -446,6 +494,7 @@ Future<Option<int>> Docker::run(
     const string& mappedDirectory,
     const Option<Resources>& resources,
     const Option<map<string, string>>& env,
+    const Option<vector<Device>>& devices,
     const process::Subprocess::IO& _stdout,
     const process::Subprocess::IO& _stderr) const
 {
@@ -506,14 +555,31 @@ Future<Option<int>> Docker::run(
   argv.push_back("-e");
   argv.push_back("MESOS_CONTAINER_NAME=" + name);
 
+  Option<string> volumeDriver;
   foreach (const Volume& volume, containerInfo.volumes()) {
-    string volumeConfig = volume.container_path();
+    // The 'container_path' can be either an absolute path or a
+    // relative path. If it is a relative path, it would be prefixed
+    // with the container sandbox directory.
+    string volumeConfig = path::absolute(volume.container_path())
+      ? volume.container_path()
+      : path::join(mappedDirectory, volume.container_path());
 
     // TODO(gyliu513): Set `host_path` as source.
     if (volume.has_host_path()) {
-      if (!strings::startsWith(volume.host_path(), "/") &&
+      // If both 'host_path' and 'container_path' are relative paths,
+      // return a failure because the user can just directly access the
+      // volume in the sandbox.
+      if (!path::absolute(volume.host_path()) &&
+          !path::absolute(volume.container_path())) {
+        return Failure(
+            "Both host_path '" + volume.host_path() + "' " +
+            "and container_path '" + volume.container_path() + "' " +
+            "of a volume are relative");
+      }
+
+      if (!path::absolute(volume.host_path()) &&
           !dockerInfo.has_volume_driver()) {
-        // When volume dirver is empty and host path is a relative path, mapping
+        // When volume driver is empty and host path is a relative path, mapping
         // host path from the sandbox.
         volumeConfig =
           path::join(sandboxDirectory, volume.host_path()) + ":" + volumeConfig;
@@ -538,8 +604,14 @@ Future<Option<int>> Docker::run(
                      ":" + volumeConfig;
 
       if (volume.source().docker_volume().has_driver()) {
-        argv.push_back("--volume-driver=" +
-                       volume.source().docker_volume().driver());
+        const string& currentDriver = volume.source().docker_volume().driver();
+
+        if (volumeDriver.isSome() &&
+            volumeDriver.get() != currentDriver) {
+          return Failure("Only one volume driver is supported");
+        }
+
+        volumeDriver = currentDriver;
       }
 
       switch (volume.mode()) {
@@ -562,7 +634,16 @@ Future<Option<int>> Docker::run(
   // TODO(gyliu513): Deprecate this after the release cycle of 1.0.
   // It will be replaced by Volume.Source.DockerVolume.driver.
   if (dockerInfo.has_volume_driver()) {
-    argv.push_back("--volume-driver=" + dockerInfo.volume_driver());
+    if (volumeDriver.isSome() &&
+        volumeDriver.get() != dockerInfo.volume_driver()) {
+      return Failure("Only one volume driver per task is supported");
+    }
+
+    volumeDriver = dockerInfo.volume_driver();
+  }
+
+  if (volumeDriver.isSome()) {
+    argv.push_back("--volume-driver=" + volumeDriver.get());
   }
 
   const string& image = dockerInfo.image();
@@ -618,7 +699,7 @@ Future<Option<int>> Docker::run(
   }
 
   if (dockerInfo.port_mappings().size() > 0) {
-    if (network == "host" || network == "none"  ) {
+    if (network == "host" || network == "none") {
       return Failure("Port mappings are only supported for bridge and "
                      "user-defined networks");
     }
@@ -658,6 +739,37 @@ Future<Option<int>> Docker::run(
 
       argv.push_back("-p");
       argv.push_back(portMapping);
+    }
+  }
+
+  if (devices.isSome()) {
+    foreach (const Device& device, devices.get()) {
+      if (!device.hostPath.absolute()) {
+        return Failure("Device path '" + device.hostPath.string() + "'"
+                       " is not an absolute path");
+      }
+
+      string permissions;
+      permissions += device.access.read ? "r" : "";
+      permissions += device.access.write ? "w" : "";
+      permissions += device.access.mknod ? "m" : "";
+
+      // Docker doesn't handle this case (it fails by saying
+      // that an absolute path is not being provided).
+      if (permissions.empty()) {
+        return Failure("At least one access required for --devices:"
+                       " none specified for"
+                       " '" + device.hostPath.string() + "'");
+      }
+
+      // Note that docker silently does not handle default devices
+      // passed in with restricted permissions (e.g. /dev/null), so
+      // we don't bother checking this case either.
+
+      argv.push_back("--device=" +
+                     device.hostPath.string() + ":" +
+                     device.containerPath.string() + ":" +
+                     permissions);
     }
   }
 
@@ -711,7 +823,7 @@ Future<Option<int>> Docker::run(
       _stdout,
       _stderr,
       NO_SETSID,
-      None(),
+      nullptr,
       environment);
 
   if (s.isError()) {
@@ -1155,7 +1267,7 @@ Future<Docker::Image> Docker::pull(
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       NO_SETSID,
-      None());
+      nullptr);
 
   if (s.isError()) {
     return Failure("Failed to create subprocess '" + cmd + "': " + s.error());
@@ -1282,7 +1394,7 @@ Future<Docker::Image> Docker::__pull(
       Subprocess::PIPE(),
       Subprocess::PIPE(),
       NO_SETSID,
-      None(),
+      nullptr,
       environment);
 
   if (s_.isError()) {

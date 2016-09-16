@@ -25,6 +25,7 @@
 
 #include <mesos/type_utils.hpp>
 
+#include "common/http.hpp"
 #include "common/parse.hpp"
 
 #include "slave/constants.hpp"
@@ -93,9 +94,9 @@ mesos::internal::slave::Flags::Flags()
       "`cgroups/cpu,cgroups/mem`, or network/port_mapping\n"
       "(configure with flag: `--with-network-isolator` to enable),\n"
       "or `gpu/nvidia` for nvidia specific gpu isolation,\n"
-      "or `external`, or load an alternate isolator module using\n"
-      "the `--modules` flag. Note that this flag is only relevant\n"
-      "for the Mesos Containerizer.",
+      "or load an alternate isolator module using the `--modules`\n"
+      "flag. Note that this flag is only relevant for the Mesos\n"
+      "Containerizer.",
       "posix/cpu,posix/mem");
 
   add(&Flags::launcher,
@@ -189,6 +190,14 @@ mesos::internal::slave::Flags::Flags()
       "production, since long-running agents could lose data when cleanup\n"
       "occurs. (Example: `/var/lib/mesos/agent`)");
 
+  add(&Flags::runtime_dir,
+      "runtime_dir",
+      "Path of the agent runtime directory. This is where runtime data\n"
+      "is stored by an agent that it needs to persist across crashes (but\n"
+      "not across reboots). This directory will be cleared on reboot.\n"
+      "(Example: `/var/run/mesos`)",
+      DEFAULT_RUNTIME_DIRECTORY);
+
   add(&Flags::launcher_dir, // TODO(benh): This needs a better name.
       "launcher_dir",
       "Directory path of Mesos binaries. Mesos looks for the health-check,\n"
@@ -230,9 +239,19 @@ mesos::internal::slave::Flags::Flags()
       "Subsequent retries are exponentially backed off based on this\n"
       "interval (e.g., 1st retry uses a random value between `[0, b * 2^1]`,\n"
       "2nd retry between `[0, b * 2^2]`, 3rd retry between `[0, b * 2^3]`,\n"
-      "etc) up to a maximum of " +
-        stringify(REGISTER_RETRY_INTERVAL_MAX),
+      "etc) up to a maximum of " + stringify(REGISTER_RETRY_INTERVAL_MAX),
       DEFAULT_REGISTRATION_BACKOFF_FACTOR);
+
+  add(&Flags::authentication_backoff_factor,
+      "authentication_backoff_factor",
+      "After a failed authentication the agent picks a random amount of time\n"
+      "between `[0, b]`, where `b = authentication_backoff_factor`, to\n"
+      "authenticate with a new master. Subsequent retries are exponentially\n"
+      "backed off based on this interval (e.g., 1st retry uses a random\n"
+      "value between `[0, b * 2^1]`, 2nd retry between `[0, b * 2^2]`, 3rd\n"
+      "retry between `[0, b * 2^3]`, etc up to a maximum of " +
+          stringify(AUTHENTICATION_RETRY_INTERVAL_MAX),
+      DEFAULT_AUTHENTICATION_BACKOFF_FACTOR);
 
   add(&Flags::executor_environment_variables,
       "executor_environment_variables",
@@ -433,6 +452,34 @@ mesos::internal::slave::Flags::Flags()
       "systemd_runtime_directory",
       "The path to the systemd system run time directory\n",
       "/run/systemd/system");
+
+  add(&Flags::allowed_capabilities,
+      "allowed_capabilities",
+      "JSON representation of system capabilities that the operator will\n"
+      "allow for a task that will be run in a container launched by the\n"
+      "containerizer (currently only supported in MesosContainerizer).\n"
+      "This set overrides the default capabilities for the user and the\n"
+      "capabilities requested by the framework.\n"
+      "\n"
+      "The net capability for a task running in the container would be:\n"
+      "   ((F & A) & U)\n"
+      "   where F = capabilities requested by the framework.\n"
+      "         U = permitted capabilities for the agent process.\n"
+      "         A = allowed capabilities specified by this flag.\n"
+      "\n"
+      "To set capabilities the agent should have the `SETPCAP` capability.\n"
+      "\n"
+      "This flag is effective iff `capabilities` isolation is enabled.\n"
+      "When `capabilities` isolation is enabled, the absense of this flag\n"
+      "would imply that the operator would allow ALL capabilities.\n"
+      "\n"
+      "Example:\n"
+      "{\n"
+      "   \"capabilities\": [\n"
+      "       \"NET_RAW\",\n"
+      "       \"SYS_ADMIN\"\n"
+      "     ]\n"
+      "}");
 #endif
 
   add(&Flags::firewall_rules,
@@ -489,24 +536,14 @@ mesos::internal::slave::Flags::Flags()
       "  ]\n"
       "}");
 
-  add(&Flags::containerizer_path,
-      "containerizer_path",
-      "The path to the external containerizer executable used when\n"
-      "external isolation is activated (`--isolation=external`).");
-
   add(&Flags::containerizers,
       "containerizers",
       "Comma-separated list of containerizer implementations\n"
       "to compose in order to provide containerization.\n"
-      "Available options are `mesos`, `external`, and\n"
-      "`docker` (on Linux). The order the containerizers\n"
-      "are specified is the order they are tried.\n",
+      "Available options are `mesos` and `docker` (on Linux).\n"
+      "The order the containerizers are specified is the order\n"
+      "they are tried.\n",
       "mesos");
-
-  add(&Flags::default_container_image,
-      "default_container_image",
-      "The default container image to use if not specified by a task,\n"
-      "when using external containerizer.");
 
   // Docker containerizer flags.
   add(&Flags::docker,
@@ -546,12 +583,12 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::docker_config,
       "docker_config",
-      "The default docker config file for agent. Can be provided either as a\n"
-      "path pointing to the agent local docker config file, or as a\n"
+      "The default docker config file for agent. Can be provided either as an\n"
+      "absolute path pointing to the agent local docker config file, or as a\n"
       "JSON-formatted string. The format of the docker config file should be\n"
       "identical to docker's default one (e.g., either\n"
-      "`~/.docker/config.json` or `~/.dockercfg`).\n"
-      "Example JSON (`~/.docker/config.json`):\n"
+      "`$HOME/.docker/config.json` or `$HOME/.dockercfg`).\n"
+      "Example JSON (`$HOME/.docker/config.json`):\n"
       "{\n"
       "  \"auths\": {\n"
       "    \"https://index.docker.io/v1/\": {\n"
@@ -776,11 +813,18 @@ mesos::internal::slave::Flags::Flags()
       "Currently there is no support for multiple HTTP authenticators.",
       DEFAULT_HTTP_AUTHENTICATOR);
 
-  add(&Flags::authenticate_http,
-      "authenticate_http",
-      "If `true`, only authenticated requests for HTTP endpoints supporting\n"
-      "authentication are allowed. If `false`, unauthenticated requests to\n"
-      "HTTP endpoints are also allowed.",
+  add(&Flags::authenticate_http_readwrite,
+      "authenticate_http_readwrite",
+      "If `true`, only authenticated requests for read-write HTTP endpoints\n"
+      "supporting authentication are allowed. If `false`, unauthenticated\n"
+      "requests to such HTTP endpoints are also allowed.",
+      false);
+
+  add(&Flags::authenticate_http_readonly,
+      "authenticate_http_readonly",
+      "If `true`, only authenticated requests for read-only HTTP endpoints\n"
+      "supporting authentication are allowed. If `false`, unauthenticated\n"
+      "requests to such HTTP endpoints are also allowed.",
       false);
 
   add(&Flags::http_credentials,

@@ -16,6 +16,7 @@
 #include <glog/logging.h>
 
 #include <process/future.hpp>
+#include <process/id.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
 
@@ -32,7 +33,7 @@ class SequenceProcess;
 class Sequence
 {
 public:
-  Sequence();
+  Sequence(const std::string& id = "sequence");
   ~Sequence();
 
   // Registers a callback that will be invoked when all the futures
@@ -62,18 +63,20 @@ private:
 class SequenceProcess : public Process<SequenceProcess>
 {
 public:
-  SequenceProcess() : last(Nothing()) {}
+  SequenceProcess(const std::string& id)
+    : ProcessBase(ID::generate(id)),
+      last(Nothing()) {}
 
   template <typename T>
   Future<T> add(const lambda::function<Future<T>()>& callback)
   {
     // This is the future that is used to notify the next callback
     // (denoted by 'N' in the following graph).
-    Owned<Promise<Nothing> > notifier(new Promise<Nothing>());
+    Owned<Promise<Nothing>> notifier(new Promise<Nothing>());
 
     // This is the future that will be returned to the user (denoted
     // by 'F' in the following graph).
-    Owned<Promise<T> > promise(new Promise<T>());
+    Owned<Promise<T>> promise(new Promise<T>());
 
     // We use a graph to show how we hook these futures. Each box in
     // the graph represents a future. As mentioned above, 'F' denotes
@@ -138,7 +141,7 @@ protected:
 
 private:
   // Invoked when a callback is done.
-  static void completed(Owned<Promise<Nothing> > notifier)
+  static void completed(Owned<Promise<Nothing>> notifier)
   {
     notifier->set(Nothing());
   }
@@ -146,7 +149,7 @@ private:
   // Invoked when a notifier is set.
   template <typename T>
   static void notified(
-      Owned<Promise<T> > promise,
+      Owned<Promise<T>> promise,
       const lambda::function<Future<T>()>& callback)
   {
     if (promise->future().hasDiscard()) {
@@ -163,9 +166,9 @@ private:
 };
 
 
-inline Sequence::Sequence()
+inline Sequence::Sequence(const std::string& id)
 {
-  process = new SequenceProcess();
+  process = new SequenceProcess(id);
   process::spawn(process);
 }
 

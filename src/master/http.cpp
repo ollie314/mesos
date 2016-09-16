@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <iomanip>
 #include <map>
 #include <memory>
@@ -45,6 +46,7 @@
 #include <process/metrics/metrics.hpp>
 
 #include <stout/base64.hpp>
+#include <stout/errorbase.hpp>
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
@@ -62,6 +64,7 @@
 #include <stout/result.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
+#include <stout/unreachable.hpp>
 #include <stout/utils.hpp>
 #include <stout/uuid.hpp>
 
@@ -113,6 +116,7 @@ using process::http::URL;
 
 using process::metrics::internal::MetricsProcess;
 
+using std::copy_if;
 using std::list;
 using std::map;
 using std::set;
@@ -370,27 +374,6 @@ static void json(JSON::ObjectWriter* writer, const Summary<Framework>& summary)
 }
 
 
-static void json(JSON::ObjectWriter* writer, const Full<Framework>& full)
-{
-  // Use the `FullFrameworkWriter` with `AcceptingObjectApprover`.
-
-  Future<Owned<ObjectApprover>> tasksApprover =
-    Owned<ObjectApprover>(new AcceptingObjectApprover());
-  Future<Owned<ObjectApprover>> executorsApprover =
-    Owned<ObjectApprover>(new AcceptingObjectApprover());
-
-  const Framework& framework = full;
-
-  // Note that we know the futures are ready.
-  auto frameworkWriter = FullFrameworkWriter(
-      tasksApprover.get(),
-      executorsApprover.get(),
-      &framework);
-
-  frameworkWriter(writer);
-}
-
-
 void Master::Http::log(const Request& request)
 {
   Option<string> userAgent = request.headers.get("User-Agent");
@@ -418,7 +401,13 @@ string Master::Http::API_HELP()
         "current master is not the leader.",
         "Returns 503 SERVICE_UNAVAILABLE if the leading master cannot be",
         "found."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "The information returned by this endpoint for certain calls",
+        "might be filtered based on the user accessing it.",
+        "For example a user might only see the subset of frameworks,",
+        "tasks, and executors they are allowed to view.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -529,22 +518,22 @@ Future<Response> Master::Http::api(
       return setLoggingLevel(call, principal, acceptType);
 
     case mesos::master::Call::LIST_FILES:
-      return NotImplemented();
+      return listFiles(call, principal, acceptType);
 
     case mesos::master::Call::READ_FILE:
-      return NotImplemented();
+      return readFile(call, principal, acceptType);
 
     case mesos::master::Call::GET_STATE:
-      return NotImplemented();
-
-    case mesos::master::Call::GET_STATE_SUMMARY:
-      return NotImplemented();
+      return getState(call, principal, acceptType);
 
     case mesos::master::Call::GET_AGENTS:
       return getAgents(call, principal, acceptType);
 
     case mesos::master::Call::GET_FRAMEWORKS:
-      return NotImplemented();
+      return getFrameworks(call, principal, acceptType);
+
+    case mesos::master::Call::GET_EXECUTORS:
+      return getExecutors(call, principal, acceptType);
 
     case mesos::master::Call::GET_TASKS:
       return getTasks(call, principal, acceptType);
@@ -556,10 +545,10 @@ Future<Response> Master::Http::api(
       return weightsHandler.get(call, principal, acceptType);
 
     case mesos::master::Call::UPDATE_WEIGHTS:
-      return NotImplemented();
+      return weightsHandler.update(call, principal, acceptType);
 
-    case mesos::master::Call::GET_LEADING_MASTER:
-      return getLeadingMaster(call, principal, acceptType);
+    case mesos::master::Call::GET_MASTER:
+      return getMaster(call, principal, acceptType);
 
     case mesos::master::Call::RESERVE_RESOURCES:
       return reserveResources(call, principal, acceptType);
@@ -589,31 +578,88 @@ Future<Response> Master::Http::api(
       return stopMaintenance(call, principal, acceptType);
 
     case mesos::master::Call::GET_QUOTA:
-      return NotImplemented();
+      return quotaHandler.status(call, principal, acceptType);
 
     case mesos::master::Call::SET_QUOTA:
       return quotaHandler.set(call, principal);
 
     case mesos::master::Call::REMOVE_QUOTA:
-      return NotImplemented();
+      return quotaHandler.remove(call, principal);
 
-    case mesos::master::Call::SUBSCRIBE: {
-      Pipe pipe;
-      OK ok;
-
-      ok.headers["Content-Type"] = stringify(acceptType);
-      ok.type = Response::PIPE;
-      ok.reader = pipe.reader();
-
-      HttpConnection http {pipe.writer(), acceptType, UUID::random()};
-
-      master->subscribe(http);
-
-      return ok;
-    }
+    case mesos::master::Call::SUBSCRIBE:
+      return subscribe(call, principal, acceptType);
   }
 
   UNREACHABLE();
+}
+
+
+Future<Response> Master::Http::subscribe(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::SUBSCRIBE, call.type());
+
+  // Retrieve Approvers for authorizing frameworks and tasks.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> tasksApprover;
+  Future<Owned<ObjectApprover>> executorsApprover;
+  if (master->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    tasksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_TASK);
+
+    executorsApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_EXECUTOR);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(
+      new AcceptingObjectApprover());
+    tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    executorsApprover = Owned<ObjectApprover>(
+      new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, tasksApprover, executorsApprover)
+    .then(defer(master->self(),
+      [=](const tuple<Owned<ObjectApprover>,
+                      Owned<ObjectApprover>,
+                      Owned<ObjectApprover>>& approvers)
+        -> Future<Response> {
+      // Get approver from tuple.
+      Owned<ObjectApprover> frameworksApprover;
+      Owned<ObjectApprover> tasksApprover;
+      Owned<ObjectApprover> executorsApprover;
+      tie(frameworksApprover, tasksApprover, executorsApprover) = approvers;
+
+      Pipe pipe;
+      OK ok;
+
+      ok.headers["Content-Type"] = stringify(contentType);
+      ok.type = Response::PIPE;
+      ok.reader = pipe.reader();
+
+      HttpConnection http {pipe.writer(), contentType, UUID::random()};
+      master->subscribe(http);
+
+      mesos::master::Event event;
+      event.set_type(mesos::master::Event::SUBSCRIBED);
+      event.mutable_subscribed()->mutable_get_state()->CopyFrom(
+        _getState(frameworksApprover,
+                  tasksApprover,
+                  executorsApprover));
+
+      http.send<mesos::master::Event, v1::master::Event>(event);
+
+      return ok;
+    }));
 }
 
 
@@ -630,7 +676,11 @@ string Master::Http::SCHEDULER_HELP()
         "current master is not the leader.",
         "Returns 503 SERVICE_UNAVAILABLE if the leading master cannot be",
         "found."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "The returned frameworks information might be filtered based on the",
+        "users authorization.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -790,12 +840,12 @@ Future<Response> Master::Http::scheduler(
         "All non-subscribe calls should include the 'Mesos-Stream-Id' header");
   }
 
-  if (request.headers.at("Mesos-Stream-Id") !=
-      framework->http.get().streamId.toString()) {
+  const string& streamId = request.headers.at("Mesos-Stream-Id");
+  if (streamId != framework->http.get().streamId.toString()) {
     return BadRequest(
-        "The stream ID included in this request didn't match the stream ID "
-        "currently associated with framework ID '"
-        + framework->id().value() + "'");
+        "The stream ID '" + streamId + "' included in this request "
+        "didn't match the stream ID currently associated with framework ID "
+        + framework->id().value());
   }
 
   switch (call.type()) {
@@ -896,7 +946,80 @@ string Master::Http::CREATE_VOLUMES_HELP()
         "",
         "Please provide \"slaveId\" and \"volumes\" values designating",
         "the volumes to be created."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Using this endpoint to create persistent volumes requires that",
+        "the current principal is authorized to create volumes for the",
+        "specific role.",
+        "See the authorization documentation for details."));
+}
+
+
+Future<Response> Master::Http::createVolumes(
+    const Request& request,
+    const Option<string>& principal) const
+{
+  // When current master is not the leader, redirect to the leading master.
+  if (!master->elected()) {
+    return redirect(request);
+  }
+
+  if (request.method != "POST") {
+    return MethodNotAllowed({"POST"}, request.method);
+  }
+
+  // Parse the query string in the request body.
+  Try<hashmap<string, string>> decode =
+    process::http::query::decode(request.body);
+
+  if (decode.isError()) {
+    return BadRequest("Unable to decode query string: " + decode.error());
+  }
+
+  const hashmap<string, string>& values = decode.get();
+
+  Option<string> value;
+
+  value = values.get("slaveId");
+  if (value.isNone()) {
+    return BadRequest("Missing 'slaveId' query parameter");
+  }
+
+  SlaveID slaveId;
+  slaveId.set_value(value.get());
+
+  value = values.get("volumes");
+  if (value.isNone()) {
+    return BadRequest("Missing 'volumes' query parameter");
+  }
+
+  Try<JSON::Array> parse =
+    JSON::parse<JSON::Array>(value.get());
+
+  if (parse.isError()) {
+    return BadRequest(
+        "Error in parsing 'volumes' query parameter: " + parse.error());
+  }
+
+  Resources volumes;
+  foreach (const JSON::Value& value, parse.get().values) {
+    Try<Resource> volume = ::protobuf::parse<Resource>(value);
+    if (volume.isError()) {
+      return BadRequest(
+          "Error in parsing 'volumes' query parameter: " + volume.error());
+    }
+
+    // Since the `+=` operator will silently drop invalid resources, we validate
+    // each resource individually.
+    Option<Error> error = Resources::validate(volume.get());
+    if (error.isSome()) {
+      return BadRequest(error.get().message);
+    }
+
+    volumes += volume.get();
+  }
+
+  return _createVolumes(slaveId, volumes, principal);
 }
 
 
@@ -937,74 +1060,6 @@ Future<Response> Master::Http::_createVolumes(
 
 
 Future<Response> Master::Http::createVolumes(
-    const Request& request,
-    const Option<string>& principal) const
-{
-  // When current master is not the leader, redirect to the leading master.
-  if (!master->elected()) {
-    return redirect(request);
-  }
-
-  if (request.method != "POST") {
-    return MethodNotAllowed({"POST"}, request.method);
-  }
-
-  // Parse the query string in the request body.
-  Try<hashmap<string, string>> decode =
-    process::http::query::decode(request.body);
-
-  if (decode.isError()) {
-    return BadRequest("Unable to decode query string: " + decode.error());
-  }
-
-  const hashmap<string, string>& values = decode.get();
-
-  Option<string> value;
-
-  value = values.get("slaveId");
-  if (value.isNone()) {
-    return BadRequest("Missing 'slaveId' query parameter");
-  }
-
-  SlaveID slaveId;
-  slaveId.set_value(value.get());
-
-  value = values.get("volumes");
-  if (value.isNone()) {
-    return BadRequest("Missing 'volumes' query parameter");
-  }
-
-  Try<JSON::Array> parse =
-    JSON::parse<JSON::Array>(value.get());
-
-  if (parse.isError()) {
-    return BadRequest(
-        "Error in parsing 'volumes' query parameter: " + parse.error());
-  }
-
-  Resources volumes;
-  foreach (const JSON::Value& value, parse.get().values) {
-    Try<Resource> volume = ::protobuf::parse<Resource>(value);
-    if (volume.isError()) {
-      return BadRequest(
-          "Error in parsing 'volumes' query parameter: " + volume.error());
-    }
-
-    // Since the `+=` operator will silently drop invalid resources, we validate
-    // each resource individually.
-    Option<Error> error = Resources::validate(volume.get());
-    if (error.isSome()) {
-      return BadRequest(error.get().message);
-    }
-
-    volumes += volume.get();
-  }
-
-  return _createVolumes(slaveId, volumes, principal);
-}
-
-
-Future<Response> Master::Http::createVolumes(
     const mesos::master::Call& call,
     const Option<string>& principal,
     ContentType /*contentType*/) const
@@ -1012,8 +1067,8 @@ Future<Response> Master::Http::createVolumes(
   CHECK_EQ(mesos::master::Call::CREATE_VOLUMES, call.type());
   CHECK(call.has_create_volumes());
 
-  SlaveID slaveId = call.create_volumes().agent_id();
-  RepeatedPtrField<Resource> volumes = call.create_volumes().volumes();
+  const SlaveID& slaveId = call.create_volumes().slave_id();
+  const RepeatedPtrField<Resource>& volumes = call.create_volumes().volumes();
 
   return _createVolumes(slaveId, volumes, principal);
 }
@@ -1038,55 +1093,12 @@ string Master::Http::DESTROY_VOLUMES_HELP()
         "",
         "Please provide \"slaveId\" and \"volumes\" values designating",
         "the volumes to be destroyed."),
-    AUTHENTICATION(true));
-}
-
-
-Future<Response> Master::Http::_destroyVolumes(
-    const SlaveID& slaveId,
-    const RepeatedPtrField<Resource>& volumes,
-    const Option<string>& principal) const
-{
-  Slave* slave = master->slaves.registered.get(slaveId);
-  if (slave == nullptr) {
-    return BadRequest("No agent found with specified ID");
-  }
-
-  // Create an offer operation.
-  Offer::Operation operation;
-  operation.set_type(Offer::Operation::DESTROY);
-  operation.mutable_destroy()->mutable_volumes()->CopyFrom(volumes);
-
-  Option<Error> validate = validation::operation::validate(
-      operation.destroy(), slave->checkpointedResources);
-
-  if (validate.isSome()) {
-    return BadRequest("Invalid DESTROY operation: " + validate.get().message);
-  }
-
-  return master->authorizeDestroyVolume(operation.destroy(), principal)
-    .then(defer(master->self(), [=](bool authorized) -> Future<Response> {
-      if (!authorized) {
-        return Forbidden();
-      }
-
-      return _operation(slaveId, volumes, operation);
-    }));
-}
-
-
-Future<Response> Master::Http::destroyVolumes(
-    const mesos::master::Call& call,
-    const Option<string>& principal,
-    ContentType /*contentType*/) const
-{
-  CHECK_EQ(mesos::master::Call::DESTROY_VOLUMES, call.type());
-  CHECK(call.has_destroy_volumes());
-
-  SlaveID slaveId = call.destroy_volumes().agent_id();
-  RepeatedPtrField<Resource> volumes = call.destroy_volumes().volumes();
-
-  return _destroyVolumes(slaveId, volumes, principal);
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Using this endpoint to destroy persistent volumes requires that",
+        "the current principal is authorized to destroy volumes created",
+        "by the principal who created the volume.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -1158,6 +1170,57 @@ Future<Response> Master::Http::destroyVolumes(
 }
 
 
+Future<Response> Master::Http::_destroyVolumes(
+    const SlaveID& slaveId,
+    const RepeatedPtrField<Resource>& volumes,
+    const Option<string>& principal) const
+{
+  Slave* slave = master->slaves.registered.get(slaveId);
+  if (slave == nullptr) {
+    return BadRequest("No agent found with specified ID");
+  }
+
+  // Create an offer operation.
+  Offer::Operation operation;
+  operation.set_type(Offer::Operation::DESTROY);
+  operation.mutable_destroy()->mutable_volumes()->CopyFrom(volumes);
+
+  Option<Error> validate = validation::operation::validate(
+      operation.destroy(),
+      slave->checkpointedResources,
+      slave->usedResources,
+      slave->pendingTasks);
+
+  if (validate.isSome()) {
+    return BadRequest("Invalid DESTROY operation: " + validate.get().message);
+  }
+
+  return master->authorizeDestroyVolume(operation.destroy(), principal)
+    .then(defer(master->self(), [=](bool authorized) -> Future<Response> {
+      if (!authorized) {
+        return Forbidden();
+      }
+
+      return _operation(slaveId, volumes, operation);
+    }));
+}
+
+
+Future<Response> Master::Http::destroyVolumes(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType /*contentType*/) const
+{
+  CHECK_EQ(mesos::master::Call::DESTROY_VOLUMES, call.type());
+  CHECK(call.has_destroy_volumes());
+
+  const SlaveID& slaveId = call.destroy_volumes().slave_id();
+  const RepeatedPtrField<Resource>& volumes = call.destroy_volumes().volumes();
+
+  return _destroyVolumes(slaveId, volumes, principal);
+}
+
+
 string Master::Http::FRAMEWORKS_HELP()
 {
   return HELP(
@@ -1168,51 +1231,503 @@ string Master::Http::FRAMEWORKS_HELP()
         "current master is not the leader.",
         "Returns 503 SERVICE_UNAVAILABLE if the leading master cannot be",
         "found."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "This endpoint might be filtered based on the user accessing it.",
+        "See the authorization documentation for details."));
 }
 
 
 Future<Response> Master::Http::frameworks(
     const Request& request,
-    const Option<string>& /*principal*/) const
+    const Option<string>& principal) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
   }
 
-  auto frameworks = [this](JSON::ObjectWriter* writer) {
-    // Model all of the frameworks.
-    writer->field("frameworks", [this](JSON::ArrayWriter* writer) {
-      foreachvalue (Framework* framework, master->frameworks.registered) {
-        writer->element(Full<Framework>(*framework));
-      }
-    });
+  // Retrieve `ObjectApprover`s for authorizing frameworks and tasks and
+  // executors.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> tasksApprover;
+  Future<Owned<ObjectApprover>> executorsApprover;
 
-    // Model all of the completed frameworks.
-    writer->field("completed_frameworks", [this](JSON::ArrayWriter* writer) {
-      foreach (const std::shared_ptr<Framework>& framework,
-               master->frameworks.completed) {
-        writer->element(Full<Framework>(*framework));
-      }
-    });
+  if (master->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
 
-    // Model all currently unregistered frameworks. This can happen
-    // when a framework has yet to re-register after master failover.
-    writer->field("unregistered_frameworks", [this](JSON::ArrayWriter* writer) {
-      // Find unregistered frameworks.
-      foreachvalue (const Slave* slave, master->slaves.registered) {
-        foreachkey (const FrameworkID& frameworkId, slave->tasks) {
-          if (!master->frameworks.registered.contains(frameworkId)) {
-            writer->element(frameworkId.value());
+    frameworksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    tasksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_TASK);
+
+    executorsApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_EXECUTOR);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, tasksApprover, executorsApprover)
+    .then(defer(master->self(),
+        [this, request](const tuple<Owned<ObjectApprover>,
+                                    Owned<ObjectApprover>,
+                                    Owned<ObjectApprover>>& approvers)
+          -> Response {
+      // This lambda is consumed before the outer lambda
+      // returns, hence capture by reference is fine here.
+      auto frameworks = [this, &approvers](JSON::ObjectWriter* writer) {
+        // Get approver from tuple.
+        Owned<ObjectApprover> frameworksApprover;
+        Owned<ObjectApprover> tasksApprover;
+        Owned<ObjectApprover> executorsApprover;
+        tie(frameworksApprover, tasksApprover, executorsApprover) = approvers;
+
+        // Model all of the frameworks.
+        writer->field(
+            "frameworks",
+            [this, &frameworksApprover, &executorsApprover, &tasksApprover](
+                JSON::ArrayWriter* writer) {
+              foreachvalue (Framework* framework,
+                            master->frameworks.registered) {
+                // Skip unauthorized frameworks.
+                if (!approveViewFrameworkInfo(
+                        frameworksApprover, framework->info)) {
+                  continue;
+                }
+
+                FullFrameworkWriter frameworkWriter(
+                    tasksApprover,
+                    executorsApprover,
+                    framework);
+
+                writer->element(frameworkWriter);
+              }
+            });
+
+        // Model all of the completed frameworks.
+        writer->field(
+            "completed_frameworks",
+            [this, &frameworksApprover, &executorsApprover, &tasksApprover](
+                JSON::ArrayWriter* writer) {
+              foreach (const std::shared_ptr<Framework>& framework,
+                       master->frameworks.completed) {
+                // Skip unauthorized frameworks.
+                if (!approveViewFrameworkInfo(
+                        frameworksApprover, framework->info)) {
+                  continue;
+                }
+
+                FullFrameworkWriter frameworkWriter(
+                    tasksApprover,
+                    executorsApprover,
+                    framework.get());
+
+                writer->element(frameworkWriter);
+              }
+            });
+
+        // Model all currently unregistered frameworks. This can happen
+        // when a framework has yet to re-register after master failover.
+        writer->field("unregistered_frameworks", [this](
+            JSON::ArrayWriter* writer) {
+          // Find unregistered frameworks.
+          foreachvalue (const Slave* slave, master->slaves.registered) {
+            foreachkey (const FrameworkID& frameworkId, slave->tasks) {
+              if (!master->frameworks.registered.contains(frameworkId)) {
+                writer->element(frameworkId.value());
+              }
+            }
           }
+        });
+      };
+
+      return OK(jsonify(frameworks), request.url.query.get("jsonp"));
+  }));
+}
+
+
+mesos::master::Response::GetFrameworks::Framework model(
+    const Framework& framework)
+{
+  mesos::master::Response::GetFrameworks::Framework _framework;
+
+  _framework.mutable_framework_info()->CopyFrom(framework.info);
+
+  _framework.set_active(framework.active);
+  _framework.set_connected(framework.connected);
+
+  int64_t time = framework.registeredTime.duration().ns();
+  if (time != 0) {
+    _framework.mutable_registered_time()->set_nanoseconds(time);
+  }
+
+  time = framework.unregisteredTime.duration().ns();
+  if (time != 0) {
+    _framework.mutable_unregistered_time()->set_nanoseconds(time);
+  }
+
+  time = framework.reregisteredTime.duration().ns();
+  if (time != 0) {
+    _framework.mutable_reregistered_time()->set_nanoseconds(time);
+  }
+
+  foreach (const Offer* offer, framework.offers) {
+    _framework.mutable_offers()->Add()->CopyFrom(*offer);
+  }
+
+  foreach (const InverseOffer* offer, framework.inverseOffers) {
+    _framework.mutable_inverse_offers()->Add()->CopyFrom(*offer);
+  }
+
+  foreach (const Resource& resource, framework.totalUsedResources) {
+    _framework.mutable_allocated_resources()->Add()->CopyFrom(resource);
+  }
+
+  foreach (const Resource& resource, framework.totalOfferedResources) {
+    _framework.mutable_offered_resources()->Add()->CopyFrom(resource);
+  }
+
+  return _framework;
+}
+
+
+Future<Response> Master::Http::getFrameworks(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::GET_FRAMEWORKS, call.type());
+
+  // Retrieve `ObjectApprover`s for authorizing frameworks.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+
+  if (master->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return frameworksApprover
+    .then(defer(master->self(),
+        [=](const Owned<ObjectApprover>& frameworksApprover)
+          -> Future<Response> {
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::GET_FRAMEWORKS);
+      response.mutable_get_frameworks()->CopyFrom(
+          _getFrameworks(frameworksApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    }));
+}
+
+
+mesos::master::Response::GetFrameworks Master::Http::_getFrameworks(
+    const Owned<ObjectApprover>& frameworksApprover) const
+{
+  mesos::master::Response::GetFrameworks getFrameworks;
+  foreachvalue (const Framework* framework,
+                master->frameworks.registered) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    getFrameworks.add_frameworks()->CopyFrom(model(*framework));
+  }
+
+  foreach (const std::shared_ptr<Framework>& framework,
+           master->frameworks.completed) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    getFrameworks.add_completed_frameworks()->CopyFrom(model(*framework));
+  }
+
+  foreachvalue (const Slave* slave, master->slaves.registered) {
+    foreachkey (const FrameworkID& frameworkId, slave->tasks) {
+      if (!master->frameworks.registered.contains(frameworkId)) {
+        // TODO(haosdent): This logic should be simplified after
+        // a deprecation cycle starting with 1.0 as after that
+        // we can rely on `master->frameworks.recovered` containing
+        // all FrameworkInfos.
+        // Until then there are 3 cases:
+        // - No authorization enabled: show all orphaned frameworks.
+        // - Authorization enabled, but no FrameworkInfo present:
+        //   do not show orphaned frameworks.
+        // - Authorization enabled, FrameworkInfo present: filter
+        //   based on `approveViewFrameworkInfo`.
+        if (master->authorizer.isSome() &&
+           (!master->frameworks.recovered.contains(frameworkId) ||
+            !approveViewFrameworkInfo(
+                frameworksApprover,
+                master->frameworks.recovered[frameworkId]))) {
+          continue;
+        }
+
+        getFrameworks.add_recovered_frameworks()->CopyFrom(
+            master->frameworks.recovered[frameworkId]);
+      }
+    }
+  }
+
+  return getFrameworks;
+}
+
+
+Future<Response> Master::Http::getExecutors(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::GET_EXECUTORS, call.type());
+
+  // Retrieve `ObjectApprover`s for authorizing frameworks and executors.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> executorsApprover;
+  if (master->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    executorsApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_EXECUTOR);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, executorsApprover)
+    .then(defer(master->self(),
+        [=](const tuple<Owned<ObjectApprover>,
+                        Owned<ObjectApprover>>& approvers)
+          -> Future<Response> {
+      // Get approver from tuple.
+      Owned<ObjectApprover> frameworksApprover;
+      Owned<ObjectApprover> executorsApprover;
+      tie(frameworksApprover, executorsApprover) = approvers;
+
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::GET_EXECUTORS);
+
+      response.mutable_get_executors()->CopyFrom(
+          _getExecutors(frameworksApprover, executorsApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    }));
+}
+
+
+mesos::master::Response::GetExecutors Master::Http::_getExecutors(
+      const Owned<ObjectApprover>& frameworksApprover,
+      const Owned<ObjectApprover>& executorsApprover) const
+{
+  // Construct framework list with both active and completed frameworks.
+  vector<const Framework*> frameworks;
+  foreachvalue (Framework* framework, master->frameworks.registered) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework);
+  }
+
+  foreach (const std::shared_ptr<Framework>& framework,
+           master->frameworks.completed) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework.get());
+  }
+
+  mesos::master::Response::GetExecutors getExecutors;
+
+  foreach (const Framework* framework, frameworks) {
+    foreachpair (const SlaveID& slaveId,
+                 const auto& executorsMap,
+                 framework->executors) {
+      foreachvalue (const ExecutorInfo& executorInfo, executorsMap) {
+        // Skip unauthorized executors.
+        if (!approveViewExecutorInfo(executorsApprover,
+                                     executorInfo,
+                                     framework->info)) {
+          continue;
+        }
+
+        mesos::master::Response::GetExecutors::Executor* executor =
+          getExecutors.add_executors();
+
+        executor->mutable_executor_info()->CopyFrom(executorInfo);
+        executor->mutable_slave_id()->CopyFrom(slaveId);
+      }
+    }
+  }
+
+  // Orphan executors.
+  foreachvalue (const Slave* slave, master->slaves.registered) {
+    typedef hashmap<ExecutorID, ExecutorInfo> ExecutorMap;
+    foreachpair (const FrameworkID& frameworkId,
+                 const ExecutorMap& executors,
+                 slave->executors) {
+      foreachvalue (const ExecutorInfo& executorInfo, executors) {
+        if (!master->frameworks.registered.contains(frameworkId)) {
+          // TODO(haosdent): This logic should be simplified after
+          // a deprecation cycle starting with 1.0 as after that
+          // we can rely on `master->frameworks.recovered` containing
+          // all FrameworkInfos.
+          // Until then there are 3 cases:
+          // - No authorization enabled: show all orphaned executors.
+          // - Authorization enabled, but no FrameworkInfo present:
+          //   do not show orphaned executors.
+          // - Authorization enabled, FrameworkInfo present: filter
+          //   based on `approveViewExecutorInfo`.
+          if (master->authorizer.isSome() &&
+             (!master->frameworks.recovered.contains(frameworkId) ||
+              !approveViewExecutorInfo(
+                  executorsApprover,
+                  executorInfo,
+                  master->frameworks.recovered[frameworkId]))) {
+            continue;
+          }
+
+          mesos::master::Response::GetExecutors::Executor* executor =
+            getExecutors.add_orphan_executors();
+
+          executor->mutable_executor_info()->CopyFrom(executorInfo);
+          executor->mutable_slave_id()->CopyFrom(slave->id);
         }
       }
-    });
+    }
+  }
+
+  return getExecutors;
+}
+
+
+Future<Response> Master::Http::getState(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::GET_STATE, call.type());
+
+  // Retrieve Approvers for authorizing frameworks and tasks.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> tasksApprover;
+  Future<Owned<ObjectApprover>> executorsApprover;
+  if (master->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    tasksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_TASK);
+
+    executorsApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_EXECUTOR);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, tasksApprover, executorsApprover)
+    .then(defer(master->self(),
+      [=](const tuple<Owned<ObjectApprover>,
+                      Owned<ObjectApprover>,
+                      Owned<ObjectApprover>>& approvers)
+        -> Future<Response> {
+      // Get approver from tuple.
+      Owned<ObjectApprover> frameworksApprover;
+      Owned<ObjectApprover> tasksApprover;
+      Owned<ObjectApprover> executorsApprover;
+      tie(frameworksApprover, tasksApprover, executorsApprover) = approvers;
+
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::GET_STATE);
+      response.mutable_get_state()->CopyFrom(
+          _getState(frameworksApprover,
+                    tasksApprover,
+                    executorsApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    }));
+}
+
+
+mesos::master::Response::GetState Master::Http::_getState(
+    const Owned<ObjectApprover>& frameworksApprover,
+    const Owned<ObjectApprover>& tasksApprover,
+    const Owned<ObjectApprover>& executorsApprover) const
+{
+  // NOTE: This function must be blocking instead of returning a
+  // `Future`. This is because `subscribe()` needs to atomically
+  // add subscriber to `subscribers` map and send the captured state
+  // in `SUBSCRIBED` without being interleaved by any other events.
+
+  mesos::master::Response::GetState getState;
+
+  getState.mutable_get_tasks()->CopyFrom(
+    _getTasks(frameworksApprover, tasksApprover));
+
+  getState.mutable_get_executors()->CopyFrom(
+    _getExecutors(frameworksApprover, executorsApprover));
+
+  getState.mutable_get_frameworks()->CopyFrom(
+    _getFrameworks(frameworksApprover));
+
+  getState.mutable_get_agents()->CopyFrom(_getAgents());
+
+  return getState;
+}
+
+
+class Master::Http::FlagsError : public Error
+{
+public:
+  enum Type
+  {
+    UNAUTHORIZED
   };
 
-  return OK(jsonify(frameworks), request.url.query.get("jsonp"));
-}
+  // TODO(arojas): Provide a proper string representation of the enum.
+  explicit FlagsError(Type _type)
+    : Error(stringify(_type)), type(_type) {}
+
+  FlagsError(Type _type, const string& _message)
+    : Error(stringify(_type)), type(_type), message(_message) {}
+
+  const Type type;
+  const string message;
+};
 
 
 string Master::Http::FLAGS_HELP()
@@ -1220,7 +1735,11 @@ string Master::Http::FLAGS_HELP()
   return HELP(
     TLDR("Exposes the master's flag configuration."),
     None(),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Querying this endpoint requires that the current principal",
+        "is authorized to view all flags.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -1234,11 +1753,53 @@ Future<Response> Master::Http::flags(
     return MethodNotAllowed({"GET"}, request.method);
   }
 
-  return OK(_flags(), request.url.query.get("jsonp"));
+  Option<string> jsonp = request.url.query.get("jsonp");
+
+  return _flags(principal)
+      .then([jsonp](const Try<JSON::Object, FlagsError>& flags)
+            -> Future<Response> {
+        if (flags.isError()) {
+          switch (flags.error().type) {
+            case FlagsError::Type::UNAUTHORIZED:
+              return Forbidden();
+          }
+
+          return InternalServerError(flags.error().message);
+        }
+
+        return OK(flags.get(), jsonp);
+      });
 }
 
 
-JSON::Object Master::Http::_flags() const
+Future<Try<JSON::Object, Master::Http::FlagsError>> Master::Http::_flags(
+    const Option<string>& principal) const
+{
+  if (master->authorizer.isNone()) {
+    return __flags();
+  }
+
+  authorization::Request authRequest;
+  authRequest.set_action(authorization::VIEW_FLAGS);
+
+  if (principal.isSome()) {
+    authRequest.mutable_subject()->set_value(principal.get());
+  }
+
+  return master->authorizer.get()->authorized(authRequest)
+      .then(defer(
+          master->self(),
+          [this](bool authorized) -> Future<Try<JSON::Object, FlagsError>> {
+        if (authorized) {
+          return __flags();
+        } else {
+          return FlagsError(FlagsError::Type::UNAUTHORIZED);
+        }
+      }));
+}
+
+
+JSON::Object Master::Http::__flags() const
 {
   JSON::Object object;
 
@@ -1264,9 +1825,23 @@ Future<Response> Master::Http::getFlags(
 {
   CHECK_EQ(mesos::master::Call::GET_FLAGS, call.type());
 
-  return OK(serialize(contentType,
-                      evolve<v1::master::Response::GET_FLAGS>(_flags())),
+  return _flags(principal)
+      .then([contentType](const Try<JSON::Object, FlagsError>& flags)
+            -> Future<Response> {
+        if (flags.isError()) {
+          switch (flags.error().type) {
+            case FlagsError::Type::UNAUTHORIZED:
+              return Forbidden();
+          }
+
+          return InternalServerError(flags.error().message);
+        }
+
+        return OK(
+            serialize(contentType,
+                      evolve<v1::master::Response::GET_FLAGS>(flags.get())),
             stringify(contentType));
+      });
 }
 
 
@@ -1384,64 +1959,24 @@ Future<Response> Master::Http::setLoggingLevel(
 }
 
 
-Future<Response> Master::Http::getLeadingMaster(
+Future<Response> Master::Http::getMaster(
     const mesos::master::Call& call,
     const Option<string>& principal,
     ContentType contentType) const
 {
-  CHECK_EQ(mesos::master::Call::GET_LEADING_MASTER, call.type());
+  CHECK_EQ(mesos::master::Call::GET_MASTER, call.type());
 
   mesos::master::Response response;
-  response.set_type(mesos::master::Response::GET_LEADING_MASTER);
+  response.set_type(mesos::master::Response::GET_MASTER);
 
   // It is guaranteed that this master has been elected as the leader.
   CHECK(master->elected());
 
-  response.mutable_get_leading_master()->mutable_master_info()->CopyFrom(
-    master->info());
+  response.mutable_get_master()->mutable_master_info()->CopyFrom(
+      master->info());
 
   return OK(serialize(contentType, evolve(response)),
             stringify(contentType));
-}
-
-
-Future<Response> Master::Http::reserveResources(
-    const mesos::master::Call& call,
-    const Option<string>& principal,
-    ContentType contentType) const
-{
-  CHECK_EQ(mesos::master::Call::RESERVE_RESOURCES, call.type());
-
-  const SlaveID& slaveId = call.reserve_resources().agent_id();
-
-  Slave* slave = master->slaves.registered.get(slaveId);
-  if (slave == nullptr) {
-    return BadRequest("No agent found with specified ID");
-  }
-
-  const Resources& resources = call.reserve_resources().resources();
-
-  return _reserve(slaveId, resources, principal);
-}
-
-
-Future<Response> Master::Http::unreserveResources(
-    const mesos::master::Call& call,
-    const Option<string>& principal,
-    ContentType contentType) const
-{
-  CHECK_EQ(mesos::master::Call::UNRESERVE_RESOURCES, call.type());
-
-  const SlaveID& slaveId = call.unreserve_resources().agent_id();
-
-  Slave* slave = master->slaves.registered.get(slaveId);
-  if (slave == nullptr) {
-    return BadRequest("No agent found with specified ID");
-  }
-
-  const Resources& resources = call.unreserve_resources().resources();
-
-  return _unreserve(slaveId, resources, principal);
 }
 
 
@@ -1504,7 +2039,11 @@ Future<Response> Master::Http::redirect(const Request& request) const
     // base url of leading master to avoid infinite redirect loop.
     return TemporaryRedirect(basePath);
   } else {
-    return TemporaryRedirect(basePath + request.url.path);
+    // `request.url` is not absolute so we can safely append it to
+    // `basePath`. See https://tools.ietf.org/html/rfc2616#section-5.1.2
+    // for details.
+    CHECK(!request.url.isAbsolute());
+    return TemporaryRedirect(basePath + stringify(request.url));
   }
 }
 
@@ -1528,7 +2067,12 @@ string Master::Http::RESERVE_HELP()
         "",
         "Please provide \"slaveId\" and \"resources\" values designating",
         "the resources to be reserved."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Using this endpoint to reserve resources requires that the",
+        "current principal is authorized to reserve resources for the",
+        "specific role.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -1564,11 +2108,6 @@ Future<Response> Master::Http::reserve(
 
   SlaveID slaveId;
   slaveId.set_value(value.get());
-
-  Slave* slave = master->slaves.registered.get(slaveId);
-  if (slave == nullptr) {
-    return BadRequest("No agent found with specified ID");
-  }
 
   value = values.get("resources");
   if (value.isNone()) {
@@ -1610,6 +2149,11 @@ Future<Response> Master::Http::_reserve(
     const Resources& resources,
     const Option<string>& principal) const
 {
+  Slave* slave = master->slaves.registered.get(slaveId);
+  if (slave == nullptr) {
+    return BadRequest("No agent found with specified ID");
+  }
+
   // Create an offer operation.
   Offer::Operation operation;
   operation.set_type(Offer::Operation::RESERVE);
@@ -1634,6 +2178,20 @@ Future<Response> Master::Http::_reserve(
       // ReservationInfo from the resources.
       return _operation(slaveId, resources.flatten(), operation);
     }));
+}
+
+
+Future<Response> Master::Http::reserveResources(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::RESERVE_RESOURCES, call.type());
+
+  const SlaveID& slaveId = call.reserve_resources().slave_id();
+  const Resources& resources = call.reserve_resources().resources();
+
+  return _reserve(slaveId, resources, principal);
 }
 
 
@@ -1730,10 +2288,18 @@ Future<process::http::Response> Master::Http::getAgents(
 
   mesos::master::Response response;
   response.set_type(mesos::master::Response::GET_AGENTS);
+  response.mutable_get_agents()->CopyFrom(_getAgents());
 
+  return OK(serialize(contentType, evolve(response)),
+            stringify(contentType));
+}
+
+
+mesos::master::Response::GetAgents Master::Http::_getAgents() const
+{
+  mesos::master::Response::GetAgents getAgents;
   foreachvalue (const Slave* slave, master->slaves.registered) {
-    mesos::master::Response::GetAgents::Agent* agent =
-        response.mutable_get_agents()->add_agents();
+    mesos::master::Response::GetAgents::Agent* agent = getAgents.add_agents();
 
     agent->mutable_agent_info()->CopyFrom(slave->info);
 
@@ -1762,8 +2328,7 @@ Future<process::http::Response> Master::Http::getAgents(
     }
   }
 
-  return OK(serialize(contentType, evolve(response)),
-            stringify(contentType));
+  return getAgents;
 }
 
 
@@ -1858,8 +2423,6 @@ Future<Response> Master::Http::weights(
     return redirect(request);
   }
 
-  // TODO(Yongqiao Wang): `/roles` endpoint also shows the weights information,
-  // consider erasing the duplicated information later.
   if (request.method == "GET") {
     return weightsHandler.get(request, principal);
   }
@@ -1886,6 +2449,8 @@ string Master::Http::STATE_HELP()
         "found.",
         "This endpoint shows information about the frameworks, tasks,",
         "executors and agents running in the cluster as a JSON object.",
+        "The information shown might be filtered based on the user",
+        "accessing the endpoint.",
         "",
         "Example (**Note**: this is not exhaustive):",
         "",
@@ -1956,7 +2521,12 @@ string Master::Http::STATE_HELP()
         "    \"unregistered_frameworks\" : []",
         "}",
         "```"),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "This endpoint might be filtered based on the user accessing it.",
+        "For example a user might only see the subset of frameworks,",
+        "tasks, and executors they are allowed to view.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -1973,6 +2543,7 @@ Future<Response> Master::Http::state(
   Future<Owned<ObjectApprover>> frameworksApprover;
   Future<Owned<ObjectApprover>> tasksApprover;
   Future<Owned<ObjectApprover>> executorsApprover;
+  Future<Owned<ObjectApprover>> flagsApprover;
 
   if (master->authorizer.isSome()) {
     authorization::Subject subject;
@@ -1988,15 +2559,24 @@ Future<Response> Master::Http::state(
 
     executorsApprover = master->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_EXECUTOR);
+
+    flagsApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FLAGS);
   } else {
     frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
     tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
     executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    flagsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
   }
 
-  return collect(frameworksApprover, tasksApprover, executorsApprover)
+  return collect(
+      frameworksApprover,
+      tasksApprover,
+      executorsApprover,
+      flagsApprover)
     .then(defer(master->self(),
         [this, request](const tuple<Owned<ObjectApprover>,
+                                    Owned<ObjectApprover>,
                                     Owned<ObjectApprover>,
                                     Owned<ObjectApprover>>& approvers)
           -> Response {
@@ -2007,7 +2587,11 @@ Future<Response> Master::Http::state(
         Owned<ObjectApprover> frameworksApprover;
         Owned<ObjectApprover> tasksApprover;
         Owned<ObjectApprover> executorsApprover;
-        tie(frameworksApprover, tasksApprover, executorsApprover) = approvers;
+        Owned<ObjectApprover> flagsApprover;
+        tie(frameworksApprover,
+            tasksApprover,
+            executorsApprover,
+            flagsApprover) = approvers;
 
         writer->field("version", MESOS_VERSION);
 
@@ -2038,31 +2622,33 @@ Future<Response> Master::Http::state(
         writer->field("activated_slaves", master->_slaves_active());
         writer->field("deactivated_slaves", master->_slaves_inactive());
 
-        if (master->flags.cluster.isSome()) {
-          writer->field("cluster", master->flags.cluster.get());
-        }
-
         if (master->leader.isSome()) {
           writer->field("leader", master->leader.get().pid());
         }
 
-        if (master->flags.log_dir.isSome()) {
-          writer->field("log_dir", master->flags.log_dir.get());
-        }
-
-        if (master->flags.external_log_file.isSome()) {
-          writer->field("external_log_file",
-             master->flags.external_log_file.get());
-        }
-
-        writer->field("flags", [this](JSON::ObjectWriter* writer) {
-          foreachvalue (const flags::Flag& flag, master->flags) {
-            Option<string> value = flag.stringify(master->flags);
-            if (value.isSome()) {
-              writer->field(flag.effective_name().value, value.get());
-            }
+        if (approveViewFlags(flagsApprover)) {
+          if (master->flags.cluster.isSome()) {
+            writer->field("cluster", master->flags.cluster.get());
           }
-        });
+
+          if (master->flags.log_dir.isSome()) {
+            writer->field("log_dir", master->flags.log_dir.get());
+          }
+
+          if (master->flags.external_log_file.isSome()) {
+            writer->field("external_log_file",
+                          master->flags.external_log_file.get());
+          }
+
+          writer->field("flags", [this](JSON::ObjectWriter* writer) {
+              foreachvalue (const flags::Flag& flag, master->flags) {
+                Option<string> value = flag.stringify(master->flags);
+                if (value.isSome()) {
+                  writer->field(flag.effective_name().value, value.get());
+                }
+              }
+            });
+        }
 
         // Model all of the slaves.
         writer->field("slaves", [this](JSON::ArrayWriter* writer) {
@@ -2116,15 +2702,35 @@ Future<Response> Master::Http::state(
             });
 
         // Model all of the orphan tasks.
-        writer->field("orphan_tasks", [this](JSON::ArrayWriter* writer) {
+        writer->field("orphan_tasks", [this, &tasksApprover](
+            JSON::ArrayWriter* writer) {
           // Find those orphan tasks.
           foreachvalue (const Slave* slave, master->slaves.registered) {
             typedef hashmap<TaskID, Task*> TaskMap;
             foreachvalue (const TaskMap& tasks, slave->tasks) {
               foreachvalue (const Task* task, tasks) {
                 CHECK_NOTNULL(task);
-                if (!master->frameworks.registered.contains(
-                    task->framework_id())) {
+                const FrameworkID& frameworkId = task->framework_id();
+                if (!master->frameworks.registered.contains(frameworkId)) {
+                  // TODO(joerg84): This logic should be simplified after
+                  // a deprecation cycle starting with 1.0 as after that
+                  // we can rely on 'master->frameworks.recovered' containing
+                  // all FrameworkInfos.
+                  // Until then there are 3 cases:
+                  // - No authorization enabled: show all orphaned tasks.
+                  // - Authorization enabled, but no FrameworkInfo present:
+                  //   do not show orphaned tasks.
+                  // - Authorization enabled, FrameworkInfo present: filter
+                  //   based on 'approveViewTask'.
+                  if (master->authorizer.isSome() &&
+                     (!master->frameworks.recovered.contains(frameworkId) ||
+                      !approveViewTask(
+                          tasksApprover,
+                          *task,
+                          master->frameworks.recovered[frameworkId]))) {
+                    continue;
+                  }
+
                   writer->element(*task);
                 }
               }
@@ -2134,6 +2740,8 @@ Future<Response> Master::Http::state(
 
         // Model all currently unregistered frameworks. This can happen
         // when a framework has yet to re-register after master failover.
+        // TODO(vinod): Need to filter these frameworks based on authorization!
+        // See the TODO above for "orphan_tasks" for further details.
         writer->field("unregistered_frameworks", [this](
             JSON::ArrayWriter* writer) {
           // Find unregistered frameworks.
@@ -2149,6 +2757,56 @@ Future<Response> Master::Http::state(
 
       return OK(jsonify(state), request.url.query.get("jsonp"));
     }));
+}
+
+
+Future<Response> Master::Http::readFile(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::READ_FILE, call.type());
+
+  const size_t offset = call.read_file().offset();
+  const string& path = call.read_file().path();
+
+  Option<size_t> length;
+  if (call.read_file().has_length()) {
+    length = call.read_file().length();
+  }
+
+  return master->files->read(offset, length, path, principal)
+    .then([contentType](const Try<tuple<size_t, string>, FilesError>& result)
+        -> Future<Response> {
+      if (result.isError()) {
+        const FilesError& error = result.error();
+
+        switch (error.type) {
+          case FilesError::Type::INVALID:
+            return BadRequest(error.message);
+
+          case FilesError::Type::UNAUTHORIZED:
+            return Forbidden(error.message);
+
+          case FilesError::Type::NOT_FOUND:
+            return NotFound(error.message);
+
+          case FilesError::Type::UNKNOWN:
+            return InternalServerError(error.message);
+        }
+
+        UNREACHABLE();
+      }
+
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::READ_FILE);
+
+      response.mutable_read_file()->set_size(std::get<0>(result.get()));
+      response.mutable_read_file()->set_data(std::get<1>(result.get()));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    });
 }
 
 
@@ -2218,7 +2876,12 @@ struct TaskStateSummary
       killed(0),
       failed(0),
       lost(0),
-      error(0) {}
+      error(0),
+      dropped(0),
+      unreachable(0),
+      gone(0),
+      gone_by_operator(0),
+      unknown(0) {}
 
   // Account for the state of the given task.
   void count(const Task& task)
@@ -2233,6 +2896,11 @@ struct TaskStateSummary
       case TASK_FAILED: { ++failed; break; }
       case TASK_LOST: { ++lost; break; }
       case TASK_ERROR: { ++error; break; }
+      case TASK_DROPPED: { ++dropped; break; }
+      case TASK_UNREACHABLE: { ++unreachable; break; }
+      case TASK_GONE: { ++gone; break; }
+      case TASK_GONE_BY_OPERATOR: { ++gone_by_operator; break; }
+      case TASK_UNKNOWN: { ++unknown; break; }
       // No default case allows for a helpful compiler error if we
       // introduce a new state.
     }
@@ -2247,6 +2915,11 @@ struct TaskStateSummary
   size_t failed;
   size_t lost;
   size_t error;
+  size_t dropped;
+  size_t unreachable;
+  size_t gone;
+  size_t gone_by_operator;
+  size_t unknown;
 };
 
 
@@ -2314,8 +2987,15 @@ string Master::Http::STATESUMMARY_HELP()
         "Returns 503 SERVICE_UNAVAILABLE if the leading master cannot be",
         "found.",
         "This endpoint gives a summary of the state of all tasks and",
-        "registered frameworks in the cluster as a JSON object."),
-    AUTHENTICATION(true));
+        "registered frameworks in the cluster as a JSON object.",
+        "The information shown might be filtered based on the user",
+        "accessing the endpoint."),
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "This endpoint might be filtered based on the user accessing it.",
+        "For example a user might only see the subset of frameworks",
+        "they are allowed to view.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -2384,6 +3064,7 @@ Future<Response> Master::Http::stateSummary(
               const TaskStateSummary& summary =
                 taskStateSummaries.slave(slave->id);
 
+              // TODO(neilc): Update for new PARTITION_AWARE task statuses.
               writer->field("TASK_STAGING", summary.staging);
               writer->field("TASK_STARTING", summary.starting);
               writer->field("TASK_RUNNING", summary.running);
@@ -2434,6 +3115,7 @@ Future<Response> Master::Http::stateSummary(
               const TaskStateSummary& summary =
                 taskStateSummaries.framework(frameworkId);
 
+              // TODO(neilc): Update for new PARTITION_AWARE task statuses.
               writer->field("TASK_STAGING", summary.staging);
               writer->field("TASK_STARTING", summary.starting);
               writer->field("TASK_RUNNING", summary.running);
@@ -2521,65 +3203,157 @@ string Master::Http::ROLES_HELP()
 }
 
 
+Future<vector<string>> Master::Http::_roles(
+        const Option<string>& principal) const
+{
+  // Retrieve `ObjectApprover`s for authorizing roles.
+  Future<Owned<ObjectApprover>> rolesApprover;
+
+  if (master->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    rolesApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_ROLE);
+
+  } else {
+    rolesApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return rolesApprover
+    .then(defer(master->self(),
+        [this](const Owned<ObjectApprover>& rolesApprover)
+          -> vector<string> {
+      JSON::Object object;
+
+      // Compute the role names to return results for. When an explicit
+      // role whitelist has been configured, we use that list of names.
+      // When using implicit roles, the right behavior is a bit more
+      // subtle. There are no constraints on possible role names, so we
+      // instead list all the "interesting" roles: the default role ("*"),
+      // all roles with one or more registered frameworks, and all roles
+      // with a non-default weight or quota.
+      //
+      // NOTE: we use a `std::set` to store the role names to ensure a
+      // deterministic output order.
+      set<string> roleList;
+      if (master->roleWhitelist.isSome()) {
+        const hashset<string>& whitelist = master->roleWhitelist.get();
+        roleList.insert(whitelist.begin(), whitelist.end());
+      } else {
+        roleList.insert("*"); // Default role.
+        roleList.insert(
+            master->activeRoles.keys().begin(),
+            master->activeRoles.keys().end());
+        roleList.insert(
+            master->weights.keys().begin(),
+            master->weights.keys().end());
+        roleList.insert(
+            master->quotas.keys().begin(),
+            master->quotas.keys().end());
+      }
+
+      vector<string> filteredRoleList;
+      filteredRoleList.reserve(roleList.size());
+
+      foreach (const string& role, roleList) {
+        if (approveViewRole(rolesApprover, role)) {
+          filteredRoleList.push_back(role);
+        }
+      }
+
+      return filteredRoleList;
+    }));
+}
+
+
 Future<Response> Master::Http::roles(
     const Request& request,
-    const Option<string>& /*principal*/) const
+    const Option<string>& principal) const
 {
   // When current master is not the leader, redirect to the leading master.
   if (!master->elected()) {
     return redirect(request);
   }
 
-  JSON::Object object;
+  return _roles(principal)
+    .then(defer(master->self(),
+        [this, request](const vector<string>& filteredRoles)
+          -> Response {
+      JSON::Object object;
 
-  // Compute the role names to return results for. When an explicit
-  // role whitelist has been configured, we use that list of names.
-  // When using implicit roles, the right behavior is a bit more
-  // subtle. There are no constraints on possible role names, so we
-  // instead list all the "interesting" roles: the default role ("*"),
-  // all roles with one or more registered frameworks, and all roles
-  // with a non-default weight or quota.
-  //
-  // NOTE: we use a `std::set` to store the role names to ensure a
-  // deterministic output order.
-  set<string> roleList;
-  if (master->roleWhitelist.isSome()) {
-    const hashset<string>& whitelist = master->roleWhitelist.get();
-    roleList.insert(whitelist.begin(), whitelist.end());
-  } else {
-    roleList.insert("*"); // Default role.
-    roleList.insert(
-        master->activeRoles.keys().begin(),
-        master->activeRoles.keys().end());
-    roleList.insert(
-        master->weights.keys().begin(),
-        master->weights.keys().end());
-    roleList.insert(
-        master->quotas.keys().begin(),
-        master->quotas.keys().end());
-  }
+      {
+        JSON::Array array;
 
-  {
-    JSON::Array array;
+        foreach (const string& name, filteredRoles) {
+          Option<double> weight = None();
+          if (master->weights.contains(name)) {
+            weight = master->weights[name];
+          }
 
-    foreach (const string& name, roleList) {
-      Option<double> weight = None();
-      if (master->weights.contains(name)) {
-        weight = master->weights[name];
+          Option<Role*> role = None();
+          if (master->activeRoles.contains(name)) {
+            role = master->activeRoles[name];
+          }
+
+          array.values.push_back(model(name, weight, role));
+        }
+
+        object.values["roles"] = std::move(array);
       }
 
-      Option<Role*> role = None();
-      if (master->activeRoles.contains(name)) {
-        role = master->activeRoles[name];
+      return OK(object, request.url.query.get("jsonp"));
+    }));
+}
+
+
+Future<Response> Master::Http::listFiles(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::LIST_FILES, call.type());
+
+  const string& path = call.list_files().path();
+
+  return master->files->browse(path, principal)
+    .then([contentType](const Try<list<FileInfo>, FilesError>& result)
+      -> Future<Response> {
+      if (result.isError()) {
+        const FilesError& error = result.error();
+
+        switch (error.type) {
+          case FilesError::Type::INVALID:
+            return BadRequest(error.message);
+
+          case FilesError::Type::UNAUTHORIZED:
+            return Forbidden(error.message);
+
+          case FilesError::Type::NOT_FOUND:
+            return NotFound(error.message);
+
+          case FilesError::Type::UNKNOWN:
+            return InternalServerError(error.message);
+        }
+
+        UNREACHABLE();
       }
 
-      array.values.push_back(model(name, weight, role));
-    }
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::LIST_FILES);
 
-    object.values["roles"] = std::move(array);
-  }
+      mesos::master::Response::ListFiles* listFiles =
+        response.mutable_list_files();
 
-  return OK(object, request.url.query.get("jsonp"));
+      foreach (const FileInfo& fileInfo, result.get()) {
+        listFiles->add_file_infos()->CopyFrom(fileInfo);
+      }
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    });
 }
 
 
@@ -2594,54 +3368,43 @@ Future<Response> Master::Http::getRoles(
 {
   CHECK_EQ(mesos::master::Call::GET_ROLES, call.type());
 
-  mesos::master::Response response;
-  response.set_type(mesos::master::Response::GET_ROLES);
+  return _roles(principal)
+    .then(defer(master->self(),
+        [this, contentType](const vector<string>& filteredRoles)
+          -> Response {
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::GET_ROLES);
 
-  mesos::master::Response::GetRoles* getRoles = response.mutable_get_roles();
+      mesos::master::Response::GetRoles* getRoles =
+        response.mutable_get_roles();
 
-  set<string> roleList;
-  if (master->roleWhitelist.isSome()) {
-    const hashset<string>& whitelist = master->roleWhitelist.get();
-    roleList.insert(whitelist.begin(), whitelist.end());
-  } else {
-    roleList.insert("*"); // Default role.
-    roleList.insert(
-        master->activeRoles.keys().begin(),
-        master->activeRoles.keys().end());
-    roleList.insert(
-        master->weights.keys().begin(),
-        master->weights.keys().end());
-    roleList.insert(
-        master->quotas.keys().begin(),
-        master->quotas.keys().end());
-  }
+      foreach (const string& name, filteredRoles) {
+           mesos::Role role;
 
-  foreach (const string& name, roleList) {
-    mesos::Role role;
+        if (master->weights.contains(name)) {
+          role.set_weight(master->weights[name]);
+        } else {
+          role.set_weight(1.0);
+        }
 
-    if (master->weights.contains(name)) {
-      role.set_weight(master->weights[name]);
-    } else {
-      role.set_weight(1.0);
-    }
+        if (master->activeRoles.contains(name)) {
+          Role* role_ = master->activeRoles[name];
 
-    if (master->activeRoles.contains(name)) {
-      Role* role_ = master->activeRoles[name];
+          role.mutable_resources()->CopyFrom(role_->resources());
 
-      role.mutable_resources()->CopyFrom(role_->resources());
+          foreachkey (const FrameworkID& frameworkId, role_->frameworks) {
+            role.add_frameworks()->CopyFrom(frameworkId);
+          }
+        }
 
-      foreachkey (const FrameworkID& frameworkId, role_->frameworks) {
-        role.add_frameworks()->CopyFrom(frameworkId);
+        role.set_name(name);
+
+        getRoles->add_roles()->CopyFrom(role);
       }
-    }
 
-    role.set_name(name);
-
-    getRoles->add_roles()->CopyFrom(role);
-  }
-
-  return OK(serialize(contentType, evolve(response)),
-            stringify(contentType));
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    }));
 }
 
 
@@ -2659,7 +3422,12 @@ string Master::Http::TEARDOWN_HELP()
         "found.",
         "Please provide a \"frameworkId\" value designating the running",
         "framework to tear down."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Using this endpoint to teardown frameworks requires that the",
+        "current principal is authorized to teardown frameworks created",
+        "by the principal who created the framework.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -2798,6 +3566,8 @@ string Master::Http::TASKS_HELP()
         "Returns 503 SERVICE_UNAVAILABLE if the leading master cannot be",
         "found.",
         "Lists known tasks.",
+        "The information shown might be filtered based on the user",
+        "accessing the endpoint.",
         "",
         "Query parameters:",
         "",
@@ -2807,7 +3577,12 @@ string Master::Http::TASKS_HELP()
         ">        order=(asc|desc)     Ascending or descending sort order "
         "(default is descending)."
         ""),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "This endpoint might be filtered based on the user accessing it.",
+        "For example a user might only see the subset of tasks they are",
+        "allowed to view.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -2830,63 +3605,6 @@ Future<Response> Master::Http::tasks(
   Option<string> order = request.url.query.get("order");
   string _order = order.isSome() && (order.get() == "asc") ? "asc" : "des";
 
-  return _tasks(limit, offset, _order, principal)
-    .then([request](const vector<const Task*>& tasks) -> Response {
-      auto tasksWriter = [&tasks](JSON::ObjectWriter* writer) {
-        writer->field("tasks", [&tasks](JSON::ArrayWriter* writer) {
-          foreach (const Task* task, tasks) {
-            writer->element(*task);
-          }
-        });
-      };
-
-      return OK(jsonify(tasksWriter), request.url.query.get("jsonp"));
-    });
-}
-
-
-Future<Response> Master::Http::getTasks(
-    const mesos::master::Call& call,
-    const Option<string>& principal,
-    ContentType contentType) const
-{
-  CHECK_EQ(mesos::master::Call::GET_TASKS, call.type());
-
-  // Get list options (limit and offset).
-  Result<int> result = call.get_tasks().limit();
-  CHECK_SOME(result);
-  size_t limit = result.get();
-
-  result = call.get_tasks().offset();
-  size_t offset = result.isSome() ? result.get() : 0;
-
-  Option<string> order = call.get_tasks().order();
-  string _order = order.isSome() && (order.get() == "asc") ? "asc" : "des";
-
-  return _tasks(limit, offset, _order, principal)
-    .then([contentType](const vector<const Task*>& tasks) -> Response {
-      mesos::master::Response response;
-      response.set_type(mesos::master::Response::GET_TASKS);
-
-      mesos::master::Response::GetTasks* getTasks =
-        response.mutable_get_tasks();
-
-      foreach (const Task* task, tasks) {
-        getTasks->add_tasks()->CopyFrom(*task);
-      }
-
-      return OK(serialize(contentType, evolve(response)),
-                stringify(contentType));
-    });
-}
-
-
-Future<vector<const Task*>> Master::Http::_tasks(
-    const size_t limit,
-    const size_t offset,
-    const string& order,
-    const Option<string>& principal) const
-{
   // Retrieve Approvers for authorizing frameworks and tasks.
   Future<Owned<ObjectApprover>> frameworksApprover;
   Future<Owned<ObjectApprover>> tasksApprover;
@@ -2910,14 +3628,11 @@ Future<vector<const Task*>> Master::Http::_tasks(
     .then(defer(master->self(),
       [=](const tuple<Owned<ObjectApprover>,
                       Owned<ObjectApprover>>& approvers)
-        -> vector<const Task*> {
+        -> Future<Response> {
       // Get approver from tuple.
       Owned<ObjectApprover> frameworksApprover;
       Owned<ObjectApprover> tasksApprover;
       tie(frameworksApprover, tasksApprover) = approvers;
-
-      // TODO(nnielsen): Currently, formatting errors in offset and/or limit
-      // will silently be ignored. This could be reported to the user instead.
 
       // Construct framework list with both active and completed frameworks.
       vector<const Framework*> frameworks;
@@ -2929,6 +3644,7 @@ Future<vector<const Task*>> Master::Http::_tasks(
 
         frameworks.push_back(framework);
       }
+
       foreach (const std::shared_ptr<Framework>& framework,
                master->frameworks.completed) {
         // Skip unauthorized frameworks.
@@ -2964,22 +3680,175 @@ Future<vector<const Task*>> Master::Http::_tasks(
       // Sort tasks by task status timestamp. Default order is descending.
       // The earliest timestamp is chosen for comparison when
       // multiple are present.
-      if (order == "asc") {
+      if (_order == "asc") {
         sort(tasks.begin(), tasks.end(), TaskComparator::ascending);
       } else {
         sort(tasks.begin(), tasks.end(), TaskComparator::descending);
       }
 
-      // Collect 'limit' number of tasks starting from 'offset'.
-      vector<const Task*> _tasks;
-      size_t end = std::min(offset + limit, tasks.size());
-      for (size_t i = offset; i < end; i++) {
-        const Task* task = tasks[i];
-        _tasks.push_back(task);
+      auto tasksWriter = [&tasks, limit, offset](JSON::ObjectWriter* writer) {
+        writer->field("tasks",
+                      [&tasks, limit, offset](JSON::ArrayWriter* writer) {
+          // Collect 'limit' number of tasks starting from 'offset'.
+          size_t end = std::min(offset + limit, tasks.size());
+          for (size_t i = offset; i < end; i++) {
+            writer->element(*tasks[i]);
+          }
+        });
+      };
+
+      return OK(jsonify(tasksWriter), request.url.query.get("jsonp"));
+  }));
+}
+
+
+Future<Response> Master::Http::getTasks(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::GET_TASKS, call.type());
+
+  // Retrieve Approvers for authorizing frameworks and tasks.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> tasksApprover;
+  if (master->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    tasksApprover = master->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_TASK);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, tasksApprover)
+    .then(defer(master->self(),
+      [=](const tuple<Owned<ObjectApprover>,
+                      Owned<ObjectApprover>>& approvers)
+        -> Future<Response> {
+      // Get approver from tuple.
+      Owned<ObjectApprover> frameworksApprover;
+      Owned<ObjectApprover> tasksApprover;
+      tie(frameworksApprover, tasksApprover) = approvers;
+
+      mesos::master::Response response;
+      response.set_type(mesos::master::Response::GET_TASKS);
+
+      response.mutable_get_tasks()->CopyFrom(
+          _getTasks(frameworksApprover,
+                    tasksApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+  }));
+}
+
+
+mesos::master::Response::GetTasks Master::Http::_getTasks(
+    const Owned<ObjectApprover>& frameworksApprover,
+    const Owned<ObjectApprover>& tasksApprover) const
+{
+  // Construct framework list with both active and completed frameworks.
+  vector<const Framework*> frameworks;
+  foreachvalue (Framework* framework, master->frameworks.registered) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework);
+  }
+
+  foreach (const std::shared_ptr<Framework>& framework,
+           master->frameworks.completed) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework.get());
+  }
+
+  mesos::master::Response::GetTasks getTasks;
+
+  vector<const Task*> tasks;
+  foreach (const Framework* framework, frameworks) {
+    // Pending tasks.
+    foreachvalue (const TaskInfo& taskInfo, framework->pendingTasks) {
+      // Skip unauthorized tasks.
+      if (!approveViewTaskInfo(tasksApprover, taskInfo, framework->info)) {
+        continue;
       }
 
-      return _tasks;
-  }));
+      const Task& task =
+        protobuf::createTask(taskInfo, TASK_STAGING, framework->id());
+
+      getTasks.add_pending_tasks()->CopyFrom(task);
+    }
+
+    // Active tasks.
+    foreachvalue (Task* task, framework->tasks) {
+      CHECK_NOTNULL(task);
+      // Skip unauthorized tasks.
+      if (!approveViewTask(tasksApprover, *task, framework->info)) {
+        continue;
+      }
+
+      getTasks.add_tasks()->CopyFrom(*task);
+    }
+
+    // Completed tasks.
+    foreach (const std::shared_ptr<Task>& task, framework->completedTasks) {
+      // Skip unauthorized tasks.
+      if (!approveViewTask(tasksApprover, *task.get(), framework->info)) {
+        continue;
+      }
+
+      getTasks.add_completed_tasks()->CopyFrom(*task);
+    }
+  }
+
+  // Orphan tasks.
+  foreachvalue (const Slave* slave, master->slaves.registered) {
+    typedef hashmap<TaskID, Task*> TaskMap;
+    foreachvalue (const TaskMap& tasks, slave->tasks) {
+      foreachvalue (const Task* task, tasks) {
+        CHECK_NOTNULL(task);
+        const FrameworkID& frameworkId = task->framework_id();
+        if (!master->frameworks.registered.contains(frameworkId)) {
+          // TODO(joerg84): This logic should be simplified after
+          // a deprecation cycle starting with 1.0 as after that
+          // we can rely on `master->frameworks.recovered` containing
+          // all FrameworkInfos.
+          // Until then there are 3 cases:
+          // - No authorization enabled: show all orphaned tasks.
+          // - Authorization enabled, but no FrameworkInfo present:
+          //   do not show orphaned tasks.
+          // - Authorization enabled, FrameworkInfo present: filter
+          //   based on `approveViewTask`.
+          if (master->authorizer.isSome() &&
+             (!master->frameworks.recovered.contains(frameworkId) ||
+              !approveViewTask(
+                  tasksApprover,
+                  *task,
+                  master->frameworks.recovered[frameworkId]))) {
+            continue;
+          }
+
+          getTasks.add_orphan_tasks()->CopyFrom(*task);
+        }
+      }
+    }
+  }
+
+  return getTasks;
 }
 
 
@@ -3480,7 +4349,7 @@ Future<Response> Master::Http::maintenanceStatus(
 
   return _getMaintenanceStatus()
     .then([request](const mesos::maintenance::ClusterStatus& status)
-            -> Response {
+      -> Response {
       return OK(JSON::protobuf(status), request.url.query.get("jsonp"));
     });
 }
@@ -3577,7 +4446,12 @@ string Master::Http::UNRESERVE_HELP()
         "",
         "Please provide \"slaveId\" and \"resources\" values designating",
         "the resources to be unreserved."),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "Using this endpoint to unreserve resources requires that the",
+        "current principal is authorized to unreserve resources created",
+        "by the principal who reserved the resources.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -3613,11 +4487,6 @@ Future<Response> Master::Http::unreserve(
 
   SlaveID slaveId;
   slaveId.set_value(value.get());
-
-  Slave* slave = master->slaves.registered.get(slaveId);
-  if (slave == nullptr) {
-    return BadRequest("No agent found with specified ID");
-  }
 
   value = values.get("resources");
   if (value.isNone()) {
@@ -3659,6 +4528,11 @@ Future<Response> Master::Http::_unreserve(
     const Resources& resources,
     const Option<string>& principal) const
 {
+  Slave* slave = master->slaves.registered.get(slaveId);
+  if (slave == nullptr) {
+    return BadRequest("No agent found with specified ID");
+  }
+
   // Create an offer operation.
   Offer::Operation operation;
   operation.set_type(Offer::Operation::UNRESERVE);
@@ -3736,6 +4610,20 @@ Future<Response> Master::Http::_operation(
     .repair([](const Future<Response>& result) {
        return Conflict(result.failure());
     });
+}
+
+
+Future<Response> Master::Http::unreserveResources(
+    const mesos::master::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::master::Call::UNRESERVE_RESOURCES, call.type());
+
+  const SlaveID& slaveId = call.unreserve_resources().slave_id();
+  const Resources& resources = call.unreserve_resources().resources();
+
+  return _unreserve(slaveId, resources, principal);
 }
 
 } // namespace master {

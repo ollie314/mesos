@@ -24,6 +24,8 @@
 
 #include "docker/docker.hpp"
 
+#include "health-check/health_checker.hpp"
+
 #include "slave/slave.hpp"
 
 #include "slave/containerizer/docker.hpp"
@@ -32,7 +34,10 @@
 #include "tests/containerizer.hpp"
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
+#include "tests/mock_docker.hpp"
 #include "tests/utils.hpp"
+
+#include "tests/containerizer/docker_archive.hpp"
 
 namespace http = process::http;
 
@@ -48,6 +53,7 @@ using mesos::internal::slave::Slave;
 using mesos::master::detector::MasterDetector;
 
 using mesos::slave::ContainerLogger;
+using mesos::slave::ContainerTermination;
 
 using process::Clock;
 using process::Future;
@@ -116,14 +122,6 @@ public:
     CommandInfo command;
     command.set_value(cmd);
 
-    Environment::Variable* variable =
-      command.mutable_environment()->add_variables();
-
-    // We need to set the correct directory to launch health check process
-    // instead of the default for tests.
-    variable->set_name("MESOS_LAUNCHER_DIR");
-    variable->set_value(getLauncherDir());
-
     task.mutable_command()->CopyFrom(command);
 
     if (containerInfo.isSome()) {
@@ -141,6 +139,7 @@ public:
       }
     }
 
+    healthCheck.set_type(HealthCheck::COMMAND);
     healthCheck.mutable_command()->CopyFrom(healthCommand);
     healthCheck.set_delay_seconds(0);
     healthCheck.set_interval_seconds(0);
@@ -162,6 +161,72 @@ public:
     return tasks;
   }
 };
+
+
+// This tests ensures `HealthCheck` protobuf is validated correctly.
+TEST_F(HealthCheckTest, HealthCheckProtobufValidation)
+{
+  using namespace mesos::internal::health;
+
+  // Health check type must be set to a known value.
+  {
+    HealthCheck healthCheckProto;
+
+    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+
+    healthCheckProto.set_type(HealthCheck::UNKNOWN);
+    validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+  }
+
+  // The associated with the type health description must be present.
+  {
+    HealthCheck healthCheckProto;
+
+    healthCheckProto.set_type(HealthCheck::COMMAND);
+    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+
+    healthCheckProto.set_type(HealthCheck::HTTP);
+    validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+
+    healthCheckProto.set_type(HealthCheck::TCP);
+    validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+  }
+
+  // Command health check must specify an actual command in `command.value`.
+  {
+    HealthCheck healthCheckProto;
+
+    healthCheckProto.set_type(HealthCheck::COMMAND);
+    healthCheckProto.mutable_command()->CopyFrom(CommandInfo());
+    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+  }
+
+  // HTTP health check may specify a known scheme and a path starting with '/'.
+  {
+    HealthCheck healthCheckProto;
+
+    healthCheckProto.set_type(HealthCheck::HTTP);
+    healthCheckProto.mutable_http()->set_port(8080);
+
+    Option<Error> validate = validation::healthCheck(healthCheckProto);
+    EXPECT_NONE(validate);
+
+    healthCheckProto.mutable_http()->set_scheme("ftp");
+    validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+
+    healthCheckProto.mutable_http()->set_scheme("https");
+    healthCheckProto.mutable_http()->set_path("healthz");
+    validate = validation::healthCheck(healthCheckProto);
+    EXPECT_SOME(validate);
+  }
+}
 
 
 // Testing a healthy task reporting one healthy status to scheduler.
@@ -194,7 +259,7 @@ TEST_F(HealthCheckTest, HealthyTask)
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
 
-  Future<vector<Offer> > offers;
+  Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return()); // Ignore subsequent offers.
@@ -260,6 +325,124 @@ TEST_F(HealthCheckTest, HealthyTask)
   EXPECT_EQ(TASK_RUNNING, implicitReconciliation.get().state());
   EXPECT_TRUE(implicitReconciliation.get().has_healthy());
   EXPECT_TRUE(implicitReconciliation.get().healthy());
+
+  // Verify that task health is exposed in the master's state endpoint.
+  {
+    Future<http::Response> response = http::get(
+        master.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    Result<JSON::Value> find = parse.get().find<JSON::Value>(
+        "frameworks[0].tasks[0].statuses[0].healthy");
+    EXPECT_SOME_TRUE(find);
+  }
+
+  // Verify that task health is exposed in the slave's state endpoint.
+  {
+    Future<http::Response> response = http::get(
+        slave.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, response);
+
+    Try<JSON::Object> parse = JSON::parse<JSON::Object>(response.get().body);
+    ASSERT_SOME(parse);
+
+    Result<JSON::Value> find = parse.get().find<JSON::Value>(
+        "frameworks[0].executors[0].tasks[0].statuses[0].healthy");
+    EXPECT_SOME_TRUE(find);
+  }
+
+  driver.stop();
+  driver.join();
+}
+
+
+// Testing a healthy task with a container image using mesos
+// containerizer reporting one healthy status to scheduler.
+TEST_F(HealthCheckTest, ROOT_HealthyTaskWithContainerImage)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  const string directory = path::join(os::getcwd(), "archives");
+
+  Future<Nothing> testImage = DockerArchive::create(directory, "alpine");
+  AWAIT_READY(testImage);
+
+  ASSERT_TRUE(os::exists(path::join(directory, "alpine.tar")));
+
+  slave::Flags flags = CreateSlaveFlags();
+  flags.isolation = "docker/runtime,filesystem/linux";
+  flags.image_providers = "docker";
+  flags.docker_registry = directory;
+  flags.docker_store_dir = path::join(os::getcwd(), "store");
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+    &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  // Make use of 'populateTasks()' to avoid duplicate code.
+  vector<TaskInfo> tasks =
+    populateTasks("sleep 120", "exit 0", offers.get()[0]);
+
+  TaskInfo task = tasks[0];
+
+  Image image;
+  image.set_type(Image::DOCKER);
+  image.mutable_docker()->set_name("alpine");
+
+  ContainerInfo* container = task.mutable_container();
+  container->set_type(ContainerInfo::MESOS);
+  container->mutable_mesos()->mutable_image()->CopyFrom(image);
+
+  HealthCheck* health = task.mutable_health_check();
+  health->set_type(HealthCheck::COMMAND);
+  health->mutable_command()->set_value("exit 0");
+
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusHealth;
+
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusHealth));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(statusRunning);
+  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+
+  AWAIT_READY(statusHealth);
+  EXPECT_EQ(TASK_RUNNING, statusHealth.get().state());
+  EXPECT_TRUE(statusHealth.get().has_healthy());
+  EXPECT_TRUE(statusHealth.get().healthy());
 
   // Verify that task health is exposed in the master's state endpoint.
   {
@@ -397,7 +580,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
   EXPECT_TRUE(statusHealth.get().has_healthy());
   EXPECT_TRUE(statusHealth.get().healthy());
 
-  Future<containerizer::Termination> termination =
+  Future<ContainerTermination> termination =
     containerizer.wait(containerId.get());
 
   driver.stop();
@@ -450,7 +633,7 @@ TEST_F(HealthCheckTest, HealthyTaskNonShell)
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
 
-  Future<vector<Offer> > offers;
+  Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return()); // Ignore subsequent offers.
@@ -518,7 +701,7 @@ TEST_F(HealthCheckTest, HealthStatusChange)
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
-  Future<vector<Offer> > offers;
+  Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return()); // Ignore subsequent offers.
@@ -820,7 +1003,7 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
   ASSERT_SOME(os::read(tmpPath));
   EXPECT_EQ("bar", os::read(tmpPath).get());
 
-  Future<containerizer::Termination> termination =
+  Future<ContainerTermination> termination =
     containerizer.wait(containerId.get());
 
   driver.stop();
@@ -873,7 +1056,7 @@ TEST_F(HealthCheckTest, ConsecutiveFailures)
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
 
-  Future<vector<Offer> > offers;
+  Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return()); // Ignore subsequent offers.
@@ -963,7 +1146,7 @@ TEST_F(HealthCheckTest, EnvironmentSetup)
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
 
-  Future<vector<Offer> > offers;
+  Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return()); // Ignore subsequent offers.
@@ -1030,7 +1213,7 @@ TEST_F(HealthCheckTest, DISABLED_GracePeriod)
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
 
-  Future<vector<Offer> > offers;
+  Future<vector<Offer>> offers;
   EXPECT_CALL(sched, resourceOffers(&driver, _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return()); // Ignore subsequent offers.

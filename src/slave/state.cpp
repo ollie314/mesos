@@ -165,7 +165,7 @@ Try<SlaveState> SlaveState::recover(
   state.info = slaveInfo.get();
 
   // Find the frameworks.
-  Try<list<string> > frameworks = paths::getFrameworkPaths(rootDir, slaveId);
+  Try<list<string>> frameworks = paths::getFrameworkPaths(rootDir, slaveId);
 
   if (frameworks.isError()) {
     return Error("Failed to find frameworks for agent " + slaveId.value() +
@@ -272,7 +272,7 @@ Try<FrameworkState> FrameworkState::recover(
   state.pid = process::UPID(pid.get());
 
   // Find the executors.
-  Try<list<string> > executors =
+  Try<list<string>> executors =
     paths::getExecutorPaths(rootDir, slaveId, frameworkId);
 
   if (executors.isError()) {
@@ -314,7 +314,7 @@ Try<ExecutorState> ExecutorState::recover(
   string message;
 
   // Find the runs.
-  Try<list<string> > runs = paths::getExecutorRunPaths(
+  Try<list<string>> runs = paths::getExecutorRunPaths(
       rootDir,
       slaveId,
       frameworkId,
@@ -431,7 +431,7 @@ Try<RunState> RunState::recover(
   state.completed = os::exists(path);
 
   // Find the tasks.
-  Try<list<string> > tasks = paths::getTaskPaths(
+  Try<list<string>> tasks = paths::getTaskPaths(
       rootDir,
       slaveId,
       frameworkId,
@@ -692,11 +692,48 @@ Try<ResourcesState> ResourcesState::recover(
 {
   ResourcesState state;
 
-  const string& path = paths::getResourcesInfoPath(rootDir);
-  if (!os::exists(path)) {
-    LOG(INFO) << "No checkpointed resources found at '" << path << "'";
+  // Process the committed resources.
+  const string& infoPath = paths::getResourcesInfoPath(rootDir);
+  if (!os::exists(infoPath)) {
+    LOG(INFO) << "No committed checkpointed resources found at '"
+              << infoPath << "'";
     return state;
   }
+
+  Try<Resources> resources = ResourcesState::recoverResources(
+      infoPath, strict, state.errors);
+
+  if (resources.isError()) {
+    return Error(resources.error());
+  }
+
+  state.resources = resources.get();
+
+  // Process the target resources.
+  const string& targetPath = paths::getResourcesTargetPath(rootDir);
+  if (!os::exists(targetPath)) {
+    return state;
+  }
+
+  Try<Resources> target = ResourcesState::recoverResources(
+      targetPath, strict, state.errors);
+
+  if (target.isError()) {
+    return Error(target.error());
+  }
+
+  state.target = target.get();
+
+  return state;
+}
+
+
+Try<Resources> ResourcesState::recoverResources(
+    const string& path,
+    bool strict,
+    unsigned int& errors)
+{
+  Resources resources;
 
   Try<int> fd = os::open(path, O_RDWR | O_CLOEXEC);
   if (fd.isError()) {
@@ -707,8 +744,8 @@ Try<ResourcesState> ResourcesState::recover(
       return Error(message);
     } else {
       LOG(WARNING) << message;
-      state.errors++;
-      return state;
+      errors++;
+      return resources;
     }
   }
 
@@ -721,7 +758,7 @@ Try<ResourcesState> ResourcesState::recover(
       break;
     }
 
-    state.resources += resource.get();
+    resources += resource.get();
   }
 
   off_t offset = lseek(fd.get(), 0, SEEK_CUR);
@@ -755,16 +792,15 @@ Try<ResourcesState> ResourcesState::recover(
       return Error(message);
     } else {
       LOG(WARNING) << message;
-      state.errors++;
-      return state;
+      errors++;
+      return resources;
     }
   }
 
   os::close(fd.get());
 
-  return state;
+  return resources;
 }
-
 
 } // namespace state {
 } // namespace slave {

@@ -41,6 +41,8 @@ using std::vector;
 using testing::_;
 using testing::Return;
 
+using mesos::slave::ContainerTermination;
+
 namespace mesos {
 namespace internal {
 namespace tests {
@@ -56,27 +58,16 @@ public:
       process::Future<Nothing>(
           const Option<slave::state::SlaveState>&));
 
-  MOCK_METHOD7(
-      launch,
-      process::Future<bool>(
-          const ContainerID&,
-          const ExecutorInfo&,
-          const std::string&,
-          const Option<std::string>&,
-          const SlaveID&,
-          const process::PID<Slave>&,
-          bool));
-
   MOCK_METHOD8(
       launch,
       process::Future<bool>(
           const ContainerID&,
-          const TaskInfo&,
+          const Option<TaskInfo>&,
           const ExecutorInfo&,
           const std::string&,
           const Option<std::string>&,
           const SlaveID&,
-          const process::PID<Slave>&,
+          const std::map<std::string, std::string>&,
           bool));
 
   MOCK_METHOD2(
@@ -92,7 +83,7 @@ public:
 
   MOCK_METHOD1(
       wait,
-      process::Future<containerizer::Termination>(
+      process::Future<ContainerTermination>(
           const ContainerID&));
 
   MOCK_METHOD1(
@@ -101,7 +92,7 @@ public:
 
   MOCK_METHOD0(
       containers,
-      process::Future<hashset<ContainerID> >());
+      process::Future<hashset<ContainerID>>());
 };
 
 
@@ -125,7 +116,7 @@ TEST_F(ComposingContainerizerTest, DestroyWhileLaunching)
   TaskInfo taskInfo;
   ExecutorInfo executorInfo;
   SlaveID slaveId;
-  PID<Slave> slavePid;
+  std::map<std::string, std::string> environment;
 
   Promise<bool> launchPromise;
 
@@ -144,7 +135,7 @@ TEST_F(ComposingContainerizerTest, DestroyWhileLaunching)
       "dir",
       "user",
       slaveId,
-      slavePid,
+      environment,
       false);
 
   Resources resources = Resources::parse("cpus:1;mem:256").get();

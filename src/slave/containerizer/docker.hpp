@@ -17,6 +17,10 @@
 #ifndef __DOCKER_CONTAINERIZER_HPP__
 #define __DOCKER_CONTAINERIZER_HPP__
 
+#include <list>
+#include <map>
+#include <string>
+
 #include <mesos/slave/container_logger.hpp>
 
 #include <process/owned.hpp>
@@ -29,6 +33,8 @@
 #include "docker/executor.hpp"
 
 #include "slave/containerizer/containerizer.hpp"
+
+#include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
 
 namespace mesos {
 namespace internal {
@@ -58,7 +64,8 @@ class DockerContainerizer : public Containerizer
 public:
   static Try<DockerContainerizer*> create(
       const Flags& flags,
-      Fetcher* fetcher);
+      Fetcher* fetcher,
+      const Option<NvidiaComponents>& nvidia = None());
 
   // This is only public for tests.
   DockerContainerizer(
@@ -78,21 +85,12 @@ public:
 
   virtual process::Future<bool> launch(
       const ContainerID& containerId,
+      const Option<TaskInfo>& taskInfo,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
       const Option<std::string>& user,
       const SlaveID& slaveId,
-      const process::PID<Slave>& slavePid,
-      bool checkpoint);
-
-  virtual process::Future<bool> launch(
-      const ContainerID& containerId,
-      const TaskInfo& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const process::PID<Slave>& slavePid,
+      const std::map<std::string, std::string>& environment,
       bool checkpoint);
 
   virtual process::Future<Nothing> update(
@@ -102,7 +100,7 @@ public:
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
-  virtual process::Future<containerizer::Termination> wait(
+  virtual process::Future<mesos::slave::ContainerTermination> wait(
       const ContainerID& containerId);
 
   virtual void destroy(const ContainerID& containerId);
@@ -139,7 +137,7 @@ public:
       const std::string& directory,
       const Option<std::string>& user,
       const SlaveID& slaveId,
-      const process::PID<Slave>& slavePid,
+      const std::map<std::string, std::string>& environment,
       bool checkpoint);
 
   // force = true causes the containerizer to update the resources
@@ -152,7 +150,7 @@ public:
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
-  virtual process::Future<containerizer::Termination> wait(
+  virtual process::Future<mesos::slave::ContainerTermination> wait(
       const ContainerID& containerId);
 
   virtual void destroy(
@@ -277,7 +275,7 @@ private:
         const std::string& directory,
         const Option<std::string>& user,
         const SlaveID& slaveId,
-        const process::PID<Slave>& slavePid,
+        const std::map<std::string, std::string>& environment,
         bool checkpoint,
         const Flags& flags);
 
@@ -296,22 +294,21 @@ private:
               const std::string& directory,
               const Option<std::string>& user,
               const SlaveID& slaveId,
-              const process::PID<Slave>& slavePid,
               bool checkpoint,
               bool symlinked,
               const Flags& flags,
               const Option<CommandInfo>& _command,
               const Option<ContainerInfo>& _container,
-              const Option<std::map<std::string, std::string>>& _environment,
+              const std::map<std::string, std::string>& _environment,
               bool launchesExecutorContainer)
       : state(FETCHING),
         id(id),
         task(taskInfo),
         executor(executorInfo),
+        environment(_environment),
         directory(directory),
         user(user),
         slaveId(slaveId),
-        slavePid(slavePid),
         checkpoint(checkpoint),
         symlinked(symlinked),
         flags(flags),
@@ -347,18 +344,6 @@ private:
         container = task.get().container();
       } else {
         container = executor.container();
-      }
-
-      if (_environment.isSome()) {
-        environment = _environment.get();
-      } else {
-        environment = executorEnvironment(
-            executor,
-            directory,
-            slaveId,
-            slavePid,
-            checkpoint,
-            flags);
       }
     }
 
@@ -452,13 +437,12 @@ private:
 
     const Option<std::string> user;
     SlaveID slaveId;
-    const process::PID<Slave> slavePid;
     bool checkpoint;
     bool symlinked;
     const Flags flags;
 
     // Promise for future returned from wait().
-    process::Promise<containerizer::Termination> termination;
+    process::Promise<mesos::slave::ContainerTermination> termination;
 
     // Exit status of executor or container (depending on whether or
     // not we used the command executor). Represented as a promise so

@@ -23,6 +23,7 @@
 #include <process/collect.hpp>
 #include <process/dispatch.hpp>
 #include <process/http.hpp>
+#include <process/id.hpp>
 #include <process/io.hpp>
 #include <process/process.hpp>
 #include <process/subprocess.hpp>
@@ -278,7 +279,8 @@ class DockerFetcherPluginProcess : public Process<DockerFetcherPluginProcess>
 public:
   DockerFetcherPluginProcess(
       const hashmap<string, spec::Config::Auth>& _auths)
-    : auths(_auths) {}
+    : ProcessBase(process::ID::generate("docker-fetcher-plugin")),
+      auths(_auths) {}
 
   Future<Nothing> fetch(const URI& uri, const string& directory);
 
@@ -327,6 +329,9 @@ DockerFetcherPlugin::Flags::Flags()
 }
 
 
+const char DockerFetcherPlugin::NAME[] = "docker";
+
+
 Try<Owned<Fetcher::Plugin>> DockerFetcherPlugin::create(const Flags& flags)
 {
   // TODO(jieyu): Make sure curl is available.
@@ -365,16 +370,22 @@ DockerFetcherPlugin::~DockerFetcherPlugin()
 }
 
 
-set<string> DockerFetcherPlugin::schemes()
+set<string> DockerFetcherPlugin::schemes() const
 {
   // Use uri:: prefix to disambiguate.
   return uri::schemes();
 }
 
 
+string DockerFetcherPlugin::name() const
+{
+  return NAME;
+}
+
+
 Future<Nothing> DockerFetcherPlugin::fetch(
     const URI& uri,
-    const string& directory)
+    const string& directory) const
 {
   return dispatch(
       process.get(),

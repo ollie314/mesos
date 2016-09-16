@@ -50,6 +50,7 @@
 #include "tests/containerizer.hpp"
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
+#include "tests/mock_docker.hpp"
 
 using namespace mesos::modules;
 
@@ -65,6 +66,7 @@ using mesos::internal::slave::Slave;
 using mesos::master::detector::MasterDetector;
 
 using mesos::slave::ContainerLogger;
+using mesos::slave::ContainerTermination;
 
 using process::Clock;
 using process::Future;
@@ -292,23 +294,37 @@ TEST_F(HookTest, VerifySlaveExecutorEnvironmentDecorator)
   ContainerID containerId;
   containerId.set_value("test_container");
 
+  ExecutorInfo executorInfo =
+    CREATE_EXECUTOR_INFO("executor", "test $FOO = 'bar'");
+
+  SlaveID slaveId = SlaveID();
+
+  std::map<string, string> environment = executorEnvironment(
+      CreateSlaveFlags(),
+      executorInfo,
+      directory,
+      slaveId,
+      PID<Slave>(),
+      false);
+
   // Test hook adds a new environment variable "FOO" to the executor
   // with a value "bar". A '0' (success) exit status for the following
   // command validates the hook.
   process::Future<bool> launch = containerizer->launch(
       containerId,
-      CREATE_EXECUTOR_INFO("executor", "test $FOO = 'bar'"),
+      None(),
+      executorInfo,
       directory,
       None(),
-      SlaveID(),
-      process::PID<Slave>(),
+      slaveId,
+      environment,
       false);
+
   AWAIT_READY(launch);
   ASSERT_TRUE(launch.get());
 
   // Wait on the container.
-  process::Future<containerizer::Termination> wait =
-    containerizer->wait(containerId);
+  process::Future<ContainerTermination> wait = containerizer->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
@@ -696,7 +712,7 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerEnvironmentDecorator)
   AWAIT_READY_FOR(statusFinished, Seconds(60));
   EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
 
-  Future<containerizer::Termination> termination =
+  Future<ContainerTermination> termination =
     containerizer.wait(containerId.get());
 
   driver.stop();
@@ -912,7 +928,7 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerHook)
   AWAIT_READY_FOR(statusFinished, Seconds(60));
   EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
 
-  Future<containerizer::Termination> termination =
+  Future<ContainerTermination> termination =
     containerizer.wait(containerId.get());
 
   driver.stop();

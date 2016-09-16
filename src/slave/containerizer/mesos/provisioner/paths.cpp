@@ -20,6 +20,7 @@
 
 #include <mesos/type_utils.hpp>
 
+#include <stout/lambda.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 
@@ -72,7 +73,16 @@ string getContainerDir(
     const string& provisionerDir,
     const ContainerID& containerId)
 {
-  return path::join(getContainersDir(provisionerDir), containerId.value());
+  if (!containerId.has_parent()) {
+    return path::join(getContainersDir(provisionerDir), containerId.value());
+  }
+
+  return path::join(
+      getContainersDir(
+          getContainerDir(
+              provisionerDir,
+              containerId.parent())),
+      containerId.value());
 }
 
 
@@ -97,35 +107,68 @@ string getContainerRootfsDir(
 Try<hashset<ContainerID>> listContainers(
     const string& provisionerDir)
 {
-  hashset<ContainerID> results;
+  lambda::function<Try<hashset<ContainerID>>(
+      const string&,
+      const Option<ContainerID>&)> helper;
 
-  string containersDir = getContainersDir(provisionerDir);
-  if (!os::exists(containersDir)) {
-    // No container has been created yet.
-    return results;
-  }
-
-  Try<list<string>> containerIds = os::ls(containersDir);
-  if (containerIds.isError()) {
-    return Error("Unable to list the containers directory: " +
-                 containerIds.error());
-  }
-
-  foreach (const string& entry, containerIds.get()) {
-    string containerPath = path::join(containersDir, entry);
-
-    if (!os::stat::isdir(containerPath)) {
-      LOG(WARNING) << "Ignoring unexpected container entry at: "
-                   << containerPath;
-      continue;
+  // This helper lists all child (or grand child) containers under
+  // 'containersDir' whose parent (or grand parent) is the given
+  // 'parentContainerId'.
+  //
+  // NOTE: The lambda is used here because we do not want the
+  // 'parentContainerId' to be in the public function.
+  helper = [&helper](
+      const string& containersDir,
+      const Option<ContainerID>& parentContainerId)
+    -> Try<hashset<ContainerID>> {
+    // This is the termination condition for the recursion.
+    if (!os::exists(containersDir)) {
+      return hashset<ContainerID>();
     }
 
-    ContainerID containerId;
-    containerId.set_value(entry);
-    results.insert(containerId);
-  }
+    Try<list<string>> containerIds = os::ls(containersDir);
+    if (containerIds.isError()) {
+      return Error(
+          "Unable to list the containers under directory: '" +
+          containersDir + "': " + containerIds.error());
+    }
 
-  return results;
+    hashset<ContainerID> results;
+
+    foreach (const string& entry, containerIds.get()) {
+      const string containerPath = path::join(containersDir, entry);
+
+      if (!os::stat::isdir(containerPath)) {
+        LOG(WARNING) << "Ignoring unexpected container entry at "
+                     << "'" << containerPath << "' when listing "
+                     << "containers in provisioner";
+        continue;
+      }
+
+      ContainerID containerId;
+      containerId.set_value(entry);
+
+      if (parentContainerId.isSome()) {
+        containerId.mutable_parent()->CopyFrom(parentContainerId.get());
+      }
+
+      results.insert(containerId);
+
+      Try<hashset<ContainerID>> children = helper(
+          getContainersDir(containerPath),
+          containerId);
+
+      if (children.isError()) {
+        return Error("Failed to list child containers: " + children.error());
+      }
+
+      results.insert(children->begin(), children->end());
+    }
+
+    return results;
+  };
+
+  return helper(getContainersDir(provisionerDir), None());
 }
 
 

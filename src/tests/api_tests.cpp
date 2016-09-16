@@ -69,6 +69,7 @@ using process::Future;
 using process::Owned;
 
 using process::http::Accepted;
+using process::http::NotFound;
 using process::http::OK;
 using process::http::Pipe;
 using process::http::Response;
@@ -78,6 +79,7 @@ using recordio::Decoder;
 using testing::_;
 using testing::AtMost;
 using testing::DoAll;
+using testing::Eq;
 using testing::Return;
 using testing::WithParamInterface;
 
@@ -188,7 +190,7 @@ TEST_P(MasterAPITest, GetAgents)
   ASSERT_EQ("host", v1Agent.agent_info().hostname());
   ASSERT_EQ(agent.get()->pid, v1Agent.pid());
   ASSERT_TRUE(v1Agent.active());
-  ASSERT_EQ("1.0.0", v1Agent.version());
+  ASSERT_EQ(MESOS_VERSION, v1Agent.version());
   ASSERT_EQ(4, v1Agent.total_resources_size());
 }
 
@@ -209,6 +211,52 @@ TEST_P(MasterAPITest, GetFlags)
   AWAIT_READY(v1Response);
   ASSERT_TRUE(v1Response.get().IsInitialized());
   ASSERT_EQ(v1::master::Response::GET_FLAGS, v1Response.get().type());
+}
+
+
+TEST_P(MasterAPITest, GetFrameworks)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<Nothing> registered;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureSatisfy(&registered));
+
+  driver.start();
+
+  AWAIT_READY(registered);
+
+  v1::master::Call v1Call;
+  v1Call.set_type(v1::master::Call::GET_FRAMEWORKS);
+
+  ContentType contentType = GetParam();
+
+  Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+  AWAIT_READY(v1Response);
+  ASSERT_TRUE(v1Response.get().IsInitialized());
+  ASSERT_EQ(v1::master::Response::GET_FRAMEWORKS, v1Response.get().type());
+
+  v1::master::Response::GetFrameworks frameworks =
+      v1Response.get().get_frameworks();
+
+  ASSERT_EQ(1, frameworks.frameworks_size());
+  ASSERT_EQ("default", frameworks.frameworks(0).framework_info().name());
+  ASSERT_EQ("*", frameworks.frameworks(0).framework_info().role());
+  ASSERT_FALSE(frameworks.frameworks(0).framework_info().checkpoint());
+  ASSERT_TRUE(frameworks.frameworks(0).active());
+  ASSERT_TRUE(frameworks.frameworks(0).connected());
+
+  driver.stop();
+  driver.join();
 }
 
 
@@ -288,33 +336,15 @@ TEST_P(MasterAPITest, GetMetrics)
 }
 
 
-// This tests v1 API GetTasks when no task is present.
-TEST_P(MasterAPITest, GetTasksNoRunningTask)
-{
-  Try<Owned<cluster::Master>> master = this->StartMaster();
-  ASSERT_SOME(master);
-
-  v1::master::Call v1Call;
-  v1Call.mutable_get_tasks();
-  v1Call.set_type(v1::master::Call::GET_TASKS);
-
-  ContentType contentType = GetParam();
-
-  Future<v1::master::Response> v1Response =
-    post(master.get()->pid, v1Call, contentType);
-
-  AWAIT_READY(v1Response);
-  ASSERT_TRUE(v1Response.get().IsInitialized());
-  ASSERT_EQ(v1::master::Response::GET_TASKS, v1Response.get().type());
-  ASSERT_EQ(0, v1Response.get().get_tasks().tasks_size());
-}
-
-
-// This tests v1 API GetTasks with 1 running task.
-TEST_P(MasterAPITest, GetTasks)
+TEST_P(MasterAPITest, GetExecutors)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
+
+  // For capturing the SlaveID so we can use it to verify GET_EXECUTORS API
+  // call.
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
@@ -322,6 +352,9 @@ TEST_P(MasterAPITest, GetTasks)
   Owned<MasterDetector> detector = master.get()->createDetector();
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+  SlaveID slaveId = slaveRegisteredMessage.get().slave_id();
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
@@ -365,7 +398,179 @@ TEST_P(MasterAPITest, GetTasks)
   EXPECT_EQ(exec.id, status.get().executor_id());
 
   v1::master::Call v1Call;
-  v1Call.mutable_get_tasks();
+  v1Call.set_type(v1::master::Call::GET_EXECUTORS);
+
+  ContentType contentType = GetParam();
+
+  Future<v1::master::Response> v1Response =
+    post(master.get()->pid, v1Call, contentType);
+
+  AWAIT_READY(v1Response);
+  ASSERT_TRUE(v1Response.get().IsInitialized());
+  ASSERT_EQ(v1::master::Response::GET_EXECUTORS, v1Response.get().type());
+  ASSERT_EQ(1, v1Response.get().get_executors().executors_size());
+
+  ASSERT_EQ(evolve<v1::AgentID>(slaveId),
+            v1Response.get().get_executors().executors(0).agent_id());
+
+  v1::ExecutorInfo executorInfo =
+    v1Response.get().get_executors().executors(0).executor_info();
+
+  ASSERT_EQ(evolve<v1::ExecutorID>(exec.id), executorInfo.executor_id());
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+}
+
+
+TEST_P(MasterAPITest, GetState)
+{
+  v1::master::Call v1Call;
+  v1Call.set_type(v1::master::Call::GET_STATE);
+
+  master::Flags flags = CreateMasterFlags();
+
+  flags.hostname = "localhost";
+  flags.cluster = "test-cluster";
+
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  EXPECT_NE(0u, offers.get().size());
+
+  ContentType contentType = GetParam();
+
+  {
+    // GetState before task launch and check we have one framework, one agent
+    // and zero tasks/executors.
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response->IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_STATE, v1Response->type());
+
+    const v1::master::Response::GetState& getState = v1Response->get_state();
+    ASSERT_EQ(1u, getState.get_frameworks().frameworks_size());
+    ASSERT_EQ(1u, getState.get_agents().agents_size());
+    ASSERT_EQ(0u, getState.get_tasks().tasks_size());
+    ASSERT_EQ(0u, getState.get_executors().executors_size());
+  }
+
+  TaskInfo task = createTask(offers.get()[0], "", DEFAULT_EXECUTOR_ID);
+
+  Future<ExecutorDriver*> execDriver;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(FutureArg<0>(&execDriver));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<StatusUpdateAcknowledgementMessage> acknowledgement =
+    FUTURE_PROTOBUF(
+        StatusUpdateAcknowledgementMessage(),
+        Eq(master.get()->pid),
+        Eq(slave.get()->pid));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(execDriver);
+  AWAIT_READY(status);
+
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
+
+  AWAIT_READY(acknowledgement);
+
+  {
+    // GetState after task launch and check we have a running task.
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response->IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_STATE, v1Response->type());
+
+    const v1::master::Response::GetState& getState = v1Response->get_state();
+    ASSERT_EQ(1u, getState.get_tasks().tasks_size());
+    ASSERT_EQ(0u, getState.get_tasks().completed_tasks_size());
+  }
+
+  acknowledgement = FUTURE_PROTOBUF(
+      StatusUpdateAcknowledgementMessage(),
+      Eq(master.get()->pid),
+      Eq(slave.get()->pid));
+
+  Future<TaskStatus> status2;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status2));
+
+  // Send a terminal update so that the task transitions to completed.
+  TaskStatus status3;
+  status3.mutable_task_id()->CopyFrom(task.task_id());
+  status3.set_state(TASK_FINISHED);
+
+  execDriver.get()->sendStatusUpdate(status3);
+
+  AWAIT_READY(status2);
+  EXPECT_EQ(TASK_FINISHED, status2.get().state());
+
+  AWAIT_READY(acknowledgement);
+
+  {
+    // GetState after task finished and check we have a completed task.
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response->IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_STATE, v1Response->type());
+
+    const v1::master::Response::GetState& getState = v1Response->get_state();
+    ASSERT_EQ(1u, getState.get_tasks().completed_tasks_size());
+    ASSERT_EQ(0u, getState.get_tasks().tasks_size());
+  }
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+}
+
+
+TEST_P(MasterAPITest, GetTasksNoRunningTask)
+{
+  Try<Owned<cluster::Master>> master = this->StartMaster();
+  ASSERT_SOME(master);
+
+  v1::master::Call v1Call;
   v1Call.set_type(v1::master::Call::GET_TASKS);
 
   ContentType contentType = GetParam();
@@ -376,11 +581,136 @@ TEST_P(MasterAPITest, GetTasks)
   AWAIT_READY(v1Response);
   ASSERT_TRUE(v1Response.get().IsInitialized());
   ASSERT_EQ(v1::master::Response::GET_TASKS, v1Response.get().type());
-  ASSERT_EQ(1, v1Response.get().get_tasks().tasks_size());
-  ASSERT_EQ(v1::TaskState::TASK_RUNNING,
-            v1Response.get().get_tasks().tasks(0).state());
-  ASSERT_EQ("test", v1Response.get().get_tasks().tasks(0).name());
-  ASSERT_EQ("1", v1Response.get().get_tasks().tasks(0).task_id().value());
+
+  ASSERT_EQ(0, v1Response.get().get_tasks().pending_tasks().size());
+  ASSERT_EQ(0, v1Response.get().get_tasks().tasks().size());
+  ASSERT_EQ(0, v1Response.get().get_tasks().completed_tasks().size());
+  ASSERT_EQ(0, v1Response.get().get_tasks().orphan_tasks().size());
+}
+
+
+// This test verifies that the GetTasks v1 API call returns responses correctly
+// when the task transitions from being active to completed.
+TEST_P(MasterAPITest, GetTasks)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  TaskInfo task;
+  task.set_name("test");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
+  task.mutable_resources()->MergeFrom(offers.get()[0].resources());
+  task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+  Future<ExecutorDriver*> execDriver;
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .WillOnce(FutureArg<0>(&execDriver));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<StatusUpdateAcknowledgementMessage> acknowledgement =
+    FUTURE_PROTOBUF(
+        StatusUpdateAcknowledgementMessage(),
+        Eq(master.get()->pid),
+        Eq(slave.get()->pid));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(execDriver);
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
+  EXPECT_TRUE(status.get().has_executor_id());
+  EXPECT_EQ(exec.id, status.get().executor_id());
+
+  AWAIT_READY(acknowledgement);
+
+  v1::master::Call v1Call;
+  v1Call.set_type(v1::master::Call::GET_TASKS);
+
+  ContentType contentType = GetParam();
+
+  {
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_TASKS, v1Response.get().type());
+    ASSERT_EQ(1, v1Response.get().get_tasks().tasks().size());
+    ASSERT_EQ(v1::TaskState::TASK_RUNNING,
+              v1Response.get().get_tasks().tasks(0).state());
+    ASSERT_EQ("test", v1Response.get().get_tasks().tasks(0).name());
+    ASSERT_EQ("1", v1Response.get().get_tasks().tasks(0).task_id().value());
+  }
+
+  acknowledgement = FUTURE_PROTOBUF(
+      StatusUpdateAcknowledgementMessage(),
+      Eq(master.get()->pid),
+      Eq(slave.get()->pid));
+
+  Future<TaskStatus> status2;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status2));
+
+  // Send a terminal update so that the task transitions to completed.
+  TaskStatus status3;
+  status3.mutable_task_id()->CopyFrom(task.task_id());
+  status3.set_state(TASK_FINISHED);
+
+  execDriver.get()->sendStatusUpdate(status3);
+
+  AWAIT_READY(status2);
+  EXPECT_EQ(TASK_FINISHED, status2.get().state());
+
+  AWAIT_READY(acknowledgement);
+
+  {
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_TASKS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_tasks().tasks().size());
+    ASSERT_EQ(1, v1Response.get().get_tasks().completed_tasks().size());
+    ASSERT_EQ(v1::TaskState::TASK_FINISHED,
+              v1Response.get().get_tasks().completed_tasks(0).state());
+    ASSERT_EQ("test", v1Response.get().get_tasks().completed_tasks(0).name());
+    ASSERT_EQ(
+        "1",
+        v1Response.get().get_tasks().completed_tasks(0).task_id().value());
+  }
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -465,6 +795,68 @@ TEST_P(MasterAPITest, SetLoggingLevel)
 }
 
 
+// This test verifies if we can retrieve the file listing for a directory
+// in the master.
+TEST_P(MasterAPITest, ListFiles)
+{
+  Files files;
+
+  ASSERT_SOME(os::mkdir("1/2"));
+  ASSERT_SOME(os::mkdir("1/3"));
+  ASSERT_SOME(os::write("1/two", "two"));
+
+  AWAIT_EXPECT_READY(files.attach("1", "one"));
+
+  // Get the `FileInfo` for "1/two" file.
+  struct stat s;
+  ASSERT_EQ(0, stat("1/two", &s));
+  FileInfo file = protobuf::createFileInfo("one/two", s);
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  v1::master::Call v1Call;
+  v1Call.set_type(v1::master::Call::LIST_FILES);
+  v1Call.mutable_list_files()->set_path("one/");
+
+  ContentType contentType = GetParam();
+
+  Future<v1::master::Response> v1Response =
+    post(master.get()->pid, v1Call, contentType);
+
+  AWAIT_READY(v1Response);
+  ASSERT_TRUE(v1Response.get().IsInitialized());
+  ASSERT_EQ(v1::master::Response::LIST_FILES, v1Response.get().type());
+  ASSERT_EQ(3, v1Response.get().list_files().file_infos().size());
+  ASSERT_EQ(internal::evolve(file),
+            v1Response.get().list_files().file_infos(2));
+}
+
+
+// This test verifies that the client will receive a `NotFound` response when it
+// tries to make a `LIST_FILES` call with an invalid path.
+TEST_P(MasterAPITest, ListFilesInvalidPath)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  v1::master::Call v1Call;
+  v1Call.set_type(v1::master::Call::LIST_FILES);
+  v1Call.mutable_list_files()->set_path("five/");
+
+  ContentType contentType = GetParam();
+
+  Future<Response> response = process::http::post(
+    master.get()->pid,
+    "api/v1",
+    createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+    serialize(contentType, v1Call),
+    stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(NotFound().status, response);
+}
+
+
 TEST_P(MasterAPITest, GetRoles)
 {
   master::Flags masterFlags = CreateMasterFlags();
@@ -523,13 +915,13 @@ TEST_P(MasterAPITest, GetRoles)
 }
 
 
-TEST_P(MasterAPITest, GetLeadingMaster)
+TEST_P(MasterAPITest, GetMaster)
 {
   Try<Owned<cluster::Master>> master = this->StartMaster();
   ASSERT_SOME(master);
 
   v1::master::Call v1Call;
-  v1Call.set_type(v1::master::Call::GET_LEADING_MASTER);
+  v1Call.set_type(v1::master::Call::GET_MASTER);
 
   ContentType contentType = GetParam();
 
@@ -538,9 +930,9 @@ TEST_P(MasterAPITest, GetLeadingMaster)
 
   AWAIT_READY(v1Response);
   ASSERT_TRUE(v1Response->IsInitialized());
-  ASSERT_EQ(v1::master::Response::GET_LEADING_MASTER, v1Response->type());
+  ASSERT_EQ(v1::master::Response::GET_MASTER, v1Response->type());
   ASSERT_EQ(master.get()->getMasterInfo().ip(),
-            v1Response->get_leading_master().master_info().ip());
+            v1Response->get_master().master_info().ip());
 }
 
 
@@ -550,9 +942,13 @@ TEST_P(MasterAPITest, ReserveResources)
 {
   TestAllocator<> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
-  Try<Owned<cluster::Master>> master = StartMaster(&allocator);
+  // Set a low allocation interval to speed up this test.
+  master::Flags flags = MesosTest::CreateMasterFlags();
+  flags.allocation_interval = Milliseconds(50);
+
+  Try<Owned<cluster::Master>> master = StartMaster(&allocator, flags);
   ASSERT_SOME(master);
 
   Future<SlaveID> slaveId;
@@ -640,9 +1036,13 @@ TEST_P(MasterAPITest, UnreserveResources)
 {
   TestAllocator<> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
-  Try<Owned<cluster::Master>> master = StartMaster(&allocator);
+  // Set a low allocation interval to speed up this test.
+  master::Flags flags = MesosTest::CreateMasterFlags();
+  flags.allocation_interval = Milliseconds(50);
+
+  Try<Owned<cluster::Master>> master = StartMaster(&allocator, flags);
   ASSERT_SOME(master);
 
   Future<SlaveID> slaveId;
@@ -661,32 +1061,6 @@ TEST_P(MasterAPITest, UnreserveResources)
   Resources dynamicallyReserved = unreserved.flatten(
       frameworkInfo.role(),
       createReservationInfo(DEFAULT_CREDENTIAL.principal()));
-
-  MockScheduler sched;
-  MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
-
-  Future<vector<Offer>> offers;
-
-  EXPECT_CALL(sched, registered(&driver, _, _));
-
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
-
-  driver.start();
-
-  AWAIT_READY(offers);
-
-  ASSERT_EQ(1u, offers->size());
-  Offer offer = offers.get()[0];
-
-  EXPECT_TRUE(Resources(offer.resources()).contains(unreserved));
-
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers));
-
-  // Expect an offer to be rescinded!
-  EXPECT_CALL(sched, offerRescinded(_, _));
 
   v1::master::Call v1Call;
   v1Call.set_type(v1::master::Call::RESERVE_RESOURCES);
@@ -712,10 +1086,23 @@ TEST_P(MasterAPITest, UnreserveResources)
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(Accepted().status, reserveResponse);
 
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<vector<Offer>> offers;
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
   AWAIT_READY(offers);
 
   ASSERT_EQ(1u, offers->size());
-  offer = offers.get()[0];
+  Offer offer = offers.get()[0];
 
   EXPECT_TRUE(Resources(offer.resources()).contains(dynamicallyReserved));
 
@@ -725,7 +1112,6 @@ TEST_P(MasterAPITest, UnreserveResources)
   // Expect an offer to be rescinded!
   EXPECT_CALL(sched, offerRescinded(_, _));
 
-  // Unreserve the resources.
   v1Call.set_type(v1::master::Call::UNRESERVE_RESOURCES);
 
   v1::master::Call::UnreserveResources* unreserveResources =
@@ -752,6 +1138,7 @@ TEST_P(MasterAPITest, UnreserveResources)
   ASSERT_EQ(1u, offers->size());
   offer = offers.get()[0];
 
+  // Verifies if the resources are unreserved.
   EXPECT_TRUE(Resources(offer.resources()).contains(unreserved));
 
   driver.stop();
@@ -1014,44 +1401,11 @@ TEST_P(MasterAPITest, StartAndStopMaintenance)
 // endpoint is able to receive `TASK_ADDED`/`TASK_UPDATED` events.
 TEST_P(MasterAPITest, Subscribe)
 {
+  ContentType contentType = GetParam();
+
   Try<Owned<cluster::Master>> master = this->StartMaster();
   ASSERT_SOME(master);
 
-  v1::master::Call v1Call;
-  v1Call.set_type(v1::master::Call::SUBSCRIBE);
-
-  process::http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
-
-  ContentType contentType = GetParam();
-  headers["Accept"] = stringify(contentType);
-
-  Future<Response> response = process::http::streaming::post(
-      master.get()->pid,
-      "api/v1",
-      headers,
-      serialize(contentType, v1Call),
-      stringify(contentType));
-
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
-  AWAIT_EXPECT_RESPONSE_HEADER_EQ("chunked", "Transfer-Encoding", response);
-  ASSERT_EQ(Response::PIPE, response.get().type);
-  ASSERT_SOME(response->reader);
-
-  Pipe::Reader reader = response->reader.get();
-
-  auto deserializer =
-    lambda::bind(deserialize<v1::master::Event>, contentType, lambda::_1);
-
-  Reader<v1::master::Event> decoder(
-      Decoder<v1::master::Event>(deserializer), reader);
-
-  Future<Result<v1::master::Event>> event = decoder.read();
-
-  EXPECT_TRUE(event.isPending());
-
-  // Launch a task using the scheduler. This should result in a `TASK_ADDED`
-  // event when the task is launched followed by a `TASK_UPDATED` event after
-  // the task transitions to running state.
   auto scheduler = std::make_shared<MockV1HTTPScheduler>();
   auto executor = std::make_shared<MockV1HTTPExecutor>();
 
@@ -1093,17 +1447,65 @@ TEST_P(MasterAPITest, Subscribe)
 
   AWAIT_READY(subscribed);
 
+  // Launch a task using the scheduler. This should result in a `TASK_ADDED`
+  // event when the task is launched followed by a `TASK_UPDATED` event after
+  // the task transitions to running state.
   v1::FrameworkID frameworkId(subscribed->framework_id());
 
   AWAIT_READY(offers);
   EXPECT_NE(0, offers->offers().size());
 
+  // Create event stream after seeing first offer but before first task is
+  // launched. We should see one framework, one agent and zero task/executor.
+  v1::master::Call v1Call;
+  v1Call.set_type(v1::master::Call::SUBSCRIBE);
+
+  process::http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+
+  headers["Accept"] = stringify(contentType);
+
+  Future<Response> response = process::http::streaming::post(
+      master.get()->pid,
+      "api/v1",
+      headers,
+      serialize(contentType, v1Call),
+      stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ("chunked", "Transfer-Encoding", response);
+  ASSERT_EQ(Response::PIPE, response.get().type);
+  ASSERT_SOME(response->reader);
+
+  Pipe::Reader reader = response->reader.get();
+
+  auto deserializer =
+    lambda::bind(deserialize<v1::master::Event>, contentType, lambda::_1);
+
+  Reader<v1::master::Event> decoder(
+      Decoder<v1::master::Event>(deserializer), reader);
+
+  Future<Result<v1::master::Event>> event = decoder.read();
+  AWAIT_READY(event);
+
+  EXPECT_EQ(v1::master::Event::SUBSCRIBED, event.get().get().type());
+  const v1::master::Response::GetState& getState =
+      event.get().get().subscribed().get_state();
+
+  EXPECT_EQ(1u, getState.get_frameworks().frameworks_size());
+  EXPECT_EQ(1u, getState.get_agents().agents_size());
+  EXPECT_EQ(0u, getState.get_tasks().tasks_size());
+  EXPECT_EQ(0u, getState.get_executors().executors_size());
+
+  event = decoder.read();
+  EXPECT_TRUE(event.isPending());
+
   const v1::Offer& offer = offers->offers(0);
 
   TaskInfo task = createTask(internal::devolve(offer), "", executorId);
 
+  Future<Nothing> update;
   EXPECT_CALL(*scheduler, update(_, _))
-    .Times(2);
+    .WillOnce(FutureSatisfy(&update));
 
   EXPECT_CALL(*executor, connected(_))
     .WillOnce(executor::SendSubscribe(
@@ -1136,6 +1538,7 @@ TEST_P(MasterAPITest, Subscribe)
   }
 
   AWAIT_READY(event);
+  AWAIT_READY(update);
 
   ASSERT_EQ(v1::master::Event::TASK_ADDED, event.get().get().type());
   ASSERT_EQ(internal::evolve(task.task_id()),
@@ -1150,12 +1553,18 @@ TEST_P(MasterAPITest, Subscribe)
 
   event = decoder.read();
 
+  Future<Nothing> update2;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureSatisfy(&update2));
+
   // After we advance the clock, the status update manager would retry the
   // `TASK_RUNNING` update. Since, the state of the task is not changed, this
   // should not result in another `TASK_UPDATED` event.
   Clock::pause();
   Clock::advance(slave::STATUS_UPDATE_RETRY_INTERVAL_MIN);
   Clock::settle();
+
+  AWAIT_READY(update2);
 
   EXPECT_TRUE(event.isPending());
 
@@ -1166,6 +1575,60 @@ TEST_P(MasterAPITest, Subscribe)
 
   EXPECT_CALL(*executor, disconnected(_))
     .Times(AtMost(1));
+}
+
+
+// This test verifies if we can retrieve the current quota status through
+// `GET_QUOTA` call, after we set quota resources through `SET_QUOTA` call.
+TEST_P(MasterAPITest, GetQuota)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  v1::Resources quotaResources =
+    v1::Resources::parse("cpus:1;mem:512").get();
+
+  ContentType contentType = GetParam();
+
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::SET_QUOTA);
+
+    v1::quota::QuotaRequest* quotaRequest =
+      v1Call.mutable_set_quota()->mutable_quota_request();
+
+    // Use the force flag for setting quota that cannot be satisfied in
+    // this empty cluster without any agents.
+    quotaRequest->set_force(true);
+    quotaRequest->set_role("role1");
+    quotaRequest->mutable_guarantee()->CopyFrom(quotaResources);
+
+    // Send a quota request for the specified role.
+    Future<Response> response = process::http::post(
+        master.get()->pid,
+        "api/v1",
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+        serialize(contentType, v1Call),
+        stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  }
+
+  // Verify the quota is set using the `GET_QUOTA` call.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_QUOTA);
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response->IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_QUOTA, v1Response->type());
+    ASSERT_EQ(1, v1Response->get_quota().status().infos().size());
+    EXPECT_EQ(quotaResources,
+              v1Response->get_quota().status().infos(0).guarantee());
+  }
 }
 
 
@@ -1200,6 +1663,97 @@ TEST_P(MasterAPITest, SetQuota)
       stringify(contentType));
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+}
+
+
+// This test verifies if we can remove a quota through `REMOVE_QUOTA` call,
+// after we set quota resources through `SET_QUOTA` call.
+TEST_P(MasterAPITest, RemoveQuota)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  v1::Resources quotaResources =
+    v1::Resources::parse("cpus:1;mem:512").get();
+
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::SET_QUOTA);
+
+    v1::quota::QuotaRequest* quotaRequest =
+      v1Call.mutable_set_quota()->mutable_quota_request();
+
+    // Use the force flag for setting quota that cannot be satisfied in
+    // this empty cluster without any agents.
+    quotaRequest->set_force(true);
+    quotaRequest->set_role("role1");
+    quotaRequest->mutable_guarantee()->CopyFrom(quotaResources);
+
+    ContentType contentType = GetParam();
+
+    // Send a quota request for the specified role.
+    Future<Response> response = process::http::post(
+        master.get()->pid,
+        "api/v1",
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+        serialize(contentType, v1Call),
+        stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  }
+
+  // Verify if the quota is set using `GET_QUOTA` call.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_QUOTA);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response->IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_QUOTA, v1Response->type());
+    ASSERT_EQ(1, v1Response->get_quota().status().infos().size());
+    EXPECT_EQ(quotaResources,
+      v1Response->get_quota().status().infos(0).guarantee());
+  }
+
+  // Remove the quota using `REMOVE_QUOTA` call.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::REMOVE_QUOTA);
+    v1Call.mutable_remove_quota()->set_role("role1");
+
+    ContentType contentType = GetParam();
+
+    // Send a quota request for the specified role.
+    Future<Response> response = process::http::post(
+        master.get()->pid,
+        "api/v1",
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+        serialize(contentType, v1Call),
+        stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  }
+
+  // Verify if the quota is removed using `GET_QUOTA` call.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_QUOTA);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response->IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_QUOTA, v1Response->type());
+    ASSERT_EQ(0, v1Response->get_quota().status().infos().size());
+  }
 }
 
 
@@ -1378,6 +1932,198 @@ TEST_P(MasterAPITest, GetWeights)
 }
 
 
+TEST_P(MasterAPITest, UpdateWeights)
+{
+  // Start a master with `--weights` flag.
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.weights = "role=2.0";
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  v1::master::Call getCall, updateCall;
+  getCall.set_type(v1::master::Call::GET_WEIGHTS);
+  updateCall.set_type(v1::master::Call::UPDATE_WEIGHTS);
+
+  ContentType contentType = GetParam();
+
+  Future<v1::master::Response> getResponse =
+    post(master.get()->pid, getCall, contentType);
+
+  AWAIT_READY(getResponse);
+  ASSERT_TRUE(getResponse->IsInitialized());
+  ASSERT_EQ(v1::master::Response::GET_WEIGHTS, getResponse->type());
+  ASSERT_EQ(1, getResponse->get_weights().weight_infos_size());
+  ASSERT_EQ("role", getResponse->get_weights().weight_infos().Get(0).role());
+  ASSERT_EQ(2.0, getResponse->get_weights().weight_infos().Get(0).weight());
+
+  v1::WeightInfo* weightInfo =
+    updateCall.mutable_update_weights()->add_weight_infos();
+  weightInfo->set_role("role");
+  weightInfo->set_weight(4.0);
+
+  process::http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+  headers["Accept"] = stringify(contentType);
+
+  Future<Nothing> updateResponse = process::http::post(
+      master.get()->pid,
+      "api/v1",
+      headers,
+      serialize(contentType, updateCall),
+      stringify(contentType))
+    .then([contentType](const Response& response) -> Future<Nothing> {
+      if (response.status != OK().status) {
+        return Failure("Unexpected response status " + response.status);
+      }
+      return Nothing();
+    });
+
+  AWAIT_READY(updateResponse);
+
+  getResponse = post(master.get()->pid, getCall, contentType);
+
+  AWAIT_READY(getResponse);
+  ASSERT_TRUE(getResponse->IsInitialized());
+  ASSERT_EQ(v1::master::Response::GET_WEIGHTS, getResponse->type());
+  ASSERT_EQ(1, getResponse->get_weights().weight_infos_size());
+  ASSERT_EQ("role", getResponse->get_weights().weight_infos().Get(0).role());
+  ASSERT_EQ(4.0, getResponse->get_weights().weight_infos().Get(0).weight());
+}
+
+
+// This test verifies if we can retrieve file data in the master.
+TEST_P(MasterAPITest, ReadFile)
+{
+  Files files;
+
+  // Now write a file.
+  ASSERT_SOME(os::write("file", "body"));
+  AWAIT_EXPECT_READY(files.attach("file", "myname"));
+
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  ContentType contentType = GetParam();
+
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::READ_FILE);
+
+    v1::master::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(1);
+    readFile->set_length(2);
+    readFile->set_path("myname");
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("od", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+
+  // Read the file with `offset >= size`. This should return the size of file
+  // and empty data.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::READ_FILE);
+
+    v1::master::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(5);
+    readFile->set_length(2);
+    readFile->set_path("myname");
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+
+  // Read the file without length being set and `offset=0`. This should read
+  // the entire file.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::READ_FILE);
+
+    v1::master::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(0);
+    readFile->set_path("myname");
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("body", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+
+  // Read the file with `length > size - offset`. This should return the
+  // data actually read.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::READ_FILE);
+
+    v1::master::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(1);
+    readFile->set_length(6);
+    readFile->set_path("myname");
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("ody", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+}
+
+
+// This test verifies that the client will receive a `NotFound` response when
+// it tries to make a `READ_FILE` call with an invalid path.
+TEST_P(MasterAPITest, ReadFileInvalidPath)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  // Read an invalid file.
+  v1::master::Call v1Call;
+  v1Call.set_type(v1::master::Call::READ_FILE);
+
+  v1::master::Call::ReadFile* readFile = v1Call.mutable_read_file();
+  readFile->set_offset(1);
+  readFile->set_length(2);
+  readFile->set_path("invalid_file");
+
+  ContentType contentType = GetParam();
+
+  Future<Response> response = process::http::post(
+    master.get()->pid,
+    "api/v1",
+    createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+    serialize(contentType, v1Call),
+    stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(NotFound().status, response);
+}
+
+
 class AgentAPITest
   : public MesosTest,
     public WithParamInterface<ContentType>
@@ -1425,8 +2171,11 @@ TEST_P(AgentAPITest, GetFlags)
   Try<Owned<cluster::Slave>> slave = this->StartSlave(&detector);
   ASSERT_SOME(slave);
 
-  // Wait until the agent has finished recovery.
   AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
 
   v1::agent::Call v1Call;
   v1Call.set_type(v1::agent::Call::GET_FLAGS);
@@ -1450,8 +2199,11 @@ TEST_P(AgentAPITest, GetHealth)
   Try<Owned<cluster::Slave>> slave = this->StartSlave(&detector);
   ASSERT_SOME(slave);
 
-  // Wait until the agent has finished recovery.
   AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
 
   v1::agent::Call v1Call;
   v1Call.set_type(v1::agent::Call::GET_HEALTH);
@@ -1476,8 +2228,11 @@ TEST_P(AgentAPITest, GetVersion)
   Try<Owned<cluster::Slave>> slave = this->StartSlave(&detector);
   ASSERT_SOME(slave);
 
-  // Wait until the agent has finished recovery.
   AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
 
   v1::agent::Call v1Call;
   v1Call.set_type(v1::agent::Call::GET_VERSION);
@@ -1504,8 +2259,11 @@ TEST_P(AgentAPITest, GetMetrics)
   Try<Owned<cluster::Slave>> slave = this->StartSlave(&detector);
   ASSERT_SOME(slave);
 
-  // Wait until the agent has finished recovery.
   AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
 
   Duration timeout = Seconds(5);
 
@@ -1544,8 +2302,11 @@ TEST_P(AgentAPITest, GetLoggingLevel)
   Try<Owned<cluster::Slave>> slave = this->StartSlave(&detector);
   ASSERT_SOME(slave);
 
-  // Wait until the agent has finished recovery.
   AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
 
   v1::agent::Call v1Call;
   v1Call.set_type(v1::agent::Call::GET_LOGGING_LEVEL);
@@ -1574,8 +2335,11 @@ TEST_P(AgentAPITest, SetLoggingLevel)
   Try<Owned<cluster::Slave>> slave = this->StartSlave(&detector);
   ASSERT_SOME(slave);
 
-  // Wait until the agent has finished recovery.
   AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
 
   // We capture the original logging level first; it would be used to verify
   // the logging level revert works.
@@ -1620,6 +2384,86 @@ TEST_P(AgentAPITest, SetLoggingLevel)
   // Verifies the logging level reverted successfully.
   ASSERT_EQ(originalLevel, static_cast<uint32_t>(FLAGS_v));
   Clock::resume();
+}
+
+
+// This test verifies if we can retrieve the file listing for a directory
+// in an agent.
+TEST_P(AgentAPITest, ListFiles)
+{
+  Files files;
+
+  ASSERT_SOME(os::mkdir("1/2"));
+  ASSERT_SOME(os::mkdir("1/3"));
+  ASSERT_SOME(os::write("1/two", "two"));
+
+  AWAIT_EXPECT_READY(files.attach("1", "one"));
+
+  // Get the `FileInfo` for "1/two" file.
+  struct stat s;
+  ASSERT_EQ(0, stat("1/two", &s));
+  FileInfo file = protobuf::createFileInfo("one/two", s);
+
+  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
+
+  StandaloneMasterDetector detector;
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
+
+  v1::agent::Call v1Call;
+  v1Call.set_type(v1::agent::Call::LIST_FILES);
+  v1Call.mutable_list_files()->set_path("one/");
+
+  ContentType contentType = GetParam();
+
+  Future<v1::agent::Response> v1Response =
+    post(slave.get()->pid, v1Call, contentType);
+
+  AWAIT_READY(v1Response);
+  ASSERT_TRUE(v1Response.get().IsInitialized());
+  ASSERT_EQ(v1::agent::Response::LIST_FILES, v1Response.get().type());
+  ASSERT_EQ(3, v1Response.get().list_files().file_infos().size());
+  ASSERT_EQ(internal::evolve(file),
+            v1Response.get().list_files().file_infos(2));
+}
+
+
+// This test verifies that the client will receive a `NotFound` response when it
+// tries to make a `LIST_FILES` call with an invalid path.
+TEST_P(AgentAPITest, ListFilesInvalidPath)
+{
+  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
+
+  StandaloneMasterDetector detector;
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
+
+  v1::agent::Call v1Call;
+  v1Call.set_type(v1::agent::Call::LIST_FILES);
+  v1Call.mutable_list_files()->set_path("five/");
+
+  ContentType contentType = GetParam();
+
+  Future<Response> response = process::http::post(
+    slave.get()->pid,
+    "api/v1",
+    createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+    serialize(contentType, v1Call),
+    stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(NotFound().status, response);
 }
 
 
@@ -1725,6 +2569,638 @@ TEST_P(AgentAPITest, GetContainers)
 
   driver.stop();
   driver.join();
+}
+
+
+// This test verifies if we can retrieve file data in the agent.
+TEST_P(AgentAPITest, ReadFile)
+{
+  Files files;
+
+  // Now write a file.
+  ASSERT_SOME(os::write("file", "body"));
+  AWAIT_EXPECT_READY(files.attach("file", "myname"));
+
+  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
+
+  StandaloneMasterDetector detector;
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
+
+  ContentType contentType = GetParam();
+
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::READ_FILE);
+
+    v1::agent::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(1);
+    readFile->set_length(2);
+    readFile->set_path("myname");
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("od", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+
+  // Read the file with `offset >= size`. This should return the size of file
+  // and empty data.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::READ_FILE);
+
+    v1::agent::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(5);
+    readFile->set_length(2);
+    readFile->set_path("myname");
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+
+  // Read the file without length being set and `offset=0`. This should read
+  // the entire file.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::READ_FILE);
+
+    v1::agent::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(0);
+    readFile->set_path("myname");
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("body", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+
+  // Read the file with `length > size - offset`. This should return the
+  // data actually read.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::READ_FILE);
+
+    v1::agent::Call::ReadFile* readFile = v1Call.mutable_read_file();
+    readFile->set_offset(1);
+    readFile->set_length(6);
+    readFile->set_path("myname");
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::READ_FILE, v1Response.get().type());
+
+    ASSERT_EQ("ody", v1Response.get().read_file().data());
+    ASSERT_EQ(4, v1Response.get().read_file().size());
+  }
+}
+
+
+// This test verifies that the client will receive a `NotFound` response when
+// it tries to make a `READ_FILE` call with an invalid path.
+TEST_P(AgentAPITest, ReadFileInvalidPath)
+{
+  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
+
+  StandaloneMasterDetector detector;
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
+
+  // Read an invalid file.
+  v1::agent::Call v1Call;
+  v1Call.set_type(v1::agent::Call::READ_FILE);
+
+  v1::agent::Call::ReadFile* readFile = v1Call.mutable_read_file();
+  readFile->set_offset(1);
+  readFile->set_length(2);
+  readFile->set_path("invalid_file");
+
+  ContentType contentType = GetParam();
+
+  Future<Response> response = process::http::post(
+    slave.get()->pid,
+    "api/v1",
+    createBasicAuthHeaders(DEFAULT_CREDENTIAL),
+    serialize(contentType, v1Call),
+    stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(NotFound().status, response);
+}
+
+
+TEST_P(AgentAPITest, GetFrameworks)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(_, _, _));
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(offer.resources());
+
+  CommandInfo command;
+  command.set_value("sleep 1000");
+  task.mutable_command()->MergeFrom(command);
+
+  Future<TaskStatus> statusRunning;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning));
+
+  ContentType contentType = GetParam();
+
+  // No tasks launched, we should expect zero frameworks in Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_FRAMEWORKS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_FRAMEWORKS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_frameworks().frameworks_size());
+    ASSERT_EQ(0, v1Response.get().get_frameworks().completed_frameworks_size());
+  }
+
+  driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusRunning);
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+
+  // A task launched, we expect one framework in Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_FRAMEWORKS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_FRAMEWORKS, v1Response.get().type());
+    ASSERT_EQ(1, v1Response.get().get_frameworks().frameworks_size());
+    ASSERT_EQ(0, v1Response.get().get_frameworks().completed_frameworks_size());
+  }
+
+  // Make sure the executor terminated.
+  Future<Nothing> executorTerminated =
+    FUTURE_DISPATCH(_, &Slave::executorTerminated);
+
+  driver.stop();
+  driver.join();
+
+  AWAIT_READY(executorTerminated);
+
+  // After the executor terminated, we should expect one completed framework in
+  // Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_FRAMEWORKS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_FRAMEWORKS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_frameworks().frameworks_size());
+    ASSERT_EQ(1, v1Response.get().get_frameworks().completed_frameworks_size());
+  }
+}
+
+
+TEST_P(AgentAPITest, GetExecutors)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(_, _, _));
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(offer.resources());
+
+  CommandInfo command;
+  command.set_value("sleep 1000");
+  task.mutable_command()->MergeFrom(command);
+
+  Future<TaskStatus> statusRunning;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning));
+
+  ContentType contentType = GetParam();
+
+  // No tasks launched, we should expect zero executors in Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_EXECUTORS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_EXECUTORS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_executors().executors_size());
+    ASSERT_EQ(0, v1Response.get().get_executors().completed_executors_size());
+  }
+
+  driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusRunning);
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+
+  // A task launched, we expect one executor in Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_EXECUTORS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_EXECUTORS, v1Response.get().type());
+    ASSERT_EQ(1, v1Response.get().get_executors().executors_size());
+    ASSERT_EQ(0, v1Response.get().get_executors().completed_executors_size());
+  }
+
+  // Make sure the executor terminated.
+  Future<Nothing> executorTerminated =
+    FUTURE_DISPATCH(_, &Slave::executorTerminated);
+
+  driver.stop();
+  driver.join();
+
+  AWAIT_READY(executorTerminated);
+
+  // Make sure `Framework::destroyExecutor()` is processed.
+  Clock::pause();
+  Clock::settle();
+
+  // After the executor terminated, we should expect one completed executor in
+  // Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_EXECUTORS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_EXECUTORS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_executors().executors_size());
+    ASSERT_EQ(1, v1Response.get().get_executors().completed_executors_size());
+  }
+}
+
+
+TEST_P(AgentAPITest, GetTasks)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(_, _, _));
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(offer.resources());
+
+  CommandInfo command;
+  command.set_value("sleep 1000");
+  task.mutable_command()->MergeFrom(command);
+
+  Future<TaskStatus> statusRunning;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning));
+
+  ContentType contentType = GetParam();
+
+  // No tasks launched, we should expect zero tasks in Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_TASKS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_TASKS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_tasks().pending_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().queued_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().launched_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().terminated_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().completed_tasks_size());
+  }
+
+  driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusRunning);
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+
+  // A task launched, we expect one task in Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_TASKS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_TASKS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_tasks().pending_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().queued_tasks_size());
+    ASSERT_EQ(1, v1Response.get().get_tasks().launched_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().terminated_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().completed_tasks_size());
+  }
+
+  Clock::pause();
+
+  // Kill the task.
+  Future<TaskStatus> statusKilled;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusKilled));
+
+  Future<Nothing> _statusUpdateAcknowledgement =
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
+
+  driver.killTask(statusRunning->task_id());
+
+  AWAIT_READY(statusKilled);
+  EXPECT_EQ(TASK_KILLED, statusKilled->state());
+
+  // Make sure the agent receives and properly handles the ACK.
+  AWAIT_READY(_statusUpdateAcknowledgement);
+  Clock::settle();
+  Clock::resume();
+
+  // After the executor terminated, we should expect one completed task in
+  // Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_TASKS);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_TASKS, v1Response.get().type());
+    ASSERT_EQ(0, v1Response.get().get_tasks().pending_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().queued_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().launched_tasks_size());
+    ASSERT_EQ(0, v1Response.get().get_tasks().terminated_tasks_size());
+    ASSERT_EQ(1, v1Response.get().get_tasks().completed_tasks_size());
+  }
+
+  driver.stop();
+  driver.join();
+}
+
+
+TEST_P(AgentAPITest, GetState)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(_, _, _));
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+  const Offer& offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(offer.resources());
+
+  CommandInfo command;
+  command.set_value("sleep 1000");
+  task.mutable_command()->MergeFrom(command);
+
+  Future<TaskStatus> statusRunning;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning));
+
+  ContentType contentType = GetParam();
+
+  // GetState before task launch, we should expect zero
+  // frameworks/tasks/executors in Response.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_STATE);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_STATE, v1Response.get().type());
+
+    const v1::agent::Response::GetState& getState = v1Response->get_state();
+    ASSERT_EQ(0u, getState.get_frameworks().frameworks_size());
+    ASSERT_EQ(0u, getState.get_tasks().launched_tasks_size());
+    ASSERT_EQ(0u, getState.get_executors().executors_size());
+  }
+
+  driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(statusRunning);
+  EXPECT_EQ(TASK_RUNNING, statusRunning->state());
+
+  // GetState after task launch and check we have a running
+  // framework/task/executor.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_STATE);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_STATE, v1Response.get().type());
+
+    const v1::agent::Response::GetState& getState = v1Response->get_state();
+    ASSERT_EQ(1u, getState.get_frameworks().frameworks_size());
+    ASSERT_EQ(0u, getState.get_frameworks().completed_frameworks_size());
+    ASSERT_EQ(1u, getState.get_tasks().launched_tasks_size());
+    ASSERT_EQ(0u, getState.get_tasks().completed_tasks_size());
+    ASSERT_EQ(1u, getState.get_executors().executors_size());
+    ASSERT_EQ(0u, getState.get_executors().completed_executors_size());
+  }
+
+  Clock::pause();
+
+  // Kill the task.
+  Future<TaskStatus> statusKilled;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusKilled));
+
+  Future<Nothing> _statusUpdateAcknowledgement =
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
+
+  driver.killTask(statusRunning->task_id());
+
+  AWAIT_READY(statusKilled);
+  EXPECT_EQ(TASK_KILLED, statusKilled->state());
+
+  // Make sure the agent receives and properly handles the ACK of `TASK_KILLED`.
+  AWAIT_READY(_statusUpdateAcknowledgement);
+  Clock::settle();
+  Clock::resume();
+
+  // Make sure the executor terminated.
+  Future<Nothing> executorTerminated =
+    FUTURE_DISPATCH(_, &Slave::executorTerminated);
+
+  driver.stop();
+  driver.join();
+
+  AWAIT_READY(executorTerminated);
+
+  // Make sure `Framework::destroyExecutor()` is processed.
+  Clock::pause();
+  Clock::settle();
+
+  // After the executor terminated, we should expect a completed
+  // framework/task/executor.
+  {
+    v1::agent::Call v1Call;
+    v1Call.set_type(v1::agent::Call::GET_STATE);
+
+    Future<v1::agent::Response> v1Response =
+      post(slave.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::agent::Response::GET_STATE, v1Response.get().type());
+
+    const v1::agent::Response::GetState& getState = v1Response->get_state();
+    ASSERT_EQ(0u, getState.get_frameworks().frameworks_size());
+    ASSERT_EQ(1u, getState.get_frameworks().completed_frameworks_size());
+    ASSERT_EQ(0u, getState.get_tasks().launched_tasks_size());
+    ASSERT_EQ(1u, getState.get_tasks().completed_tasks_size());
+    ASSERT_EQ(0u, getState.get_executors().executors_size());
+    ASSERT_EQ(1u, getState.get_executors().completed_executors_size());
+  }
 }
 
 } // namespace tests {

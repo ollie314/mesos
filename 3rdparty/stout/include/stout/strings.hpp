@@ -207,12 +207,12 @@ inline std::vector<std::string> split(
 // Would return a map with the following:
 //   bar: ["2"]
 //   foo: ["1", "3"]
-inline std::map<std::string, std::vector<std::string> > pairs(
+inline std::map<std::string, std::vector<std::string>> pairs(
     const std::string& s,
     const std::string& delims1,
     const std::string& delims2)
 {
-  std::map<std::string, std::vector<std::string> > result;
+  std::map<std::string, std::vector<std::string>> result;
 
   const std::vector<std::string> tokens = tokenize(s, delims1);
   foreach (const std::string& token, tokens) {
@@ -367,13 +367,27 @@ inline bool checkBracketsMatching(
 
 inline bool startsWith(const std::string& s, const std::string& prefix)
 {
-  return s.find(prefix) == 0;
+  return s.size() >= prefix.size() &&
+         std::equal(prefix.begin(), prefix.end(), s.begin());
+}
+
+
+inline bool startsWith(const std::string& s, char c)
+{
+  return !s.empty() && s.front() == c;
 }
 
 
 inline bool endsWith(const std::string& s, const std::string& suffix)
 {
-  return s.rfind(suffix) == s.length() - suffix.length();
+  return s.size() >= suffix.size() &&
+         std::equal(suffix.rbegin(), suffix.rend(), s.rbegin());
+}
+
+
+inline bool endsWith(const std::string& s, char c)
+{
+  return !s.empty() && s.back() == c;
 }
 
 

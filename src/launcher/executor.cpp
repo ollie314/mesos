@@ -26,8 +26,7 @@
 #include <string>
 #include <vector>
 
-#include <mesos/v1/executor.hpp>
-#include <mesos/v1/mesos.hpp>
+#include <mesos/mesos.hpp>
 
 #include <mesos/type_utils.hpp>
 
@@ -35,6 +34,7 @@
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/future.hpp>
+#include <process/id.hpp>
 #include <process/io.hpp>
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
@@ -65,8 +65,10 @@
 #include <stout/os/killtree.hpp>
 
 #include "common/http.hpp"
+#include "common/protobuf_utils.hpp"
 #include "common/status_utils.hpp"
 
+#include "internal/devolve.hpp"
 #include "internal/evolve.hpp"
 
 #ifdef __linux__
@@ -74,6 +76,8 @@
 #endif
 
 #include "executor/v0_v1executor.hpp"
+
+#include "health-check/health_checker.hpp"
 
 #include "launcher/executor.hpp"
 
@@ -103,29 +107,21 @@ using process::Subprocess;
 using process::Time;
 using process::Timer;
 
-using mesos::internal::evolve;
-using mesos::internal::TaskHealthStatus;
+using mesos::executor::Call;
+using mesos::executor::Event;
 
-using mesos::v1::ExecutorID;
-using mesos::v1::FrameworkID;
-
-using mesos::v1::executor::Call;
-using mesos::v1::executor::Event;
 using mesos::v1::executor::Mesos;
 using mesos::v1::executor::MesosBase;
 using mesos::v1::executor::V0ToV1Adapter;
 
-
 namespace mesos {
-namespace v1 {
 namespace internal {
 
 class CommandExecutor: public ProtobufProcess<CommandExecutor>
 {
 public:
   CommandExecutor(
-      const Option<char**>& _override,
-      const string& _healthCheckDir,
+      const string& _launcherDir,
       const Option<string>& _rootfs,
       const Option<string>& _sandboxDirectory,
       const Option<string>& _workingDirectory,
@@ -134,18 +130,17 @@ public:
       const FrameworkID& _frameworkId,
       const ExecutorID& _executorId,
       const Duration& _shutdownGracePeriod)
-    : state(DISCONNECTED),
+    : ProcessBase(process::ID::generate("command-executor")),
+      state(DISCONNECTED),
       launched(false),
       killed(false),
       killedByHealthCheck(false),
       terminated(false),
       pid(-1),
-      healthPid(-1),
       shutdownGracePeriod(_shutdownGracePeriod),
       frameworkInfo(None()),
       taskId(None()),
-      healthCheckDir(_healthCheckDir),
-      override(_override),
+      launcherDir(_launcherDir),
       rootfs(_rootfs),
       sandboxDirectory(_sandboxDirectory),
       workingDirectory(_workingDirectory),
@@ -181,65 +176,69 @@ public:
     state = DISCONNECTED;
   }
 
-  void received(queue<Event> events)
+  void received(const Event& event)
   {
-    while (!events.empty()) {
-      Event event = events.front();
-      events.pop();
+    cout << "Received " << event.type() << " event" << endl;
 
-      cout << "Received " << event.type() << " event" << endl;
+    switch (event.type()) {
+      case Event::SUBSCRIBED: {
+        cout << "Subscribed executor on "
+             << event.subscribed().slave_info().hostname() << endl;
 
-      switch (event.type()) {
-        case Event::SUBSCRIBED: {
-          cout << "Subscribed executor on "
-               << event.subscribed().agent_info().hostname() << endl;
+        frameworkInfo = event.subscribed().framework_info();
+        state = SUBSCRIBED;
+        break;
+      }
 
-          frameworkInfo = event.subscribed().framework_info();
-          state = SUBSCRIBED;
-          break;
-        }
+      case Event::LAUNCH: {
+        launch(event.launch().task());
+        break;
+      }
 
-        case Event::LAUNCH: {
-          launch(event.launch().task());
-          break;
-        }
+      case Event::LAUNCH_GROUP: {
+        cerr << "LAUNCH_GROUP event is not supported" << endl;
+        // Shut down because this is unexpected; `LAUNCH_GROUP` event
+        // should only ever go to a group-capable default executor and
+        // not the command executor.
+        shutdown();
+        break;
+      }
 
-        case Event::KILL: {
-          Option<KillPolicy> override = event.kill().has_kill_policy()
-            ? Option<KillPolicy>(event.kill().kill_policy())
-            : None();
+      case Event::KILL: {
+        Option<KillPolicy> override = event.kill().has_kill_policy()
+          ? Option<KillPolicy>(event.kill().kill_policy())
+          : None();
 
-          kill(event.kill().task_id(), override);
-          break;
-        }
+        kill(event.kill().task_id(), override);
+        break;
+      }
 
-        case Event::ACKNOWLEDGED: {
-          // Remove the corresponding update.
-          updates.erase(UUID::fromBytes(event.acknowledged().uuid()).get());
+      case Event::ACKNOWLEDGED: {
+        // Remove the corresponding update.
+        updates.erase(UUID::fromBytes(event.acknowledged().uuid()).get());
 
-          // Remove the corresponding task.
-          task = None();
-          break;
-        }
+        // Remove the corresponding task.
+        task = None();
+        break;
+      }
 
-        case Event::SHUTDOWN: {
-          shutdown();
-          break;
-        }
+      case Event::SHUTDOWN: {
+        shutdown();
+        break;
+      }
 
-        case Event::MESSAGE: {
-          break;
-        }
+      case Event::MESSAGE: {
+        break;
+      }
 
-        case Event::ERROR: {
-          cerr << "Error: " << event.error().message() << endl;
-          break;
-        }
+      case Event::ERROR: {
+        cerr << "Error: " << event.error().message() << endl;
+        break;
+      }
 
-        case Event::UNKNOWN: {
-          LOG(WARNING) << "Received an UNKNOWN event and ignored";
-          break;
-        }
+      case Event::UNKNOWN: {
+        LOG(WARNING) << "Received an UNKNOWN event and ignored";
+        break;
       }
     }
   }
@@ -247,9 +246,6 @@ public:
 protected:
   virtual void initialize()
   {
-    // TODO(qianzhang): Currently, the `mesos-health-check` binary can only
-    // send unversioned `TaskHealthStatus` messages. This needs to be revisited
-    // as part of MESOS-5103.
     install<TaskHealthStatus>(
         &CommandExecutor::taskHealthUpdated,
         &TaskHealthStatus::task_id,
@@ -262,31 +258,45 @@ protected:
     // after the process has spawned.
     if (value.isSome() && value.get() == "1") {
       mesos.reset(new Mesos(
-          mesos::ContentType::PROTOBUF,
+          ContentType::PROTOBUF,
           defer(self(), &Self::connected),
           defer(self(), &Self::disconnected),
-          defer(self(), &Self::received, lambda::_1)));
+          defer(self(), [this](queue<v1::executor::Event> events) {
+            while(!events.empty()) {
+              const v1::executor::Event& event = events.front();
+              received(devolve(event));
+
+              events.pop();
+            }
+          })));
     } else {
       mesos.reset(new V0ToV1Adapter(
           defer(self(), &Self::connected),
           defer(self(), &Self::disconnected),
-          defer(self(), &Self::received, lambda::_1)));
+          defer(self(), [this](queue<v1::executor::Event> events) {
+            while(!events.empty()) {
+              const v1::executor::Event& event = events.front();
+              received(devolve(event));
+
+              events.pop();
+            }
+          })));
     }
   }
 
   void taskHealthUpdated(
-      const mesos::TaskID& taskID,
+      const TaskID& _taskId,
       const bool healthy,
       const bool initiateTaskKill)
   {
     cout << "Received task health update, healthy: "
          << stringify(healthy) << endl;
 
-    update(evolve(taskID), TASK_RUNNING, healthy);
+    update(_taskId, TASK_RUNNING, healthy);
 
     if (initiateTaskKill) {
       killedByHealthCheck = true;
-      kill(evolve(taskID));
+      kill(_taskId);
     }
   }
 
@@ -314,7 +324,7 @@ protected:
       subscribe->add_unacknowledged_tasks()->MergeFrom(task.get());
     }
 
-    mesos->send(call);
+    mesos->send(evolve(call));
 
     delay(Seconds(1), self(), &Self::doReliableRegistration);
   }
@@ -350,58 +360,44 @@ protected:
       // Get CommandInfo from a JSON string.
       Try<JSON::Object> object = JSON::parse<JSON::Object>(taskCommand.get());
       if (object.isError()) {
-        cerr << "Failed to parse JSON: " << object.error() << endl;
-        abort();
+        ABORT("Failed to parse JSON: " + object.error());
       }
 
-      Try<CommandInfo> parse = protobuf::parse<CommandInfo>(object.get());
+      Try<CommandInfo> parse = ::protobuf::parse<CommandInfo>(object.get());
       if (parse.isError()) {
-        cerr << "Failed to parse protobuf: " << parse.error() << endl;
-        abort();
+        ABORT("Failed to parse protobuf: " + parse.error());
       }
 
       command = parse.get();
     } else if (task->has_command()) {
       command = task->command();
     } else {
-      CHECK_SOME(override)
-        << "Expecting task '" << task->task_id()
-        << "' to have a command!";
+      LOG(FATAL) << "Expecting task '" << task->task_id() << "' "
+                 << "to have a command";
     }
 
-    if (override.isNone()) {
-      // TODO(jieyu): For now, we just fail the executor if the task's
-      // CommandInfo is not valid. The framework will receive
-      // TASK_FAILED for the task, and will most likely find out the
-      // cause with some debugging. This is a temporary solution. A more
-      // correct solution is to perform this validation at master side.
-      if (command.shell()) {
-        CHECK(command.has_value())
-          << "Shell command of task '" << task->task_id()
-          << "' is not specified!";
-      } else {
-        CHECK(command.has_value())
-          << "Executable of task '" << task->task_id()
-          << "' is not specified!";
-      }
+    // TODO(jieyu): For now, we just fail the executor if the task's
+    // CommandInfo is not valid. The framework will receive
+    // TASK_FAILED for the task, and will most likely find out the
+    // cause with some debugging. This is a temporary solution. A more
+    // correct solution is to perform this validation at master side.
+    if (command.shell()) {
+      CHECK(command.has_value())
+        << "Shell command of task '" << task->task_id()
+        << "' is not specified!";
+    } else {
+      CHECK(command.has_value())
+        << "Executable of task '" << task->task_id()
+        << "' is not specified!";
     }
 
     cout << "Starting task " << task->task_id() << endl;
 
-    // Prepare the argv before fork as it's not async signal safe.
-    char **argv = new char*[command.arguments().size() + 1];
-    for (int i = 0; i < command.arguments().size(); i++) {
-      argv[i] = (char*) command.arguments(i).c_str();
-    }
-    argv[command.arguments().size()] = nullptr;
-
 #ifndef __WINDOWS__
     pid = launchTaskPosix(
-        task.get(),
         command,
+        launcherDir,
         user,
-        argv,
-        override,
         rootfs,
         sandboxDirectory,
         workingDirectory);
@@ -410,10 +406,7 @@ protected:
     // and is part of a job object. While the process handle is kept
     // open the reap function will work.
     PROCESS_INFORMATION processInformation = launchTaskWindows(
-        task.get(),
         command,
-        argv,
-        override,
         rootfs);
 
     pid = processInformation.dwProcessId;
@@ -422,12 +415,44 @@ protected:
     processHandle = processInformation.hProcess;
 #endif
 
-    delete[] argv;
-
     cout << "Forked command at " << pid << endl;
 
     if (task->has_health_check()) {
-      launchHealthCheck(task.get());
+      vector<string> namespaces;
+      if (rootfs.isSome() &&
+          task->health_check().type() == HealthCheck::COMMAND) {
+        // Make sure command health checks are run from the task's mount
+        // namespace. Otherwise if rootfs is specified the command binary
+        // may not be available in the executor.
+        //
+        // NOTE: The command executor shares the network namespace
+        // with its task, hence no need to enter it explicitly.
+        namespaces.push_back("mnt");
+      }
+
+      Try<Owned<health::HealthChecker>> _checker =
+        health::HealthChecker::create(
+            task->health_check(),
+            self(),
+            task->task_id(),
+            pid,
+            namespaces);
+
+      if (_checker.isError()) {
+        // TODO(gilbert): Consider ABORT and return a TASK_FAILED here.
+        cerr << "Failed to create health checker: "
+             << _checker.error() << endl;
+      } else {
+        checker = _checker.get();
+
+        checker->healthCheck()
+          .onAny([](const Future<Nothing>& future) {
+            // Only possible to be a failure.
+            if (future.isFailed()) {
+              cerr << "Health check failed" << endl;
+            }
+          });
+      }
     }
 
     // Monitor this process.
@@ -439,7 +464,7 @@ protected:
     launched = true;
   }
 
-  void kill(const TaskID& taskId, const Option<KillPolicy>& override = None())
+  void kill(const TaskID& _taskId, const Option<KillPolicy>& override = None())
   {
     // Default grace period is set to 3s for backwards compatibility.
     //
@@ -455,10 +480,10 @@ protected:
       gracePeriod = Nanoseconds(killPolicy->grace_period().nanoseconds());
     }
 
-    cout << "Received kill for task " << taskId.value()
+    cout << "Received kill for task " << _taskId.value()
          << " with grace period of " << gracePeriod << endl;
 
-    kill(taskId, gracePeriod);
+    kill(_taskId, gracePeriod);
   }
 
   void shutdown()
@@ -550,12 +575,10 @@ private:
       CHECK_SOME(taskId);
       CHECK(taskId.get() == _taskId);
 
-      foreach (const FrameworkInfo::Capability& c,
-               frameworkInfo->capabilities()) {
-        if (c.type() == FrameworkInfo::Capability::TASK_KILLING_STATE) {
-          update(taskId.get(), TASK_KILLING);
-          break;
-        }
+      if (protobuf::frameworkHasCapability(
+              frameworkInfo.get(),
+              FrameworkInfo::Capability::TASK_KILLING_STATE)) {
+        update(taskId.get(), TASK_KILLING);
       }
 
       // Now perform signal escalation to begin killing the task.
@@ -563,7 +586,7 @@ private:
 
       cout << "Sending SIGTERM to process tree at pid " << pid << endl;
 
-      Try<std::list<os::ProcessTree> > trees =
+      Try<std::list<os::ProcessTree>> trees =
         os::killtree(pid, SIGTERM, true, true);
 
       if (trees.isError()) {
@@ -587,20 +610,9 @@ private:
       killGracePeriodStart = Clock::now();
       killed = true;
     }
-
-    // Cleanup health check process.
-    //
-    // TODO(bmahler): Consider doing this after the task has been
-    // reaped, since a framework may be interested in health
-    // information while the task is being killed (consider a
-    // task that takes 30 minutes to be cleanly killed).
-    if (healthPid != -1) {
-      os::killtree(healthPid, SIGKILL);
-      healthPid = -1;
-    }
   }
 
-  void reaped(pid_t pid, const Future<Option<int> >& status_)
+  void reaped(pid_t pid, const Future<Option<int>>& status_)
   {
     terminated = true;
 
@@ -666,7 +678,7 @@ private:
     // shutdown may leave orphan processes hanging off init. This
     // scenario will be handled when PID namespace encapsulated
     // execution is in place.
-    Try<std::list<os::ProcessTree> > trees =
+    Try<std::list<os::ProcessTree>> trees =
       os::killtree(pid, SIGKILL, true, true);
 
     if (trees.isError()) {
@@ -683,47 +695,8 @@ private:
     }
   }
 
-  void launchHealthCheck(const TaskInfo& task)
-  {
-    CHECK(task.has_health_check());
-
-    JSON::Object json = JSON::protobuf(task.health_check());
-
-    // Launch the subprocess using 'exec' style so that quotes can
-    // be properly handled.
-    vector<string> argv(4);
-    argv[0] = "mesos-health-check";
-    argv[1] = "--executor=" + stringify(self());
-    argv[2] = "--health_check_json=" + stringify(json);
-    argv[3] = "--task_id=" + task.task_id().value();
-
-    cout << "Launching health check process: "
-         << path::join(healthCheckDir, "mesos-health-check")
-         << " " << argv[1] << " " << argv[2] << " " << argv[3] << endl;
-
-    Try<Subprocess> healthProcess =
-      process::subprocess(
-        path::join(healthCheckDir, "mesos-health-check"),
-        argv,
-        // Intentionally not sending STDIN to avoid health check
-        // commands that expect STDIN input to block.
-        Subprocess::PATH("/dev/null"),
-        Subprocess::FD(STDOUT_FILENO),
-        Subprocess::FD(STDERR_FILENO));
-
-    if (healthProcess.isError()) {
-      cerr << "Unable to launch health process: " << healthProcess.error();
-      return;
-    }
-
-    healthPid = healthProcess.get().pid();
-
-    cout << "Health check process launched at pid: "
-         << stringify(healthPid) << endl;
-  }
-
   void update(
-      const TaskID& taskID,
+      const TaskID& _taskId,
       const TaskState& state,
       const Option<bool>& healthy = None(),
       const Option<string>& message = None())
@@ -731,7 +704,7 @@ private:
     UUID uuid = UUID::random();
 
     TaskStatus status;
-    status.mutable_task_id()->CopyFrom(taskID);
+    status.mutable_task_id()->CopyFrom(_taskId);
     status.mutable_executor_id()->CopyFrom(executorId);
 
     status.set_state(state);
@@ -757,7 +730,7 @@ private:
     // Capture the status update.
     updates[uuid] = call.update();
 
-    mesos->send(call);
+    mesos->send(evolve(call));
   }
 
   enum State
@@ -781,13 +754,11 @@ private:
 #ifdef __WINDOWS__
   HANDLE processHandle;
 #endif
-  pid_t healthPid;
   Duration shutdownGracePeriod;
   Option<KillPolicy> killPolicy;
   Option<FrameworkInfo> frameworkInfo;
   Option<TaskID> taskId;
-  string healthCheckDir;
-  Option<char**> override;
+  string launcherDir;
   Option<string> rootfs;
   Option<string> sandboxDirectory;
   Option<string> workingDirectory;
@@ -798,10 +769,10 @@ private:
   Owned<MesosBase> mesos;
   LinkedHashMap<UUID, Call::Update> updates; // Unacknowledged updates.
   Option<TaskInfo> task; // Unacknowledged task.
+  Owned<health::HealthChecker> checker;
 };
 
 } // namespace internal {
-} // namespace v1 {
 } // namespace mesos {
 
 
@@ -810,16 +781,6 @@ class Flags : public flags::FlagsBase
 public:
   Flags()
   {
-    // TODO(gilbert): Deprecate the 'override' flag since no one is
-    // using it, and it may cause confusing with 'task_command' flag.
-    add(&override,
-        "override",
-        "Whether to override the command the executor should run when the\n"
-        "task is launched. Only this flag is expected to be on the command\n"
-        "line and all arguments after the flag will be used as the\n"
-        "subsequent 'argv' to be used with 'execvp'",
-        false);
-
     add(&rootfs,
         "rootfs",
         "The path to the root filesystem for the task");
@@ -844,24 +805,29 @@ public:
         "If specified, this is the overrided command for launching the\n"
         "task (instead of the command from TaskInfo).");
 
+    add(&launcher_dir,
+        "launcher_dir",
+        "Directory path of Mesos binaries.",
+        PKGLIBEXECDIR);
+
     // TODO(nnielsen): Add 'prefix' option to enable replacing
     // 'sh -c' with user specified wrapper.
   }
 
-  bool override;
   Option<string> rootfs;
   Option<string> sandbox_directory;
   Option<string> working_directory;
   Option<string> user;
   Option<string> task_command;
+  string launcher_dir;
 };
 
 
 int main(int argc, char** argv)
 {
   Flags flags;
-  FrameworkID frameworkId;
-  ExecutorID executorId;
+  mesos::FrameworkID frameworkId;
+  mesos::ExecutorID executorId;
 
 #ifdef __WINDOWS__
   process::Winsock winsock;
@@ -884,24 +850,6 @@ int main(int argc, char** argv)
   foreach (const flags::Warning& warning, load->warnings) {
     LOG(WARNING) << warning.message;
   }
-
-  // After flags.load(..., &argc, &argv) all flags will have been
-  // stripped from argv. Additionally, arguments after a "--"
-  // terminator will be preservered in argv and it is therefore
-  // possible to pass override and prefix commands which use
-  // "--foobar" style flags.
-  Option<char**> override = None();
-  if (flags.override) {
-    if (argc > 1) {
-      override = argv + 1;
-    }
-  }
-
-  const Option<string> envPath = os::getenv("MESOS_LAUNCHER_DIR");
-
-  string path = envPath.isSome()
-    ? envPath.get()
-    : os::realpath(Path(argv[0]).dirname()).get();
 
   Option<string> value = os::getenv("MESOS_FRAMEWORK_ID");
   if (value.isNone()) {
@@ -936,10 +884,9 @@ int main(int argc, char** argv)
     shutdownGracePeriod = parse.get();
   }
 
-  Owned<mesos::v1::internal::CommandExecutor> executor(
-      new mesos::v1::internal::CommandExecutor(
-          override,
-          path,
+  Owned<mesos::internal::CommandExecutor> executor(
+      new mesos::internal::CommandExecutor(
+          flags.launcher_dir,
           flags.rootfs,
           flags.sandbox_directory,
           flags.working_directory,

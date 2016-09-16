@@ -22,6 +22,8 @@
 
 #include "tests/mesos.hpp"
 
+using namespace process;
+
 using std::map;
 using std::shared_ptr;
 using std::string;
@@ -30,14 +32,13 @@ using testing::_;
 using testing::Invoke;
 using testing::Return;
 
-using namespace process;
+using mesos::slave::ContainerTermination;
 
 using mesos::v1::executor::Mesos;
 
 namespace mesos {
 namespace internal {
 namespace tests {
-
 
 TestContainerizer::TestContainerizer(
     const ExecutorID& executorId,
@@ -90,11 +91,12 @@ TestContainerizer::~TestContainerizer()
 
 Future<bool> TestContainerizer::_launch(
     const ContainerID& containerId,
+    const Option<TaskInfo>& taskInfo,
     const ExecutorInfo& executorInfo,
     const string& directory,
     const Option<string>& user,
     const SlaveID& slaveId,
-    const PID<slave::Slave>& slavePid,
+    const map<string, string>& environment,
     bool checkpoint)
 {
   CHECK(!drivers.contains(containerId))
@@ -135,14 +137,6 @@ Future<bool> TestContainerizer::_launch(
     // We need to save the original set of environment variables so we
     // can reset the environment after calling 'driver->start()' below.
     hashmap<string, string> original = os::environment();
-
-    const map<string, string> environment = executorEnvironment(
-        executorInfo,
-        directory,
-        slaveId,
-        slavePid,
-        checkpoint,
-        flags);
 
     foreachpair (const string& name, const string variable, environment) {
       os::setenv(name, variable);
@@ -193,35 +187,14 @@ Future<bool> TestContainerizer::_launch(
   }
 
   promises[containerId] =
-    Owned<Promise<containerizer::Termination>>(
-      new Promise<containerizer::Termination>());
+    Owned<Promise<ContainerTermination>>(
+      new Promise<ContainerTermination>());
 
   return true;
 }
 
 
-Future<bool> TestContainerizer::launch(
-    const ContainerID& containerId,
-    const TaskInfo& taskInfo,
-    const ExecutorInfo& executorInfo,
-    const string& directory,
-    const Option<string>& user,
-    const SlaveID& slaveId,
-    const PID<slave::Slave>& slavePid,
-    bool checkpoint)
-{
-  return launch(
-      containerId,
-      executorInfo,
-      directory,
-      user,
-      slaveId,
-      slavePid,
-      checkpoint);
-}
-
-
-Future<containerizer::Termination> TestContainerizer::_wait(
+Future<ContainerTermination> TestContainerizer::_wait(
     const ContainerID& containerId)
 {
   // An unknown container is possible for tests where we "drop" the
@@ -262,7 +235,7 @@ void TestContainerizer::_destroy(const ContainerID& containerId)
   }
 
   if (promises.contains(containerId)) {
-    containerizer::Termination termination;
+    ContainerTermination termination;
     termination.set_message("Killed executor");
     termination.set_status(0);
 
@@ -272,7 +245,7 @@ void TestContainerizer::_destroy(const ContainerID& containerId)
 }
 
 
-Future<hashset<ContainerID> > TestContainerizer::containers()
+Future<hashset<ContainerID>> TestContainerizer::containers()
 {
   return promises.keys();
 }
@@ -303,7 +276,7 @@ void TestContainerizer::setup()
   EXPECT_CALL(*this, update(_, _))
     .WillRepeatedly(Return(Nothing()));
 
-  EXPECT_CALL(*this, launch(_, _, _, _, _, _, _))
+  EXPECT_CALL(*this, launch(_, _, _, _, _, _, _, _))
     .WillRepeatedly(Invoke(this, &TestContainerizer::_launch));
 
   EXPECT_CALL(*this, wait(_))

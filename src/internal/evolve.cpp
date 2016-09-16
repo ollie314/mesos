@@ -56,7 +56,7 @@ static T evolve(const google::protobuf::Message& message)
     << " while evolving to " << t.GetTypeName();
 
   // NOTE: We need to use 'ParsePartialFromString' instead of
-  // 'ParsePartialFromString' because some required fields might not
+  // 'ParseFromString' because some required fields might not
   // be set and we don't want an exception to get thrown.
   CHECK(t.ParsePartialFromString(data))
     << "Failed to parse " << t.GetTypeName()
@@ -159,6 +159,12 @@ v1::Task evolve(const Task& task)
 v1::MasterInfo evolve(const MasterInfo& masterInfo)
 {
   return evolve<v1::MasterInfo>(masterInfo);
+}
+
+
+v1::FileInfo evolve(const FileInfo& fileInfo)
+{
+  return evolve<v1::FileInfo>(fileInfo);
 }
 
 
@@ -374,7 +380,13 @@ v1::scheduler::Event evolve(const FrameworkErrorMessage& message)
 }
 
 
-v1::executor::Event evolve(const mesos::executor::Event& event)
+v1::executor::Call evolve(const executor::Call& call)
+{
+  return evolve<v1::executor::Call>(call);
+}
+
+
+v1::executor::Event evolve(const executor::Event& event)
 {
   return evolve<v1::executor::Event>(event);
 }
@@ -609,39 +621,43 @@ v1::agent::Response evolve<v1::agent::Response::GET_CONTAINERS>(
 
     Result<JSON::String> container_id =
       object.find<JSON::String>("container_id");
+
     CHECK_SOME(container_id);
     container->mutable_container_id()->set_value(container_id.get().value);
 
     Result<JSON::String> framework_id =
       object.find<JSON::String>("framework_id");
+
     CHECK_SOME(framework_id);
     container->mutable_framework_id()->set_value(framework_id.get().value);
 
-    Result<JSON::String> executor_id =
-      object.find<JSON::String>("executor_id");
+    Result<JSON::String> executor_id = object.find<JSON::String>("executor_id");
+
     CHECK_SOME(executor_id);
     container->mutable_executor_id()->set_value(executor_id.get().value);
 
     Result<JSON::String> executor_name =
       object.find<JSON::String>("executor_name");
+
     CHECK_SOME(executor_name);
     container->set_executor_name(executor_name.get().value);
 
-    Result<JSON::Object> container_status =
-      object.find<JSON::Object>("status");
+    Result<JSON::Object> container_status = object.find<JSON::Object>("status");
     if (container_status.isSome()) {
-      Try<mesos::v1::ContainerStatus> status =
-        protobuf::parse<mesos::v1::ContainerStatus>(container_status.get());
+      Try<v1::ContainerStatus> status =
+        protobuf::parse<v1::ContainerStatus>(container_status.get());
+
       CHECK_SOME(status);
       container->mutable_container_status()->CopyFrom(status.get());
     }
 
     Result<JSON::Object> resource_statistics =
       object.find<JSON::Object>("statistics");
+
     if (resource_statistics.isSome()) {
-      Try<mesos::v1::ResourceStatistics> statistics =
-        protobuf::parse<mesos::v1::ResourceStatistics>(
-            resource_statistics.get());
+      Try<v1::ResourceStatistics> statistics =
+        protobuf::parse<v1::ResourceStatistics>(resource_statistics.get());
+
       CHECK_SOME(statistics);
       container->mutable_resource_statistics()->CopyFrom(statistics.get());
     }

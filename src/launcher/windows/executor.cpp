@@ -20,6 +20,7 @@
 
 #include <stout/os.hpp>
 #include <stout/strings.hpp>
+#include <stout/windows.hpp>
 
 #include <stout/os/close.hpp>
 
@@ -30,14 +31,10 @@ using std::string;
 using std::vector;
 
 namespace mesos {
-namespace v1 {
 namespace internal {
 
 PROCESS_INFORMATION launchTaskWindows(
-    const TaskInfo& task,
     const CommandInfo& command,
-    char** argv,
-    Option<char**>& override,
     Option<string>& rootfs)
 {
   PROCESS_INFORMATION processInfo;
@@ -50,31 +47,29 @@ PROCESS_INFORMATION launchTaskWindows(
   string executable;
   string commandLine = command.value();
 
-  if (override.isNone()) {
-    if (command.shell()) {
-      // Use Windows shell (`cmd.exe`). Look for it in the system folder.
-      char systemDir[MAX_PATH];
-      if (!::GetSystemDirectory(systemDir, MAX_PATH)) {
-        // No way to recover from this, safe to exit the process.
-        abort();
-      }
-
-      executable = path::join(systemDir, os::Shell::name);
-
-      // `cmd.exe` needs to be used in conjunction with the `/c` parameter.
-      // For compliance with C-style applications, `cmd.exe` should be passed
-      // as `argv[0]`.
-      // TODO(alexnaparu): Quotes are probably needed after `/c`.
-      commandLine =
-        strings::join(" ", os::Shell::arg0, os::Shell::arg1, commandLine);
-    } else {
-      // Not a shell command, execute as-is.
-      executable = command.value();
-      commandLine = os::stringify_args(argv);
+  if (command.shell()) {
+    // Use Windows shell (`cmd.exe`). Look for it in the system folder.
+    char systemDir[MAX_PATH];
+    if (!::GetSystemDirectory(systemDir, MAX_PATH)) {
+      // No way to recover from this, safe to exit the process.
+      abort();
     }
+
+    executable = path::join(systemDir, os::Shell::name);
+
+    // `cmd.exe` needs to be used in conjunction with the `/c` parameter.
+    // For compliance with C-style applications, `cmd.exe` should be passed
+    // as `argv[0]`.
+    // TODO(alexnaparu): Quotes are probably needed after `/c`.
+    commandLine =
+      strings::join(" ", os::Shell::arg0, os::Shell::arg1, commandLine);
   } else {
-    // Convert all arguments to a single space-separated string.
-    commandLine = os::stringify_args(override.get());
+    // Not a shell command, execute as-is.
+    executable = command.value();
+
+    // TODO(jieyu): Consider allowing os::stringify_args to take
+    // `command.arguments()` directly.
+    commandLine = os::stringify_args(os::raw::Argv(command.arguments()));
   }
 
   cout << commandLine << endl;
@@ -94,10 +89,8 @@ PROCESS_INFORMATION launchTaskWindows(
       &processInfo);        // PROCESS_INFORMATION pointer.
 
   if (!createProcessResult) {
-    cerr << "launchTaskWindows: CreateProcess failed with error code"
-         << GetLastError() << endl;
-
-    abort();
+    ABORT("launchTaskWindows: CreateProcess failed with error code " +
+          GetLastError());
   }
 
   Try<HANDLE> job = os::create_job(processInfo.dwProcessId);
@@ -111,5 +104,4 @@ PROCESS_INFORMATION launchTaskWindows(
 }
 
 } // namespace internal {
-} // namespace v1 {
 } // namespace mesos {

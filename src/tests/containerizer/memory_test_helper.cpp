@@ -73,6 +73,109 @@ const char INCREASE_RSS[] = "INCREASE_RSS";
 const char INCREASE_PAGE_CACHE[] = "INCREASE_PAGE_CACHE";
 
 
+MemoryTestHelper::~MemoryTestHelper()
+{
+  cleanup();
+}
+
+
+Try<Nothing> MemoryTestHelper::spawn()
+{
+  if (s.isSome()) {
+    return Error("A subprocess has been spawned already");
+  }
+
+  vector<string> argv;
+  argv.push_back("test-helper");
+  argv.push_back(MemoryTestHelper::NAME);
+
+  Try<Subprocess> process = subprocess(
+      getTestHelperPath("test-helper"),
+      argv,
+      Subprocess::PIPE(),
+      Subprocess::PIPE(),
+      Subprocess::FD(STDERR_FILENO));
+
+  if (process.isError()) {
+    return Error("Failed to spawn a subprocess: " + process.error());
+  }
+
+  s = process.get();
+
+  // Wait for the child to inform it has started before returning.
+  // Otherwise, the user might set the memory limit too earlier, and
+  // cause the child oom-killed because 'ld' could use a lot of
+  // memory.
+  Result<string> read = os::read(s->out().get(), sizeof(STARTED));
+  if (!read.isSome() || read.get() != string(sizeof(STARTED), STARTED)) {
+    cleanup();
+    return Error("Failed to sync with the subprocess");
+  }
+
+  return Nothing();
+}
+
+
+void MemoryTestHelper::cleanup()
+{
+  if (s.isSome()) {
+    // We just want to make sure the subprocess is terminated in case
+    // it's stuck, but we don't care about its status. Any error
+    // should have been logged in the subprocess directly.
+    ::kill(s->pid(), SIGKILL);
+    ::waitpid(s->pid(), nullptr, 0);
+    s = None();
+  }
+}
+
+
+Try<pid_t> MemoryTestHelper::pid()
+{
+  if (s.isNone()) {
+    return Error("The subprocess has not been spawned yet");
+  }
+
+  return s->pid();
+}
+
+
+// Send a request to the subprocess and wait for its signal that the
+// work has been done.
+Try<Nothing> MemoryTestHelper::requestAndWait(const string& request)
+{
+  if (s.isNone()) {
+    return Error("The subprocess has not been spawned yet");
+  }
+
+  Try<Nothing> write = os::write(s->in().get(), request + "\n");
+  if (write.isError()) {
+    cleanup();
+    return Error("Fail to sync with the subprocess: " + write.error());
+  }
+
+  Result<string> read = os::read(s->out().get(), sizeof(DONE));
+  if (!read.isSome() || read.get() != string(sizeof(DONE), DONE)) {
+    cleanup();
+    return Error("Failed to sync with the subprocess");
+  }
+
+  return Nothing();
+}
+
+
+Try<Nothing> MemoryTestHelper::increaseRSS(const Bytes& size)
+{
+  return requestAndWait(string(INCREASE_RSS) + " " + stringify(size));
+}
+
+
+Try<Nothing> MemoryTestHelper::increasePageCache(const Bytes& size)
+{
+  return requestAndWait(string(INCREASE_PAGE_CACHE) + " " + stringify(size));
+}
+
+
+
 // This helper allocates memory and prevents the compiler from
 // optimizing that allocation away by locking the allocated pages.
 static Try<void*> allocateRSS(const Bytes& size)
@@ -108,7 +211,7 @@ static Try<void*> allocateRSS(const Bytes& size)
 }
 
 
-static Try<Nothing> increaseRSS(const vector<string>& tokens)
+static Try<Nothing> doIncreaseRSS(const vector<string>& tokens)
 {
   if (tokens.size() < 2) {
     return Error("Expect at least one argument");
@@ -128,7 +231,7 @@ static Try<Nothing> increaseRSS(const vector<string>& tokens)
 }
 
 
-static Try<Nothing> increasePageCache(const vector<string>& tokens)
+static Try<Nothing> doIncreasePageCache(const vector<string>& tokens)
 {
   const Bytes UNIT = Megabytes(1);
 
@@ -159,7 +262,7 @@ static Try<Nothing> increasePageCache(const vector<string>& tokens)
 
   // NOTE: We are doing round-down here to calculate the number of
   // writes to do.
-  for (uint64_t i = 0; i < size.get().bytes() / UNIT.bytes(); i++) {
+  for (uint64_t i = 0; i < size->bytes() / UNIT.bytes(); i++) {
     // Write UNIT size to disk at a time. The content isn't important.
     Try<Nothing> write = os::write(fd.get(), string(UNIT.bytes(), 'a'));
     if (write.isError()) {
@@ -180,116 +283,14 @@ static Try<Nothing> increasePageCache(const vector<string>& tokens)
 }
 
 
-MemoryTestHelper::~MemoryTestHelper()
-{
-  cleanup();
-}
+const char MemoryTestHelper::NAME[] = "Memory";
 
 
-Try<Nothing> MemoryTestHelper::spawn()
-{
-  if (s.isSome()) {
-    return Error("A subprocess has been spawned already");
-  }
-
-  vector<string> argv;
-  argv.push_back("memory-test-helper");
-  argv.push_back(MemoryTestHelperMain::NAME);
-
-  Try<Subprocess> process = subprocess(
-      getTestHelperPath("memory-test-helper"),
-      argv,
-      Subprocess::PIPE(),
-      Subprocess::PIPE(),
-      Subprocess::FD(STDERR_FILENO));
-
-  if (process.isError()) {
-    return Error("Failed to spawn a subprocess: " + process.error());
-  }
-
-  s = process.get();
-
-  // Wait for the child to inform it has started before returning.
-  // Otherwise, the user might set the memory limit too earlier, and
-  // cause the child oom-killed because 'ld' could use a lot of
-  // memory.
-  Result<string> read = os::read(s.get().out().get(), sizeof(STARTED));
-  if (!read.isSome() || read.get() != string(sizeof(STARTED), STARTED)) {
-    cleanup();
-    return Error("Failed to sync with the subprocess");
-  }
-
-  return Nothing();
-}
-
-
-void MemoryTestHelper::cleanup()
-{
-  if (s.isSome()) {
-    // We just want to make sure the subprocess is terminated in case
-    // it's stuck, but we don't care about its status. Any error
-    // should have been logged in the subprocess directly.
-    ::kill(s.get().pid(), SIGKILL);
-    ::waitpid(s.get().pid(), nullptr, 0);
-    s = None();
-  }
-}
-
-
-Try<pid_t> MemoryTestHelper::pid()
-{
-  if (s.isNone()) {
-    return Error("The subprocess has not been spawned yet");
-  }
-
-  return s.get().pid();
-}
-
-
-// Send a request to the subprocess and wait for its signal that the
-// work has been done.
-Try<Nothing> MemoryTestHelper::requestAndWait(const string& request)
-{
-  if (s.isNone()) {
-    return Error("The subprocess has not been spawned yet");
-  }
-
-  Try<Nothing> write = os::write(s.get().in().get(), request + "\n");
-  if (write.isError()) {
-    cleanup();
-    return Error("Fail to sync with the subprocess: " + write.error());
-  }
-
-  Result<string> read = os::read(s.get().out().get(), sizeof(DONE));
-  if (!read.isSome() || read.get() != string(sizeof(DONE), DONE)) {
-    cleanup();
-    return Error("Failed to sync with the subprocess");
-  }
-
-  return Nothing();
-}
-
-
-Try<Nothing> MemoryTestHelper::increaseRSS(const Bytes& size)
-{
-  return requestAndWait(string(INCREASE_RSS) + " " + stringify(size));
-}
-
-
-Try<Nothing> MemoryTestHelper::increasePageCache(const Bytes& size)
-{
-  return requestAndWait(string(INCREASE_PAGE_CACHE) + " " + stringify(size));
-}
-
-
-const char MemoryTestHelperMain::NAME[] = "MemoryTestHelperMain";
-
-
-int MemoryTestHelperMain::execute()
+int MemoryTestHelper::execute()
 {
   hashmap<string, Try<Nothing>(*)(const vector<string>&)> commands;
-  commands[INCREASE_RSS] = &increaseRSS;
-  commands[INCREASE_PAGE_CACHE] = &increasePageCache;
+  commands[INCREASE_RSS] = &doIncreaseRSS;
+  commands[INCREASE_PAGE_CACHE] = &doIncreasePageCache;
 
   // Tell the parent that child has started.
   cout << STARTED << flush;

@@ -24,6 +24,7 @@
 
 #include <stout/adaptor.hpp>
 #include <stout/os.hpp>
+#include <stout/path.hpp>
 #include <stout/net.hpp>
 
 #include "linux/fs.hpp"
@@ -67,9 +68,9 @@ Try<Isolator*> NetworkCniIsolatorProcess::create(const Flags& flags)
   // If both '--network_cni_plugins_dir' and '--network_cni_config_dir' are not
   // specified when operator starts agent, then the 'network/cni' isolator will
   // behave as follows:
-  // 1. For the container without 'NetworkInfo.name' specified, 'network/cni'
-  //    isolator will act as no-op, i.e., the container will just use agent host
-  //    network namespace.
+  // 1. For the container without 'NetworkInfo.name' specified, it will join
+  //    host network. And if it has an image, 'network/cni' isolator will make
+  //    sure it has access to host /etc/* files.
   // 2. For the container with 'NetworkInfo.name' specified, it will be
   //    rejected by the 'network/cni' isolator since it has not loaded any CNI
   //    plugins or network configurations.
@@ -355,11 +356,11 @@ Future<Nothing> NetworkCniIsolatorProcess::recover(
     const hashset<ContainerID>& orphans)
 {
   // If the `network/cni` isolator is providing network isolation to a
-  // container its `rootDir`should always be set.  This property of
-  // the isolator will not be set only if the operator does not
-  // specify the '--network_cni_plugins_dir' and
-  // '--network_cni_config_dir' flags at Agent startup. In this
-  // particular case the `network/cni` isolator should be a no-op.
+  // container its `rootDir` should always be set. This property of the
+  // isolator will not be set only if the operator does not specify
+  // the '--network_cni_plugins_dir' and '--network_cni_config_dir'
+  // flags at agent startup, please see the comments in `create()` method
+  // for how `network/cni` isolator will behave in this particular case.
   if (rootDir.isNone()) {
     return Nothing();
   }
@@ -432,7 +433,8 @@ Try<Nothing> NetworkCniIsolatorProcess::_recover(
     //      directory in '_cleanup()' but agent dies before noticing this.
     //   2. Agent dies before the isolator creates the container directory
     //      in 'isolate()'.
-    //   3. The container joined the host network.
+    //   3. The container joined the host network (both with or without
+    //      container rootfs).
     // For the above cases, we do not need to do anything since there is nothing
     // to clean up after agent restarts.
     return Nothing();
@@ -559,10 +561,6 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
     return Failure("Can only prepare CNI networks for a MESOS container");
   }
 
-  if (executorInfo.container().network_infos_size() == 0) {
-    return None();
-  }
-
   int ifIndex = 0;
   hashset<string> networkNames;
   hashmap<string, ContainerNetwork> containerNetworks;
@@ -592,7 +590,21 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
     containerNetworks.put(name, containerNetwork);
   }
 
-  if (!containerNetworks.empty()) {
+  if (containerNetworks.empty()) {
+    // This is for the case where the container has an image and wants
+    // to join host network, we will make sure it has access to host
+    // /etc/* files.
+    if (containerConfig.has_rootfs()) {
+      Owned<Info> info(new Info(containerNetworks, containerConfig.rootfs()));
+      infos.put(containerId, info);
+    }
+
+    // NOTE: No additional namespace needed. The container shares the
+    // same network and UTS namesapces with the host. If container has
+    // a rootfs, the filesystem/linux isolator will put the container
+    // in a new mount namespace.
+    return None();
+  } else {
     if (containerConfig.has_rootfs()) {
       Owned<Info> info(new Info(containerNetworks, containerConfig.rootfs()));
       infos.put(containerId, info);
@@ -626,8 +638,6 @@ Future<Option<ContainerLaunchInfo>> NetworkCniIsolatorProcess::prepare(
 
     return launchInfo;
   }
-
-  return None();
 }
 
 
@@ -636,17 +646,40 @@ Future<Nothing> NetworkCniIsolatorProcess::isolate(
     pid_t pid)
 {
   // NOTE: We return 'Nothing()' here because some container might not
-  // specify 'NetworkInfo.name' (i.e., wants to join the host
-  // network). In that case, we don't create an Info struct.
+  // specify 'NetworkInfo.name' (i.e., wants to join the host network)
+  // and has no image. In that case, we don't create an Info struct.
   if (!infos.contains(containerId)) {
     return Nothing();
+  }
+
+  // For the container which has an image and wants to join host
+  // network, we will make sure it has access to host /etc/* files.
+  if (infos[containerId]->containerNetworks.empty() &&
+      infos[containerId]->rootfs.isSome()) {
+    NetworkCniIsolatorSetup setup;
+    setup.flags.pid = pid;
+    setup.flags.rootfs = infos[containerId]->rootfs;
+
+    // NOTE: On some Linux distributions, `/etc/hostname` and
+    // `/etc/hosts` might not exist.
+    if (os::exists("/etc/hosts")) {
+      setup.flags.etc_hosts_path = "/etc/hosts";
+    }
+
+    if (os::exists("/etc/hostname")) {
+      setup.flags.etc_hostname_path = "/etc/hostname";
+    }
+
+    setup.flags.etc_resolv_conf = "/etc/resolv.conf";
+
+    return __isolate(setup);
   }
 
   // If the `network/cni` isolator is providing network isolation to a
   // container its `rootDir` and `pluginDir` should always be set.
   // These properties of the isolator will not be set only if the
   // operator does not specify the '--network_cni_plugins_dir' and
-  // '--network_cni_config_dir' flags at Agent startup.
+  // '--network_cni_config_dir' flags at agent startup.
   CHECK_SOME(rootDir);
   CHECK_SOME(pluginDir);
 
@@ -826,6 +859,13 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
   setup.flags.etc_hostname_path = hostnamePath;
   setup.flags.etc_resolv_conf = resolvPath;
 
+  return __isolate(setup);
+}
+
+
+Future<Nothing> NetworkCniIsolatorProcess::__isolate(
+    const NetworkCniIsolatorSetup& setup)
+{
   vector<string> argv(2);
   argv[0] = "mesos-containerizer";
   argv[1] = NetworkCniIsolatorSetup::NAME;
@@ -837,7 +877,7 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
       Subprocess::PATH("/dev/null"),
       Subprocess::PIPE(),
       NO_SETSID,
-      setup.flags);
+      &setup.flags);
 
   if (s.isError()) {
     return Failure(
@@ -878,8 +918,8 @@ Future<Nothing> NetworkCniIsolatorProcess::_isolate(
 
 Future<Nothing> NetworkCniIsolatorProcess::attach(
     const ContainerID& containerId,
-    const std::string& networkName,
-    const std::string& netNsHandle)
+    const string& networkName,
+    const string& netNsHandle)
 {
   CHECK(infos.contains(containerId));
   CHECK(infos[containerId]->containerNetworks.contains(networkName));
@@ -999,7 +1039,7 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
       Subprocess::PIPE(),
       Subprocess::PATH("/dev/null"),
       NO_SETSID,
-      None(),
+      nullptr,
       environment);
 
   if (s.isError()) {
@@ -1106,9 +1146,9 @@ Future<Nothing> NetworkCniIsolatorProcess::_attach(
 Future<ContainerStatus> NetworkCniIsolatorProcess::status(
     const ContainerID& containerId)
 {
-  // TODO(jieyu): We don't create 'Info' struct for containers that
-  // want to join the host network. Currently, we rely on the
-  // slave/containerizer to set the IP addresses in ContainerStatus.
+  // TODO(jieyu): We don't create 'Info' struct for containers that want
+  // to join the host network and have no image. Currently, we rely on
+  // the slave/containerizer to set the IP addresses in ContainerStatus.
   // Consider returning the IP address of the slave here.
   if (!infos.contains(containerId)) {
     return ContainerStatus();
@@ -1161,11 +1201,20 @@ Future<ContainerStatus> NetworkCniIsolatorProcess::status(
 Future<Nothing> NetworkCniIsolatorProcess::cleanup(
     const ContainerID& containerId)
 {
-  // NOTE: We don't keep an Info struct if the container is on the host network,
-  // or if during recovery, we found that the cleanup for this container is not
-  // required anymore (e.g., cleanup is done already, but the slave crashed and
-  // didn't realize that it's done).
+  // NOTE: We don't keep an Info struct if the container is on the host network
+  // and has no image, or if during recovery, we found that the cleanup for
+  // this container is not required anymore (e.g., cleanup is done already, but
+  // the slave crashed and didn't realize that it's done).
   if (!infos.contains(containerId)) {
+    return Nothing();
+  }
+
+  // For the container that joins the host network and has an image,
+  // we just need to remove it from the `infos` hashmap, no need for
+  // further cleanup.
+  if (infos[containerId]->containerNetworks.empty() &&
+      infos[containerId]->rootfs.isSome()) {
+    infos.erase(containerId);
     return Nothing();
   }
 
@@ -1238,7 +1287,7 @@ Future<Nothing> NetworkCniIsolatorProcess::_cleanup(
 
 Future<Nothing> NetworkCniIsolatorProcess::detach(
     const ContainerID& containerId,
-    const std::string& networkName)
+    const string& networkName)
 {
   CHECK(infos.contains(containerId));
   CHECK(infos[containerId]->containerNetworks.contains(networkName));
@@ -1288,7 +1337,7 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
       Subprocess::PIPE(),
       Subprocess::PATH("/dev/null"),
       NO_SETSID,
-      None(),
+      nullptr,
       environment);
 
   if (s.isError()) {
@@ -1309,7 +1358,7 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
 
 Future<Nothing> NetworkCniIsolatorProcess::_detach(
     const ContainerID& containerId,
-    const std::string& networkName,
+    const string& networkName,
     const string& plugin,
     const tuple<Future<Option<int>>, Future<string>>& t)
 {
@@ -1402,30 +1451,33 @@ int NetworkCniIsolatorSetup::execute()
     return EXIT_SUCCESS;
   }
 
-  if (flags.hostname.isNone()) {
-    cerr << "Hostname not specified" << endl;
-    return EXIT_FAILURE;
-  }
-
   if (flags.pid.isNone()) {
     cerr << "Container PID not specified" << endl;
     return EXIT_FAILURE;
   }
 
+  // Initialize the host path and container path for the set of files
+  // that need to be setup in the container file system.
+  hashmap<string, string> files;
+
   if (flags.etc_hosts_path.isNone()) {
-    cerr << "Path to 'hosts' not specified" <<endl;
-    return EXIT_FAILURE;
+    // This is the case where host network is used, container has an
+    // image, and `/etc/hosts` does not exist in the system.
   } else if (!os::exists(flags.etc_hosts_path.get())) {
     cerr << "Unable to find '" << flags.etc_hosts_path.get() << "'" << endl;
     return EXIT_FAILURE;
+  } else {
+    files["/etc/hosts"] = flags.etc_hosts_path.get();
   }
 
   if (flags.etc_hostname_path.isNone()) {
-    cerr << "Path to 'hostname' not specified" << endl;
-    return EXIT_FAILURE;
+    // This is the case where host network is used, container has an
+    // image, and `/etc/hostname` does not exist in the system.
   } else if (!os::exists(flags.etc_hostname_path.get())) {
     cerr << "Unable to find '" << flags.etc_hostname_path.get() << "'" << endl;
     return EXIT_FAILURE;
+  } else {
+    files["/etc/hostname"] = flags.etc_hostname_path.get();
   }
 
   if (flags.etc_resolv_conf.isNone()) {
@@ -1434,6 +1486,8 @@ int NetworkCniIsolatorSetup::execute()
   } else if (!os::exists(flags.etc_resolv_conf.get())) {
     cerr << "Unable to find '" << flags.etc_resolv_conf.get() << "'" << endl;
     return EXIT_FAILURE;
+  } else {
+    files["/etc/resolv.conf"] = flags.etc_resolv_conf.get();
   }
 
   // Enter the mount namespace.
@@ -1443,24 +1497,6 @@ int NetworkCniIsolatorSetup::execute()
          << flags.pid.get() << ": " << setns.error() << endl;
     return EXIT_FAILURE;
   }
-
-  // Enter the UTS namespace.
-  setns = ns::setns(flags.pid.get(), "uts");
-  if (setns.isError()) {
-    cerr << "Failed to enter the UTS namespace of pid "
-         << flags.pid.get() << ": " << setns.error() << endl;
-    return EXIT_FAILURE;
-  }
-
-  // Setup hostname in container's UTS namespace.
-  Try<Nothing> setHostname = net::setHostname(flags.hostname.get());
-  if (setHostname.isError()) {
-    cerr << "Failed to set the hostname of the container to '"
-         << flags.hostname.get() << "': " << setHostname.error() << endl;
-    return EXIT_FAILURE;
-  }
-
-  LOG(INFO) << "Set hostname to '" << flags.hostname.get() << "'" << endl;
 
   // TODO(jieyu): Currently there seems to be a race between the
   // filesystem isolator and other isolators to execute the `isolate`
@@ -1485,40 +1521,57 @@ int NetworkCniIsolatorSetup::execute()
     return EXIT_FAILURE;
   }
 
-  // Initialize the host path and container path for the set of files
-  // that need to be setup in the container file system.
-  hashmap<string, string> files;
-  files["/etc/hosts"] = flags.etc_hosts_path.get();
-  files["/etc/hostname"] = flags.etc_hostname_path.get();
-  files["/etc/resolv.conf"] = flags.etc_resolv_conf.get();
-
   foreachpair (const string& file, const string& source, files) {
     // Do the bind mount in the host filesystem since no process in
     // the new network namespace should be seeing the original network
-    // files from the host filesystem. This is also required by the
-    // command executor since command executor will be launched with
-    // rootfs of host filesystem and will later pivot to the rootfs of
-    // the container filesystem, when launching the task.
-    if (!os::exists(file)) {
-      // Make an exception for `/etc/hostname`, because it may not
-      // exist on every system but hostname is still accessible by
-      // `getHostname()`.
-      if (file != "/etc/hostname") {
-        // NOTE: We just fail if the mount point does not exist on the
-        // host filesystem because we don't want to pollute the host
-        // filesystem.
-        cerr << "Mount point '" << file << "' does not exist "
-             << "on the host filesystem" << endl;
-        return EXIT_FAILURE;
+    // files from the host filesystem. The container's hostname will be
+    // changed to the `ContainerID` and this information needs to be
+    // reflected in the /etc/hosts and /etc/hostname files seen by
+    // processes in the new network namespace.
+    //
+    // Specifically, the command executor will be launched with the
+    // rootfs of the host filesystem. The command executor may later
+    // pivot to the rootfs of the container filesystem when launching
+    // the task.
+    //
+    // NOTE: We only need to do this if a non-host network is used.
+    // Currently, we use `flags.hostname` to distinguish if a host
+    // network is being used or not.
+    if (flags.hostname.isSome()) {
+      if (!os::exists(file)) {
+        // We need /etc/hosts and /etc/hostname to be present in order
+        // to bind mount the container's /etc/hosts and /etc/hostname.
+        // The container's network files will be different than the host's
+        // files. Since these target mount points do not exist in the host
+        // filesystem it should be fine to "touch" these files in
+        // order to create them. We see this scenario specifically in
+        // CoreOS (see MESOS-6052).
+        //
+        // In case of /etc/resolv.conf, however, we can't populate the
+        // nameservers if they are not present, and rely on the hosts
+        // IPAM to populate the /etc/resolv.conf. Hence, if
+        // /etc/resolv.conf is not present we bail out.
+        if (file == "/etc/hosts" || file == "/etc/hostname") {
+          Try<Nothing> touch = os::touch(file);
+          if (touch.isError()) {
+            cerr << "Unable to create missing mount point " + file + " on "
+                 << "host filesystem: " << touch.error() << endl;
+            return EXIT_FAILURE;
+          }
+        } else {
+          // '/etc/resolv.conf'.
+          cerr << "Mount point '" << file << "' does not exist "
+               << "on the host filesystem" << endl;
+          return EXIT_FAILURE;
+        }
       }
-    } else {
+
       mount = fs::mount(
           source,
           file,
           None(),
           MS_BIND,
           nullptr);
-
       if (mount.isError()) {
         cerr << "Failed to bind mount from '" << source << "' to '"
              << file << "': " << mount.error() << endl;
@@ -1529,8 +1582,31 @@ int NetworkCniIsolatorSetup::execute()
     // Do the bind mount in the container filesystem.
     if (flags.rootfs.isSome()) {
       const string target = path::join(flags.rootfs.get(), file);
+
       if (!os::exists(target)) {
+        // Create the parent directory of the mount point.
+        Try<Nothing> mkdir = os::mkdir(Path(target).dirname());
+        if (mkdir.isError()) {
+          cerr << "Failed to create directory '" << Path(target).dirname()
+               << "' for the mount point: " << mkdir.error() << endl;
+          return EXIT_FAILURE;
+        }
+
         // Create the mount point in the container filesystem.
+        Try<Nothing> touch = os::touch(target);
+        if (touch.isError()) {
+          cerr << "Failed to create the mount point '" << target
+               << "' in the container filesystem" << endl;
+          return EXIT_FAILURE;
+        }
+      } else if (os::stat::islink(target)) {
+        Try<Nothing> remove = os::rm(target);
+        if (remove.isError()) {
+          cerr << "Failed to remove '" << target << "' "
+               << "as it's a symbolic link" << endl;
+          return EXIT_FAILURE;
+        }
+
         Try<Nothing> touch = os::touch(target);
         if (touch.isError()) {
           cerr << "Failed to create the mount point '" << target
@@ -1552,6 +1628,26 @@ int NetworkCniIsolatorSetup::execute()
         return EXIT_FAILURE;
       }
     }
+  }
+
+  if (flags.hostname.isSome()) {
+    // Enter the UTS namespace.
+    setns = ns::setns(flags.pid.get(), "uts");
+    if (setns.isError()) {
+      cerr << "Failed to enter the UTS namespace of pid "
+           << flags.pid.get() << ": " << setns.error() << endl;
+      return EXIT_FAILURE;
+    }
+
+    // Setup hostname in container's UTS namespace.
+    Try<Nothing> setHostname = net::setHostname(flags.hostname.get());
+    if (setHostname.isError()) {
+      cerr << "Failed to set the hostname of the container to '"
+           << flags.hostname.get() << "': " << setHostname.error() << endl;
+      return EXIT_FAILURE;
+    }
+
+    LOG(INFO) << "Set hostname to '" << flags.hostname.get() << "'" << endl;
   }
 
   return EXIT_SUCCESS;

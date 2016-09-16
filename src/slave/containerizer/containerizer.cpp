@@ -37,7 +37,6 @@
 #include "slave/containerizer/composing.hpp"
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/docker.hpp"
-#include "slave/containerizer/external_containerizer.hpp"
 
 #include "slave/containerizer/mesos/containerizer.hpp"
 #include "slave/containerizer/mesos/launcher.hpp"
@@ -45,10 +44,7 @@
 #include "slave/containerizer/mesos/linux_launcher.hpp"
 #endif // __linux__
 
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/gpu/allocator.hpp"
-#include "slave/containerizer/mesos/isolators/gpu/nvml.hpp"
-#endif // __linux__
+#include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
 
 using std::map;
 using std::set;
@@ -62,8 +58,7 @@ namespace internal {
 namespace slave {
 
 // TODO(idownes): Move this to the Containerizer interface to complete
-// the delegation of containerization, i.e., external containerizers should be
-// able to report the resources they can isolate.
+// the delegation of containerization.
 Try<Resources> Containerizer::resources(const Flags& flags)
 {
   Try<Resources> parsed = Resources::parse(
@@ -192,27 +187,64 @@ Try<Containerizer*> Containerizer::create(
     bool local,
     Fetcher* fetcher)
 {
-  if (flags.isolation == "external") {
-    LOG(WARNING) << "The 'external' isolation flag is deprecated, "
-                 << "please update your flags to"
-                 << " '--containerizers=external'.";
+  // Get the set of containerizer types.
+  const vector<string> _types = strings::split(flags.containerizers, ",");
+  const set<string> containerizerTypes(_types.begin(), _types.end());
 
-    if (flags.container_logger.isSome()) {
-      return Error(
-          "The external containerizer does not support custom container "
-          "logger modules.  The '--isolation=external' flag cannot be "
-          " set along with '--container_logger=...'");
-    }
-
-    Try<ExternalContainerizer*> containerizer =
-      ExternalContainerizer::create(flags);
-    if (containerizer.isError()) {
-      return Error("Could not create ExternalContainerizer: " +
-                   containerizer.error());
-    }
-
-    return containerizer.get();
+  if (containerizerTypes.size() != _types.size()) {
+    return Error("Duplicate entries found in --containerizer flag"
+                 " '" + flags.containerizers + "'");
   }
+
+  // Optionally create the Nvidia components.
+  Option<NvidiaComponents> nvidia;
+
+#ifdef __linux__
+  if (nvml::isAvailable()) {
+    // If we are using the docker containerizer (either alone or in
+    // conjunction with the mesos containerizer), unconditionally
+    // create the Nvidia components and pass them through. If we are
+    // using the mesos containerizer alone, make sure we also have the
+    // `gpu/nvidia` isolator flag set before creating these components.
+    bool shouldCreate = false;
+
+    if (containerizerTypes.count("docker") > 0) {
+      shouldCreate = true;
+    } else if (containerizerTypes.count("mesos") > 0) {
+      const vector<string> _isolators = strings::tokenize(flags.isolation, ",");
+      const set<string> isolators(_isolators.begin(), _isolators.end());
+
+      if (isolators.count("gpu/nvidia") > 0) {
+        shouldCreate = true;
+      }
+    }
+
+    if (shouldCreate) {
+      Try<Resources> gpus = NvidiaGpuAllocator::resources(flags);
+
+      if (gpus.isError()) {
+        return Error("Failed call to NvidiaGpuAllocator::resources: " +
+                     gpus.error());
+      }
+
+      Try<NvidiaGpuAllocator> allocator =
+        NvidiaGpuAllocator::create(flags, gpus.get());
+
+      if (allocator.isError()) {
+        return Error("Failed to NvidiaGpuAllocator::create: " +
+                     allocator.error());
+      }
+
+      Try<NvidiaVolume> volume = NvidiaVolume::create();
+
+      if (volume.isError()) {
+        return Error("Failed to NvidiaVolume::create: " + volume.error());
+      }
+
+      nvidia = NvidiaComponents(allocator.get(), volume.get());
+    }
+  }
+#endif
 
   // TODO(benh): We need to store which containerizer or
   // containerizers were being used. See MESOS-1663.
@@ -220,10 +252,10 @@ Try<Containerizer*> Containerizer::create(
   // Create containerizer(s).
   vector<Containerizer*> containerizers;
 
-  foreach (const string& type, strings::split(flags.containerizers, ",")) {
+  foreach (const string& type, containerizerTypes) {
     if (type == "mesos") {
       Try<MesosContainerizer*> containerizer =
-        MesosContainerizer::create(flags, local, fetcher);
+        MesosContainerizer::create(flags, local, fetcher, nvidia);
       if (containerizer.isError()) {
         return Error("Could not create MesosContainerizer: " +
                      containerizer.error());
@@ -232,25 +264,9 @@ Try<Containerizer*> Containerizer::create(
       }
     } else if (type == "docker") {
       Try<DockerContainerizer*> containerizer =
-        DockerContainerizer::create(flags, fetcher);
+        DockerContainerizer::create(flags, fetcher, nvidia);
       if (containerizer.isError()) {
         return Error("Could not create DockerContainerizer: " +
-                     containerizer.error());
-      } else {
-        containerizers.push_back(containerizer.get());
-      }
-    } else if (type == "external") {
-      if (flags.container_logger.isSome()) {
-        return Error(
-            "The external containerizer does not support custom container "
-            "logger modules.  The '--containerizers=external' flag cannot be "
-            "set along with '--container_logger=...'");
-      }
-
-      Try<ExternalContainerizer*> containerizer =
-        ExternalContainerizer::create(flags);
-      if (containerizer.isError()) {
-        return Error("Could not create ExternalContainerizer: " +
                      containerizer.error());
       } else {
         containerizers.push_back(containerizer.get());
@@ -272,133 +288,6 @@ Try<Containerizer*> Containerizer::create(
   }
 
   return containerizer.get();
-}
-
-
-map<string, string> executorEnvironment(
-    const ExecutorInfo& executorInfo,
-    const string& directory,
-    const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
-    bool checkpoint,
-    const Flags& flags)
-{
-  map<string, string> environment;
-
-  // In cases where DNS is not available on the slave, the absence of
-  // LIBPROCESS_IP in the executor's environment will cause an error when the
-  // new executor process attempts a hostname lookup. Thus, we pass the slave's
-  // LIBPROCESS_IP through here, even if the executor environment is specified
-  // explicitly. Note that a LIBPROCESS_IP present in the provided flags will
-  // override this value.
-  Option<string> libprocessIP = os::getenv("LIBPROCESS_IP");
-  if (libprocessIP.isSome()) {
-    environment["LIBPROCESS_IP"] = libprocessIP.get();
-  }
-
-  if (flags.executor_environment_variables.isSome()) {
-    foreachpair (const string& key,
-                 const JSON::Value& value,
-                 flags.executor_environment_variables.get().values) {
-      // See slave/flags.cpp where we validate each value is a string.
-      CHECK(value.is<JSON::String>());
-      environment[key] = value.as<JSON::String>().value;
-    }
-  }
-
-  // Include a default $PATH if there isn't.
-  if (environment.count("PATH") == 0) {
-    environment["PATH"] =
-      "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-  }
-
-  // Set LIBPROCESS_PORT so that we bind to a random free port (since
-  // this might have been set via --port option). We do this before
-  // the environment variables below in case it is included.
-  environment["LIBPROCESS_PORT"] = "0";
-
-  // Also add MESOS_NATIVE_JAVA_LIBRARY if it's not already present (and
-  // like above, we do this before the environment variables below in
-  // case the framework wants to override).
-  // TODO(tillt): Adapt library towards JNI specific name once libmesos
-  // has been split.
-  if (environment.count("MESOS_NATIVE_JAVA_LIBRARY") == 0) {
-    string path =
-#ifdef __APPLE__
-      LIBDIR "/libmesos-" VERSION ".dylib";
-#else
-      LIBDIR "/libmesos-" VERSION ".so";
-#endif
-    if (os::exists(path)) {
-      environment["MESOS_NATIVE_JAVA_LIBRARY"] = path;
-    }
-  }
-
-  // Also add MESOS_NATIVE_LIBRARY if it's not already present.
-  // This environment variable is kept for offering non JVM-based
-  // frameworks a more compact and JNI independent library.
-  if (environment.count("MESOS_NATIVE_LIBRARY") == 0) {
-    string path =
-#ifdef __APPLE__
-      LIBDIR "/libmesos-" VERSION ".dylib";
-#else
-      LIBDIR "/libmesos-" VERSION ".so";
-#endif
-    if (os::exists(path)) {
-      environment["MESOS_NATIVE_LIBRARY"] = path;
-    }
-  }
-
-  environment["MESOS_FRAMEWORK_ID"] = executorInfo.framework_id().value();
-  environment["MESOS_EXECUTOR_ID"] = executorInfo.executor_id().value();
-  environment["MESOS_DIRECTORY"] = directory;
-  environment["MESOS_SLAVE_ID"] = slaveId.value();
-  environment["MESOS_SLAVE_PID"] = stringify(slavePid);
-  environment["MESOS_AGENT_ENDPOINT"] = stringify(slavePid.address);
-  environment["MESOS_CHECKPOINT"] = checkpoint ? "1" : "0";
-  environment["MESOS_HTTP_COMMAND_EXECUTOR"] =
-    flags.http_command_executor ? "1" : "0";
-
-  // Set executor's shutdown grace period. If set, the customized value
-  // from `ExecutorInfo` overrides the default from agent flags.
-  Duration executorShutdownGracePeriod = flags.executor_shutdown_grace_period;
-  if (executorInfo.has_shutdown_grace_period()) {
-    executorShutdownGracePeriod =
-      Nanoseconds(executorInfo.shutdown_grace_period().nanoseconds());
-  }
-
-  environment["MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD"] =
-    stringify(executorShutdownGracePeriod);
-
-  if (checkpoint) {
-    environment["MESOS_RECOVERY_TIMEOUT"] = stringify(flags.recovery_timeout);
-
-    // The maximum backoff duration to be used by an executor between two
-    // retries when disconnected.
-    environment["MESOS_SUBSCRIPTION_BACKOFF_MAX"] =
-      stringify(EXECUTOR_REREGISTER_TIMEOUT);
-  }
-
-  if (HookManager::hooksAvailable()) {
-    // Include any environment variables from Hooks.
-    // TODO(karya): Call environment decorator hook _after_ putting all
-    // variables from executorInfo into 'env'. This would prevent the
-    // ones provided by hooks from being overwritten by the ones in
-    // executorInfo in case of a conflict. The overwriting takes places
-    // at the callsites of executorEnvironment (e.g., ___launch function
-    // in src/slave/containerizer/docker.cpp)
-    // TODO(karya): Provide a mechanism to pass the new environment
-    // variables created above (MESOS_*) on to the hook modules.
-    const Environment& hooksEnvironment =
-      HookManager::slaveExecutorEnvironmentDecorator(executorInfo);
-
-    foreach (const Environment::Variable& variable,
-             hooksEnvironment.variables()) {
-      environment[variable.name()] = variable.value();
-    }
-  }
-
-  return environment;
 }
 
 } // namespace slave {

@@ -21,6 +21,8 @@
 #include <mesos/resources.hpp>
 #include <mesos/type_utils.hpp>
 
+#include <stout/protobuf.hpp>
+
 #include "messages/messages.hpp"
 
 using std::ostream;
@@ -79,6 +81,14 @@ bool operator==(const CommandInfo::URI& left, const CommandInfo::URI& right)
   return left.value() == right.value() &&
     left.executable() == right.executable() &&
     left.extract() == right.extract();
+}
+
+
+bool operator==(const ContainerID& left, const ContainerID& right)
+{
+  return left.value() == right.value() &&
+    left.has_parent() == right.has_parent() &&
+    (!left.has_parent() || left.parent() == right.parent());
 }
 
 
@@ -378,6 +388,37 @@ bool operator==(const Task& left, const Task& right)
 }
 
 
+bool operator==(const TaskGroupInfo& left, const TaskGroupInfo& right)
+{
+  // Order of tasks in a task group is not important.
+  if (left.tasks().size() != right.tasks().size()) {
+    return false;
+  }
+
+  for (int i = 0; i < left.tasks().size(); i++) {
+    bool found = false;
+    for (int j = 0; j < right.tasks().size(); j++) {
+      if (left.tasks().Get(i) == right.tasks().Get(j)) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
+// TODO(anand): Consider doing a field by field comparison instead.
+bool operator==(const TaskInfo& left, const TaskInfo& right)
+{
+  return left.SerializeAsString() == right.SerializeAsString();
+}
+
+
 // TODO(bmahler): Use SerializeToString here?
 bool operator==(const TaskStatus& left, const TaskStatus& right)
 {
@@ -416,6 +457,12 @@ ostream& operator<<(ostream& stream, const ContainerInfo& containerInfo)
 ostream& operator<<(ostream& stream, const ExecutorID& executorId)
 {
   return stream << executorId.value();
+}
+
+
+ostream& operator<<(std::ostream& stream, const CapabilityInfo& capabilityInfo)
+{
+  return stream << stringify(JSON::protobuf(capabilityInfo));
 }
 
 

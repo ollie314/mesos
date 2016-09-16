@@ -127,12 +127,12 @@ TEST_F(FaultToleranceTest, MasterFailover)
 
   AWAIT_READY(registered1);
 
+  EXPECT_CALL(sched, disconnected(&driver));
+
   // Simulate failed over master by restarting the master.
   master->reset();
   master = StartMaster();
   ASSERT_SOME(master);
-
-  EXPECT_CALL(sched, disconnected(&driver));
 
   Future<AuthenticateMessage> authenticateMessage =
     FUTURE_PROTOBUF(AuthenticateMessage(), _, _);
@@ -158,7 +158,7 @@ TEST_F(FaultToleranceTest, MasterFailover)
 // This test ensures that a failed over master recovers completed tasks
 // from a slave's re-registration when the slave thinks the framework has
 // completed (but the framework has not actually completed yet from master's
-// point of view.
+// point of view).
 TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
 {
   // Step 1. Start Master and Slave.
@@ -340,6 +340,7 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
   Future<Nothing> executorLost;
   EXPECT_CALL(sched, executorLost(&driver, DEFAULT_EXECUTOR_ID, _, _))
     .WillOnce(FutureSatisfy(&executorLost));
+
   // Induce an ExitedExecutorMessage from the slave.
   containerizer.destroy(
       frameworkId.get(), DEFAULT_EXECUTOR_INFO.executor_id());
@@ -368,14 +369,14 @@ TEST_F(FaultToleranceTest, ReregisterCompletedFrameworks)
       0u,
       slaveJSON.values["frameworks"].as<JSON::Array>().values.size());
 
+  EXPECT_CALL(sched, disconnected(&driver));
+
   // Step 6. Simulate failed over master by restarting the master.
   master->reset();
   master = StartMaster();
   ASSERT_SOME(master);
 
   // Step 7. Simulate a framework re-registration with a failed over master.
-  EXPECT_CALL(sched, disconnected(&driver));
-
   Future<Nothing> registered;
   EXPECT_CALL(sched, registered(&driver, _, _))
     .WillOnce(FutureSatisfy(&registered));
@@ -907,6 +908,7 @@ TEST_F(FaultToleranceTest, TaskLost)
 
   AWAIT_READY(status);
   EXPECT_EQ(TASK_LOST, status.get().state());
+  EXPECT_EQ(TaskStatus::REASON_MASTER_DISCONNECTED, status.get().reason());
 
   driver.stop();
   driver.join();
@@ -1081,8 +1083,8 @@ TEST_F(FaultToleranceTest, ReregisterFrameworkExitedExecutor)
   //   2. Framework re-registration.
   //
   // To achieve this, we need to:
-  //   1. Restart the master (the slave / framework will not detect
-  //      the new master automatically using the BasicMasterDetector).
+  //   1. Restart the master (the slave / framework will not detect the
+  //      new master automatically using the StandaloneMasterDetector).
   //   2. Notify the slave of the new master.
   //   3. Kill the executor.
   //   4. Drop the status update, but allow the ExitedExecutorMessage.

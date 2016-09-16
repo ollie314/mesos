@@ -77,26 +77,17 @@ public:
       recover,
       process::Future<Nothing>(const Option<slave::state::SlaveState>&));
 
-  MOCK_METHOD7(
+  MOCK_METHOD8(
       launch,
       process::Future<bool>(
           const ContainerID&,
+          const Option<TaskInfo>&,
           const ExecutorInfo&,
           const std::string&,
           const Option<std::string>&,
           const SlaveID&,
-          const process::PID<slave::Slave>&,
+          const std::map<std::string, std::string>&,
           bool checkpoint));
-
-  virtual process::Future<bool> launch(
-      const ContainerID& containerId,
-      const TaskInfo& taskInfo,
-      const ExecutorInfo& executorInfo,
-      const std::string& directory,
-      const Option<std::string>& user,
-      const SlaveID& slaveId,
-      const process::PID<slave::Slave>& slavePid,
-      bool checkpoint);
 
   MOCK_METHOD2(
       update,
@@ -112,7 +103,7 @@ public:
 
   MOCK_METHOD1(
       wait,
-      process::Future<containerizer::Termination>(const ContainerID&));
+      process::Future<mesos::slave::ContainerTermination>(const ContainerID&));
 
   MOCK_METHOD1(
       destroy,
@@ -128,14 +119,15 @@ private:
   // Default implementations of mock methods.
   process::Future<bool> _launch(
       const ContainerID& containerId,
+      const Option<TaskInfo>& taskInfo,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
       const Option<std::string>& user,
       const SlaveID& slaveId,
-      const process::PID<slave::Slave>& slavePid,
+      const std::map<std::string, std::string>& environment,
       bool checkpoint);
 
-  process::Future<containerizer::Termination> _wait(
+  process::Future<mesos::slave::ContainerTermination> _wait(
       const ContainerID& containerId);
 
   void _destroy(const ContainerID& containerID);
@@ -144,10 +136,10 @@ private:
   hashmap<ExecutorID, std::shared_ptr<MockV1HTTPExecutor>> v1Executors;
 
   hashmap<std::pair<FrameworkID, ExecutorID>, ContainerID> containers_;
-  hashmap<ContainerID, process::Owned<MesosExecutorDriver> > drivers;
-  hashmap<ContainerID, process::Owned<executor::TestV1Mesos> > v1Libraries;
-  hashmap<ContainerID,
-      process::Owned<process::Promise<containerizer::Termination> > > promises;
+  hashmap<ContainerID, process::Owned<MesosExecutorDriver>> drivers;
+  hashmap<ContainerID, process::Owned<executor::TestV1Mesos>> v1Libraries;
+  hashmap<ContainerID, process::Owned<
+      process::Promise<mesos::slave::ContainerTermination>>> promises;
 };
 
 } // namespace tests {

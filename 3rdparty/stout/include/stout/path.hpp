@@ -64,11 +64,7 @@ inline std::string join(const std::vector<std::string>& paths)
 
 inline bool absolute(const std::string& path)
 {
-  if (path.empty() || path[0] != os::PATH_SEPARATOR) {
-    return false;
-  }
-
-  return true;
+  return strings::startsWith(path, os::PATH_SEPARATOR);
 }
 
 } // namespace path {
@@ -83,6 +79,8 @@ inline bool absolute(const std::string& path)
 class Path
 {
 public:
+  Path() : value() {}
+
   explicit Path(const std::string& path)
     : value(strings::remove(path, "file://", strings::PREFIX)) {}
 
@@ -250,15 +248,57 @@ public:
     return value;
   }
 
-  const std::string value;
+  const std::string& string() const
+  {
+    return value;
+  }
+
+private:
+  std::string value;
 };
+
+
+inline bool operator==(const Path& left, const Path& right)
+{
+  return left.string() == right.string();
+}
+
+
+inline bool operator!=(const Path& left, const Path& right)
+{
+  return !(left == right);
+}
+
+
+inline bool operator<(const Path& left, const Path& right)
+{
+  return left.string() < right.string();
+}
+
+
+inline bool operator>(const Path& left, const Path& right)
+{
+  return right < left;
+}
+
+
+inline bool operator<=(const Path& left, const Path& right)
+{
+  return !(left > right);
+}
+
+
+inline bool operator>=(const Path& left, const Path& right)
+{
+  return !(left < right);
+}
 
 
 inline std::ostream& operator<<(
     std::ostream& stream,
     const Path& path)
 {
-  return stream << path.value;
+  return stream << path.string();
 }
 
 #endif // __STOUT_PATH_HPP__

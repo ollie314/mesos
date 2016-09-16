@@ -11,8 +11,8 @@ There are different ways you can get Mesos:
 
 1\. Download the latest stable release from [Apache](http://mesos.apache.org/downloads/) (***Recommended***)
 
-    $ wget http://www.apache.org/dist/mesos/0.28.2/mesos-0.28.2.tar.gz
-    $ tar -zxf mesos-0.28.2.tar.gz
+    $ wget http://www.apache.org/dist/mesos/1.0.1/mesos-1.0.1.tar.gz
+    $ tar -zxf mesos-1.0.1.tar.gz
 
 2\. Clone the Mesos git [repository](https://git-wip-us.apache.org/repos/asf/mesos.git) (***Advanced Users Only***)
 
@@ -98,14 +98,14 @@ Following are the instructions for stock CentOS 6.6. If you are using a differen
     # 'Mesos > 0.21.0' requires 'subversion > 1.8' devel package, which is
     # not available in the default repositories.
     # Create a WANdisco SVN repo file to install the correct version:
-    $ sudo cat > /etc/yum.repos.d/wandisco-svn.repo <<EOF
+    $ sudo bash -c 'cat > /etc/yum.repos.d/wandisco-svn.repo <<EOF
     [WANdiscoSVN]
     name=WANdisco SVN Repo 1.8
     enabled=1
     baseurl=http://opensource.wandisco.com/centos/6/svn-1.8/RPMS/$basearch/
     gpgcheck=1
     gpgkey=http://opensource.wandisco.com/RPM-GPG-KEY-WANdisco
-    EOF
+    EOF'
 
     # Install essential development tools.
     $ sudo yum groupinstall -y "Development Tools"
@@ -144,14 +144,14 @@ Following are the instructions for stock CentOS 7.1. If you are using a differen
     # 'Mesos > 0.21.0' requires 'subversion > 1.8' devel package,
     # which is not available in the default repositories.
     # Create a WANdisco SVN repo file to install the correct version:
-    $ sudo cat > /etc/yum.repos.d/wandisco-svn.repo <<EOF
+    $ sudo bash -c 'cat > /etc/yum.repos.d/wandisco-svn.repo <<EOF
     [WANdiscoSVN]
     name=WANdisco SVN Repo 1.9
     enabled=1
     baseurl=http://opensource.wandisco.com/centos/7/svn-1.9/RPMS/$basearch/
     gpgcheck=1
     gpgkey=http://opensource.wandisco.com/RPM-GPG-KEY-WANdisco
-    EOF
+    EOF'
 
     # Parts of Mesos require systemd in order to operate. However, Mesos
     # only supports versions of systemd that contain the 'Delegate' flag.
@@ -172,10 +172,15 @@ Following are the instructions for stock CentOS 7.1. If you are using a differen
 Following are the instructions for stock Windows 10 and Windows Server 2012 or newer.
 
 1. Install the latest version of [Visual Studio Community 2015](https://www.visualstudio.com/post-download-vs?sku=community).
+   Make sure to select the Common Tools for Visual C++ and the Windows 10 SDK.
    Start Visual Studio Community to complete the setup and configuration.
 2. Install [CMake 3.5.2 or later](https://cmake.org/files/v3.5/cmake-3.5.2-win32-x86.msi).
    Do not run CMake before finishing the Visual Studio Community setup.
 3. Install [Gnu Patch 2.5.9-7 or later](http://downloads.sourceforge.net/project/gnuwin32/patch/2.5.9-7/patch-2.5.9-7-setup.exe).
+4. If building from git, make sure you have Windows-style line endings.
+   i.e. `git config core.autocrlf true`.
+5. Make sure there are no spaces in your build directory.
+   For example, `C:/Program Files (x86)/mesos` is an invalid build directory.
 
 ## Building Mesos (Posix)
 
@@ -223,13 +228,13 @@ In order to speed up the build and reduce verbosity of the logs, you can append 
     # NOTE: `PreferredToolArchitecture` can be set system-wide via Control Panel.
     $ msbuild Mesos.sln /p:PreferredToolArchitecture=x64
 
-    # mesos-agent.exe can be found in the <repository>\build\src\Debug folder.
-    $ cd src\Debug
+    # mesos-agent.exe can be found in the <repository>\build\src folder.
+    $ cd src
 
     # The Windows agent exposes new isolators that must be used as with
     # the `--isolation` flag. To get started point the agent to a working
     # master, using eiher an IP address or zookeeper information.
-    $ mesos-agent.exe --master=<master> --work_dir=<work folder> --isolation=windows/cpu,filesystem/windows --launcher_dir=<repository>\build\src\Debug
+    $ mesos-agent.exe --master=<master> --work_dir=<work folder> --isolation=windows/cpu,filesystem/windows --launcher_dir=<repository>\build\src
 
 ## Examples
 

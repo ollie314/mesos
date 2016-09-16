@@ -79,7 +79,7 @@ This guide describes the process of doing an official release of Mesos.
       `Target Version` set but not `Fix Version`. Also check for any Unresolved
       or `Duplicate`/`Invalid` tickets that incorrectly set the `Fix Version`.
 
-3. If not already done, update and commit `configure.ac` for the release.
+3. If not already done, update and commit `configure.ac` and `CMakeLists.txt` for the release.
 
 4. Run `support/generate-endpoint-help.py` and commit any resulting changes.
 
@@ -216,6 +216,6 @@ Upload the mesos.interface package to PyPi.
 
 Update the Mesos Homebrew package.
 
-  1. Update the [Homebrew formula for Mesos](https://github.com/Homebrew/homebrew/blob/master/Library/Formula/mesos.rb) and test.
-  1. Submit a PR to the [Homebrew repo](https://github.com/Homebrew/homebrew).
+  1. Update the [Homebrew formula for Mesos](https://github.com/Homebrew/homebrew-core/blob/master/Formula/mesos.rb) and test.
+  1. Submit a PR to the [Homebrew repo](https://github.com/Homebrew/homebrew-core).
   1. Once accepted, verify that `brew install mesos` works.

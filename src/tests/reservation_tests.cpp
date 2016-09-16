@@ -47,6 +47,7 @@
 #include "tests/allocator.hpp"
 #include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
+#include "tests/mock_slave.hpp"
 
 using mesos::internal::master::allocator::HierarchicalDRFAllocator;
 
@@ -517,7 +518,7 @@ TEST_F(ReservationTest, DropReserveTooLarge)
   masterFlags.allocation_interval = Milliseconds(5);
   masterFlags.roles = frameworkInfo.role();
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator, masterFlags);
   ASSERT_SOME(master);
@@ -566,7 +567,7 @@ TEST_F(ReservationTest, DropReserveTooLarge)
     .WillOnce(FutureArg<1>(&offers));
 
   // Expect that the reserve offer operation will be dropped.
-  EXPECT_CALL(allocator, updateAllocation(_, _, _))
+  EXPECT_CALL(allocator, updateAllocation(_, _, _, _))
     .Times(0);
 
   // We use the filter explicitly here so that the resources will not
@@ -607,7 +608,7 @@ TEST_F(ReservationTest, DropReserveStaticReservation)
   masterFlags.allocation_interval = Milliseconds(5);
   masterFlags.roles = frameworkInfo.role();
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator, masterFlags);
   ASSERT_SOME(master);
@@ -657,7 +658,7 @@ TEST_F(ReservationTest, DropReserveStaticReservation)
     .WillOnce(FutureArg<1>(&offers));
 
   // Expect that the reserve offer operation will be dropped.
-  EXPECT_CALL(allocator, updateAllocation(_, _, _))
+  EXPECT_CALL(allocator, updateAllocation(_, _, _, _))
     .Times(0);
 
   // We use the filter explicitly here so that the resources
@@ -1146,8 +1147,7 @@ TEST_F(ReservationTest, CompatibleCheckpointedResourcesWithPersistentVolumes)
   EXPECT_CALL(sched, registered(&driver, _, _));
 
   EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillOnce(FutureArg<1>(&offers))
-    .WillRepeatedly(Return()); // Ignore subsequent offers.
+    .WillOnce(FutureArg<1>(&offers));
 
   driver.start();
 
@@ -1170,6 +1170,10 @@ TEST_F(ReservationTest, CompatibleCheckpointedResourcesWithPersistentVolumes)
   Filters filters;
   filters.set_refuse_seconds(0);
 
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
   // Reserve the resources and create the volume.
   driver.acceptOffers(
       {offer.id()},
@@ -1184,8 +1188,24 @@ TEST_F(ReservationTest, CompatibleCheckpointedResourcesWithPersistentVolumes)
   AWAIT_READY(message2);
   EXPECT_EQ(Resources(message2.get().resources()), reserved + volume);
 
+  // Expect an offer containing the volume.
+  AWAIT_READY(offers);
+
+  ASSERT_EQ(1u, offers.get().size());
+  offer = offers.get()[0];
+
+  EXPECT_TRUE(Resources(offer.resources()).contains(reserved + volume));
+
+  Future<OfferID> rescindedOfferId;
+
+  EXPECT_CALL(sched, offerRescinded(&driver, _))
+    .WillOnce(FutureArg<1>(&rescindedOfferId));
+
   terminate(slave1);
   wait(slave1);
+
+  AWAIT_READY(rescindedOfferId);
+  EXPECT_EQ(rescindedOfferId.get(), offer.id());
 
   // Simulate a reboot of the slave machine by modifying the boot ID.
   ASSERT_SOME(os::write(slave::paths::getBootIdPath(

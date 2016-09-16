@@ -70,6 +70,7 @@
 #include "linux/routing/handle.hpp"
 
 #include "linux/routing/link/link.hpp"
+#include "linux/routing/link/veth.hpp"
 
 #include "linux/routing/queueing/fq_codel.hpp"
 #include "linux/routing/queueing/htb.hpp"
@@ -2514,7 +2515,7 @@ Future<Option<ContainerLaunchInfo>> PortMappingIsolatorProcess::prepare(
             << executorInfo.executor_id() << "'";
 
   ContainerLaunchInfo launchInfo;
-  launchInfo.add_commands()->set_value(scripts(infos[containerId]));
+  launchInfo.add_pre_exec_commands()->set_value(scripts(infos[containerId]));
 
   // NOTE: the port mapping isolator itself doesn't require mount
   // namespace. However, if mount namespace is enabled because of
@@ -2592,7 +2593,7 @@ Future<Nothing> PortMappingIsolatorProcess::isolate(
             << linker << "' -> '" << target << "'";
 
   // Create a virtual ethernet pair for this container.
-  Try<bool> createVethPair = link::create(veth(pid), eth0, pid);
+  Try<bool> createVethPair = link::veth::create(veth(pid), eth0, pid);
   if (createVethPair.isError()) {
     return Failure(
         "Failed to create virtual ethernet pair: " +
@@ -3081,7 +3082,7 @@ Future<Nothing> PortMappingIsolatorProcess::update(
       Subprocess::FD(STDOUT_FILENO),
       Subprocess::FD(STDERR_FILENO),
       NO_SETSID,
-      update.flags);
+      &update.flags);
 
   if (s.isError()) {
     return Failure("Failed to launch update subcommand: " + s.error());
@@ -3208,7 +3209,7 @@ Future<ResourceStatistics> PortMappingIsolatorProcess::usage(
       Subprocess::PIPE(),
       Subprocess::FD(STDERR_FILENO),
       NO_SETSID,
-      statistics.flags);
+      &statistics.flags);
 
   if (s.isError()) {
     return Failure("Failed to launch the statistics subcommand: " + s.error());

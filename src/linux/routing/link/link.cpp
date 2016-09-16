@@ -28,13 +28,12 @@
 
 #include <netlink/route/link.h>
 
-#include <netlink/route/link/veth.h>
-
 #include <set>
 #include <string>
 #include <vector>
 
 #include <process/delay.hpp>
+#include <process/id.hpp>
 #include <process/pid.hpp>
 #include <process/process.hpp>
 
@@ -119,33 +118,6 @@ Try<bool> exists(const string& _link)
 }
 
 
-Try<bool> create(
-    const string& veth,
-    const string& peer,
-    const Option<pid_t>& pid)
-{
-  Try<Netlink<struct nl_sock>> socket = routing::socket();
-  if (socket.isError()) {
-    return Error(socket.error());
-  }
-
-  int error = rtnl_link_veth_add(
-      socket.get().get(),
-      veth.c_str(),
-      peer.c_str(),
-      (pid.isNone() ? getpid() : pid.get()));
-
-  if (error != 0) {
-    if (error == -NLE_EXIST) {
-      return false;
-    }
-    return Error(nl_geterror(error));
-  }
-
-  return true;
-}
-
-
 Try<bool> remove(const string& _link)
 {
   Result<Netlink<struct rtnl_link>> link = internal::get(_link);
@@ -178,7 +150,9 @@ namespace internal {
 class ExistenceChecker : public Process<ExistenceChecker>
 {
 public:
-  ExistenceChecker(const string& _link) : link(_link) {}
+  ExistenceChecker(const string& _link)
+    : ProcessBase(process::ID::generate("link-existence-checker")),
+      link(_link) {}
 
   virtual ~ExistenceChecker() {}
 

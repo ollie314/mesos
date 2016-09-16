@@ -22,29 +22,31 @@
 #include <netlink/netlink.h>
 #include <netlink/socket.h>
 
-#include <netlink/idiag/msg.h>
-
-#include <netlink/route/classifier.h>
-#include <netlink/route/link.h>
-#include <netlink/route/qdisc.h>
-
 #include <memory>
 #include <string>
 
 #include <stout/error.hpp>
 #include <stout/try.hpp>
 
-#include "linux/routing/utils.hpp"
-
 namespace routing {
 
 // Customized deallocation functions for netlink objects.
-inline void cleanup(struct nl_cache* cache) { nl_cache_free(cache); }
-inline void cleanup(struct nl_sock* sock) { nl_socket_free(sock); }
-inline void cleanup(struct rtnl_cls* cls) { rtnl_cls_put(cls); }
-inline void cleanup(struct rtnl_link* link) { rtnl_link_put(link); }
-inline void cleanup(struct rtnl_qdisc* qdisc) { rtnl_qdisc_put(qdisc); }
-inline void cleanup(struct idiagnl_msg* msg) { idiagnl_msg_put(msg); }
+template <typename T>
+void cleanup(T* t);
+
+
+template <>
+inline void cleanup(struct nl_cache* cache)
+{
+  nl_cache_free(cache);
+}
+
+
+template <>
+inline void cleanup(struct nl_sock* sock)
+{
+  nl_socket_free(sock);
+}
 
 
 // A helper class for managing netlink objects (e.g., rtnl_link,
@@ -88,11 +90,6 @@ private:
 // TODO(chzhcn): Consider renaming 'routing' to 'netlink'.
 inline Try<Netlink<struct nl_sock>> socket(int protocol = NETLINK_ROUTE)
 {
-  Try<Nothing> checking = check();
-  if (checking.isError()) {
-    return Error(checking.error());
-  }
-
   struct nl_sock* s = nl_socket_alloc();
   if (s == nullptr) {
     return Error("Failed to allocate netlink socket");

@@ -51,20 +51,20 @@ message Call {
     SET_LOGGING_LEVEL = 6;  // See 'SetLoggingLevel' below.
 
     LIST_FILES = 7;
-    READ_FILE = 8;
+    READ_FILE = 8;          // See 'ReadFile' below.
 
     GET_STATE = 9;
-    GET_STATE_SUMMARY = 10;
 
-    GET_AGENTS = 11;
-    GET_FRAMEWORKS = 12;
-    GET_TASKS = 13;         // See 'GetTasks' below.
+    GET_AGENTS = 10;
+    GET_FRAMEWORKS = 11;
+    GET_EXECUTORS = 12;     // Retrieves the information about all executors.
+    GET_TASKS = 13;         // Retrieves the information about all known tasks.
     GET_ROLES = 14;         // Retrieves the information about roles.
 
     GET_WEIGHTS = 15;       // Retrieves the information about role weights.
     UPDATE_WEIGHTS = 16;
 
-    GET_LEADING_MASTER = 17; // Retrieves the leading master information.
+    GET_MASTER = 17;        // Retrieves the master's information.
 
     SUBSCRIBE = 18;          // Subscribes the master to receive events.
 
@@ -107,24 +107,22 @@ message Call {
     required DurationInfo duration = 2;
   }
 
+  // Provides the file listing for a directory.
   message ListFiles {
     required string path = 1;
   }
 
+  // Reads data from a file.
   message ReadFile {
+    // The path of file.
     required string path = 1;
-    optional string offset = 2;
-    optional string length = 3;
-  }
 
-  // Call::GetTasks requests 'limit' number of tasks starting
-  // from 'offset'. Tasks are sorted in 'order', either ascending
-  // or descending based on timestamp. If 'limit' is not set,
-  // default value 100 will be used.
-  message GetTasks {
-    optional uint32 limit = 1 [default = 100];
-    optional uint32 offset = 2;
-    optional string order = 3;
+    // Initial offset in file to start reading from.
+    required uint64 offset = 2;
+
+    // The maximum number of bytes to read. The read length is capped at 16
+    // memory pages.
+    optional uint64 length = 3;
   }
 
   message UpdateWeights {
@@ -133,13 +131,13 @@ message Call {
 
   // Reserve resources dynamically on a specific agent.
   message ReserveResources {
-    required SlaveID agent_id = 1;
+    required SlaveID slave_id = 1;
     repeated Resource resources = 2;
   }
 
   // Unreserve resources dynamically on a specific agent.
   message UnreserveResources {
-    required SlaveID agent_id = 1;
+    required SlaveID slave_id = 1;
     repeated Resource resources = 2;
   }
 
@@ -149,7 +147,7 @@ message Call {
   // the agent might fail. Volume creation can be verified by sending a
   // `GET_VOLUMES` call.
   message CreateVolumes {
-    required SlaveID agent_id = 1;
+    required SlaveID slave_id = 1;
     repeated Resource volumes = 2;
   }
 
@@ -158,7 +156,7 @@ message Call {
   // message may not be delivered or destroying the volumes at the agent might
   // fail. Volume deletion can be verified by sending a `GET_VOLUMES` call.
   message DestroyVolumes {
-    required SlaveID agent_id = 1;
+    required SlaveID slave_id = 1;
     repeated Resource volumes = 2;
   }
 
@@ -193,7 +191,7 @@ message Call {
   optional SetLoggingLevel set_logging_level = 3;
   optional ListFiles list_files = 4;
   optional ReadFile read_file = 5;
-  optional GetTasks get_tasks = 6;
+  optional UpdateWeights update_weights = 6;
   optional ReserveResources reserve_resources = 7;
   optional UnreserveResources unreserve_resources = 8;
   optional CreateVolumes create_volumes = 9;
@@ -223,19 +221,19 @@ message Response {
     GET_LOGGING_LEVEL = 5;         // See 'GetLoggingLevel' below.
 
     LIST_FILES = 6;
-    READ_FILE = 7;
+    READ_FILE = 7;                 // See 'ReadFile' below.
 
     GET_STATE = 8;
-    GET_STATE_SUMMARY = 9;
 
-    GET_AGENTS = 10;
-    GET_FRAMEWORKS = 11;
+    GET_AGENTS = 9;
+    GET_FRAMEWORKS = 10;
+    GET_EXECUTORS = 11;            // See 'GetExecutors' below.
     GET_TASKS = 12;                // See 'GetTasks' below.
     GET_ROLES = 13;                // See 'GetRoles' below.
 
     GET_WEIGHTS = 14;              // See 'GetWeights' below.
 
-    GET_LEADING_MASTER = 15;       // See 'GetLeadingMaster' below.
+    GET_MASTER = 15;               // See 'GetMaster' below.
 
     GET_MAINTENANCE_STATUS = 16;   // See 'GetMaintenanceStatus' below.
     GET_MAINTENANCE_SCHEDULE = 17; // See 'GetMaintenanceSchedule' below.
@@ -269,20 +267,26 @@ message Response {
     required uint32 level = 1;
   }
 
+  // Contains the file listing(similar to `ls -l`) for a directory.
   message ListFiles {
-    repeated string files = 1;
+    repeated FileInfo file_infos = 1;
   }
 
-  message GetFileContents {
-    repeated bytes data = 1;
+  // Contains the file data.
+  message ReadFile {
+    // The size of file (in bytes).
+    required uint64 size = 1;
+
+    required bytes data = 2;
   }
 
+  // Contains full state of the master i.e. information about the tasks,
+  // agents, frameworks and executors running in the cluster.
   message GetState {
-    // TODO(vinod): Fill in the fields.
-  }
-
-  message GetStateSummary {
-    // TODO(vinod): Fill in the fields.
+    optional GetTasks get_tasks = 1;
+    optional GetExecutors get_executors = 2;
+    optional GetFrameworks get_frameworks = 3;
+    optional GetAgents get_agents = 4;
   }
 
   message GetAgents {
@@ -307,18 +311,70 @@ message Response {
     repeated Agent agents = 1;
   }
 
+  // Information about all the frameworks known to the master at the current
+  // time. Note that there might be frameworks unknown to the master running
+  // on partitioned or unsubscribed agents.
   message GetFrameworks {
     message Framework {
-    // TODO(vinod): Fill in the fields.
+      required FrameworkInfo framework_info = 1;
+      required bool active = 2;
+      required bool connected = 3;
+
+      optional TimeInfo registered_time = 4;
+      optional TimeInfo reregistered_time = 5;
+      optional TimeInfo unregistered_time = 6;
+
+      repeated Offer offers = 7;
+      repeated InverseOffer inverse_offers = 8;
+
+      repeated Resource allocated_resources = 9;
+      repeated Resource offered_resources = 10;
     }
 
+    // Frameworks that have subscribed with the master. Note that this includes
+    // frameworks that are disconnected and in the process of re-subscribing.
     repeated Framework frameworks = 1;
+
+    // Frameworks that have been teared down.
+    repeated Framework completed_frameworks = 2;
+
+    // Frameworks that have previously subscribed but haven't yet subscribed
+    // after a master failover.
+    repeated FrameworkInfo recovered_frameworks = 3;
   }
 
-  // Lists both running and completed tasks from all active and completed
-  // frameworks.
+  // Lists information about all the executors known to the master at the
+  // current time. Note that there might be executors unknown to the master
+  // running on partitioned or unsubscribed agents.
+  message GetExecutors {
+    message Executor {
+      required ExecutorInfo executor_info = 1;
+      required SlaveID slave_id = 2;
+    }
+
+    repeated Executor executors = 1;
+    repeated Executor orphan_executors = 2;
+  }
+
+  // Lists information about all the tasks known to the master at the current
+  // time. Note that there might be tasks unknown to the master running on
+  // partitioned or unsubscribed agents.
   message GetTasks {
-    repeated Task tasks = 1;
+    // Tasks that are an enqueued on the master waiting (e.g., authorizing)
+    // to be launched.
+    repeated Task pending_tasks = 1;
+
+    // Tasks that have been forwarded to the agent for launch. This includes
+    // tasks that are running and reached terminal state.
+    repeated Task tasks = 2;
+
+    // Tasks that have reached terminal state and have all their updates
+    // acknowledged by the scheduler.
+    repeated Task completed_tasks = 3;
+
+    // Tasks belonging to frameworks that have not yet re-subscribed with
+    // master (e.g., immediately after master failover).
+    repeated Task orphan_tasks = 4;
   }
 
   // Provides information about every role that is on the role whitelist (if
@@ -333,11 +389,8 @@ message Response {
     repeated WeightInfo weight_infos = 1;
   }
 
-  // Contains the leading master information.
-  // NOTE: This is broken currently "on the cloud" (e.g. EC2) as it stores the
-  // private IP address, unless advertise_ip points to an externally accessible
-  // IP.
-  message GetLeadingMaster {
+  // Contains the master's information.
+  message GetMaster {
     optional MasterInfo master_info = 1;
   }
 
@@ -351,6 +404,7 @@ message Response {
     required maintenance.Schedule schedule = 1;
   }
 
+  // Contains the cluster's configured quotas.
   message GetQuota {
     required quota.QuotaStatus status = 1;
   }
@@ -363,15 +417,15 @@ message Response {
   optional GetMetrics get_metrics = 5;
   optional GetLoggingLevel get_logging_level = 6;
   optional ListFiles list_files = 7;
-  optional GetFileContents get_file_contents = 8;
+  optional ReadFile read_file = 8;
   optional GetState get_state = 9;
-  optional GetStateSummary get_state_summary = 10;
-  optional GetAgents get_agents = 11;
-  optional GetFrameworks get_frameworks = 12;
+  optional GetAgents get_agents = 10;
+  optional GetFrameworks get_frameworks = 11;
+  optional GetExecutors get_executors = 12;
   optional GetTasks get_tasks = 13;
   optional GetRoles get_roles = 14;
   optional GetWeights get_weights = 15;
-  optional GetLeadingMaster get_leading_master = 16;
+  optional GetMaster get_master = 16;
   optional GetMaintenanceStatus get_maintenance_status = 17;
   optional GetMaintenanceSchedule get_maintenance_schedule = 18;
   optional GetQuota get_quota = 19;
@@ -384,10 +438,18 @@ message Response {
 message Event {
   enum Type {
     UNKNOWN = 0;
-    TASK_ADDED = 1; // See `TaskAdded` below.
-    TASK_UPDATED = 2; // See `TaskUpdated` below.
+    SUBSCRIBED = 1; // See `Subscribed` below.
+    TASK_ADDED = 2; // See `TaskAdded` below.
+    TASK_UPDATED = 3; // See `TaskUpdated` below.
 
     // TODO(vinod): Fill in more events.
+  }
+
+  // First event received when a client subscribes.
+  message Subscribed {
+    // Snapshot of the entire cluster state. Further updates to the
+    // cluster state are sent as separate events on the stream.
+    optional Response.GetState get_state = 1;
   }
 
   // Forwarded by the master when a task becomes known to it. This can happen
@@ -408,6 +470,7 @@ message Event {
 
   optional Type type = 1;
 
-  optional TaskAdded task_added = 2;
-  optional TaskUpdated task_updated = 3;
+  optional Subscribed subscribed = 2;
+  optional TaskAdded task_added = 3;
+  optional TaskUpdated task_updated = 4;
 }

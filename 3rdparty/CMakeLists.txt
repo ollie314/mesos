@@ -28,6 +28,7 @@ set(UPSTREAM_URL ${3RDPARTY_DEPENDENCIES})
 set(REBUNDLED_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 if (REBUNDLED)
   set(BOOST_URL       ${REBUNDLED_DIR}/boost-${BOOST_VERSION}.tar.gz)
+  set(ELFIO_URL       ${REBUNDLED_DIR}/elfio-${ELFIO_VERSION}.tar.gz)
   set(GLOG_URL        ${REBUNDLED_DIR}/glog-${GLOG_VERSION}.tar.gz)
   set(PICOJSON_URL    ${REBUNDLED_DIR}/picojson-${PICOJSON_VERSION}.tar.gz)
   set(NVML_URL        ${REBUNDLED_DIR}/nvml-${NVML_VERSION}.tar.gz)
@@ -35,6 +36,7 @@ if (REBUNDLED)
   set(LIBEV_URL       ${REBUNDLED_DIR}/libev-${LIBEV_VERSION}.tar.gz)
 else (REBUNDLED)
   set(BOOST_URL       ${UPSTREAM_URL}/boost-${BOOST_VERSION}.tar.gz)
+  set(ELFIO_URL       ${UPSTREAM_URL}/elfio-${ELFIO_VERSION}.tar.gz)
   set(GLOG_URL        ${UPSTREAM_URL}/glog-${GLOG_VERSION}.tar.gz)
   set(PICOJSON_URL    ${UPSTREAM_URL}/picojson-${PICOJSON_VERSION}.tar.gz)
   set(NVML_URL        ${UPSTREAM_URL}/nvml-${NVML_VERSION}.tar.gz)
@@ -132,6 +134,7 @@ endif (NOT WIN32)
 set(LIBEVENT_CMAKE_ARGS
   ${LIBEVENT_CMAKE_ARGS}
   -LH
+  -DCMAKE_C_FLAGS=-fPIC
   -DEVENT__HAVE_SYS_STAT_H=1
   -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS}
   )
@@ -146,6 +149,15 @@ ExternalProject_Add(
   BUILD_COMMAND     ${CMAKE_NOOP}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${BOOST_URL}
+  )
+
+ExternalProject_Add(
+  ${ELFIO_TARGET}
+  PREFIX            ${ELFIO_CMAKE_ROOT}
+  CONFIGURE_COMMAND ${CMAKE_NOOP}
+  BUILD_COMMAND     ${CMAKE_NOOP}
+  INSTALL_COMMAND   ${CMAKE_NOOP}
+  URL               ${ELFIO_URL}
   )
 
 # The patch, configure, build, and install commands are stubbed out on Windows
@@ -379,6 +391,9 @@ if (NOT WIN32)
     ZOOKEEPER_PATCH_CMD)
 elseif (WIN32)
   # Set the patch command which will utilize patch.exe in temp location for no elevation prompt
+  # NOTE: We do not specify the `--binary` patch option here because the
+  # files being modified are extracted with CRLF (Windows) line endings
+  # already. The `--binary` option will instead fail to apply the patch.
   set(
     ZOOKEEPER_PATCH_CMD
     ${PATCHEXE_LOCATION} -p1 < ${MESOS_3RDPARTY_SRC}/zookeeper-${ZOOKEEPER_VERSION}.patch)

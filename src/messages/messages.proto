@@ -301,6 +301,21 @@ message RunTaskMessage {
 
 
 /**
+ * This message either notifies an existing executor to run a task
+ * group, or starts a new executor and runs the task group. This
+ * message is sent when scheduler::Call::Accept is sent with
+ * Offer::Operation::LaunchGroup.
+ *
+ * See executor::Event::LaunchGroup.
+ */
+message RunTaskGroupMessage {
+  required FrameworkInfo framework = 1;
+  required ExecutorInfo executor = 2;
+  required TaskGroupInfo task_group = 3;
+}
+
+
+/**
  * Kills a specific task.
  *
  * See scheduler::Call::Kill and executor::Event::Kill.
@@ -401,9 +416,12 @@ message RegisterSlaveMessage {
 
 
 /**
- * Registers the agent with the master.
- * This is used when the agent has previously registered and
- * the master changes to a newly elected master.
+ * Reregisters the agent with the master.
+ *
+ * This is used when the agent has previously registered and the agent
+ * has reason to suspect that it should re-establish its connection
+ * (e.g., a new master is elected or the agent hasn't seen a ping from
+ * the master for a long period of time).
  *
  * If registration fails, a `ShutdownMessage` is sent to the agent.
  * Failure conditions are documented inline in Master::reregisterSlave.
@@ -418,6 +436,7 @@ message ReregisterSlaveMessage {
 
   repeated ExecutorInfo executor_infos = 4;
   repeated Task tasks = 3;
+  repeated FrameworkInfo frameworks = 8;
   repeated Archive.Framework completed_frameworks = 5;
 
   // NOTE: This is a hack for the master to detect the agent's
@@ -640,10 +659,13 @@ message Archive {
 
 /**
  * Message describing a task's current health status, which is sent by
- * the health check program to the executor.
- * On each receive, if the number of consecutive failed health checks
- * meets the `consecutive_failure` configuration, then `kill_task`
- * flag will be set to true.
+ * the health check library or program to the executor.
+ *
+ * The `kill_task` flag is set to true when the health check library or
+ * program deems the task to be irrevocably unhealthy, for example, if
+ * the number of consecutive failed health checks meets the configured
+ * `consecutive_failure` value. If this flag is set, executor should
+ * consider killing the associated task.
  */
 message TaskHealthStatus {
   required TaskID task_id = 1;

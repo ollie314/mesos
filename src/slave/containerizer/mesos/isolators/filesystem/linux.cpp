@@ -21,6 +21,7 @@
 #include <glog/logging.h>
 
 #include <process/collect.hpp>
+#include <process/id.hpp>
 
 #include <process/metrics/metrics.hpp>
 
@@ -49,6 +50,7 @@ using namespace process;
 using std::list;
 using std::ostringstream;
 using std::string;
+using std::vector;
 
 using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerState;
@@ -199,7 +201,8 @@ Try<Isolator*> LinuxFilesystemIsolatorProcess::create(const Flags& flags)
 
 LinuxFilesystemIsolatorProcess::LinuxFilesystemIsolatorProcess(
     const Flags& _flags)
-  : flags(_flags),
+  : ProcessBase(process::ID::generate("linux-filesystem-isolator")),
+    flags(_flags),
     metrics(PID<LinuxFilesystemIsolatorProcess>(this)) {}
 
 
@@ -264,11 +267,6 @@ Future<Option<ContainerLaunchInfo>> LinuxFilesystemIsolatorProcess::prepare(
 {
   const string& directory = containerConfig.directory();
 
-  Option<string> user;
-  if (containerConfig.has_user()) {
-    user = containerConfig.user();
-  }
-
   if (infos.contains(containerId)) {
     return Failure("Container has already been prepared");
   }
@@ -286,13 +284,16 @@ Future<Option<ContainerLaunchInfo>> LinuxFilesystemIsolatorProcess::prepare(
   // namespace right after forking the executor process. We use these
   // commands to mount those volumes specified in the container info
   // so that they don't pollute the host mount namespace.
-  Try<string> _script = script(containerId, containerConfig);
-  if (_script.isError()) {
-    return Failure("Failed to generate isolation script: " + _script.error());
+  Try<vector<CommandInfo>> commands =
+    getPreExecCommands(containerId, containerConfig);
+
+  if (commands.isError()) {
+    return Failure("Failed to get pre-exec commands: " + commands.error());
   }
 
-  CommandInfo* command = launchInfo.add_commands();
-  command->set_value(_script.get());
+  foreach (const CommandInfo& command, commands.get()) {
+    launchInfo.add_pre_exec_commands()->CopyFrom(command);
+  }
 
   return update(containerId, containerConfig.executor_info().resources())
     .then([launchInfo]() -> Future<Option<ContainerLaunchInfo>> {
@@ -301,27 +302,38 @@ Future<Option<ContainerLaunchInfo>> LinuxFilesystemIsolatorProcess::prepare(
 }
 
 
-Try<string> LinuxFilesystemIsolatorProcess::script(
+Try<vector<CommandInfo>> LinuxFilesystemIsolatorProcess::getPreExecCommands(
     const ContainerID& containerId,
     const ContainerConfig& containerConfig)
 {
-  ostringstream out;
-  out << "#!/bin/sh\n";
-  out << "set -x -e\n";
+  vector<CommandInfo> commands;
 
   // Make sure mounts in the container mount namespace do not
   // propagate back to the host mount namespace.
   // NOTE: We cannot simply run `mount --make-rslave /`, for more info
   // please refer to comments in mount.hpp.
+  CommandInfo command;
+  command.set_shell(false);
+  command.set_value(path::join(flags.launcher_dir, "mesos-containerizer"));
+  command.add_arguments("mesos-containerizer");
+  command.add_arguments(MesosContainerizerMount::NAME);
+
   MesosContainerizerMount::Flags mountFlags;
   mountFlags.operation = MesosContainerizerMount::MAKE_RSLAVE;
   mountFlags.path = "/";
-  out << path::join(flags.launcher_dir, "mesos-containerizer") << " "
-      << MesosContainerizerMount::NAME << " "
-      << stringify(mountFlags) << "\n";
+
+  foreachvalue (const flags::Flag& flag, mountFlags) {
+    const Option<string> value = flag.stringify(flags);
+    if (value.isSome()) {
+      command.add_arguments(
+          "--" + flag.effective_name().value + "=" + value.get());
+    }
+  }
+
+  commands.push_back(command);
 
   if (!containerConfig.executor_info().has_container()) {
-    return out.str();
+    return commands;
   }
 
   // Bind mount the sandbox if the container specifies a rootfs.
@@ -330,6 +342,9 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
         containerConfig.rootfs(),
         flags.sandbox_directory);
 
+    // If the rootfs is a read-only filesystem (e.g., using the bind
+    // backend), the sandbox must be already exist. Please see the
+    // comments in 'provisioner/backend.hpp' for details.
     Try<Nothing> mkdir = os::mkdir(sandbox);
     if (mkdir.isError()) {
       return Error(
@@ -337,8 +352,16 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
           sandbox + "': " + mkdir.error());
     }
 
-    out << "mount -n --rbind '" << containerConfig.directory()
-        << "' '" << sandbox << "'\n";
+    CommandInfo command;
+    command.set_shell(false);
+    command.set_value("mount");
+    command.add_arguments("mount");
+    command.add_arguments("-n");
+    command.add_arguments("--rbind");
+    command.add_arguments(containerConfig.directory());
+    command.add_arguments(sandbox);
+
+    commands.push_back(command);
   }
 
   foreach (const Volume& volume,
@@ -346,8 +369,13 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
     // NOTE: Volumes with source will be handled by the corresponding
     // isolators (e.g., docker/volume).
     if (volume.has_source()) {
-      VLOG(1) << "Ignored a volume with source for container '"
-              << containerId << "'";
+      VLOG(1) << "Ignored a volume with source for container "
+              << containerId;
+      continue;
+    }
+
+    if (volume.has_image()) {
+      VLOG(1) << "Ignored an image volume for container " << containerId;
       continue;
     }
 
@@ -392,7 +420,9 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
       // TODO(idownes): Consider setting ownership and mode.
     }
 
-    // Determine the target of the mount.
+    // Determine the target of the mount. The mount target
+    // is determined by 'container_path'. It can be either
+    // a directory, or the path of a file.
     string target;
 
     if (strings::startsWith(volume.container_path(), "/")) {
@@ -401,11 +431,29 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
             containerConfig.rootfs(),
             volume.container_path());
 
-        Try<Nothing> mkdir = os::mkdir(target);
-        if (mkdir.isError()) {
-          return Error(
-              "Failed to create the target of the mount at '" +
-              target + "': " + mkdir.error());
+        if (os::stat::isfile(source)) {
+          // The file volume case.
+          Try<Nothing> mkdir = os::mkdir(Path(target).dirname());
+          if (mkdir.isError()) {
+            return Error(
+                "Failed to create directory '" +
+                Path(target).dirname() + "' "
+                "for the target mount file: " + mkdir.error());
+          }
+
+          Try<Nothing> touch = os::touch(target);
+          if (touch.isError()) {
+            return Error(
+                "Failed to create the target mount file at '" +
+                target + "': " + touch.error());
+          }
+        } else {
+          Try<Nothing> mkdir = os::mkdir(target);
+          if (mkdir.isError()) {
+            return Error(
+                "Failed to create the target of the mount at '" +
+                target + "': " + mkdir.error());
+          }
         }
       } else {
         target = volume.container_path();
@@ -444,19 +492,45 @@ Try<string> LinuxFilesystemIsolatorProcess::script(
           containerConfig.directory(),
           volume.container_path());
 
-      Try<Nothing> mkdir = os::mkdir(mountPoint);
-      if (mkdir.isError()) {
-        return Error(
-            "Failed to create the target of the mount at '" +
-            mountPoint + "': " + mkdir.error());
+      if (os::stat::isfile(source)) {
+        // The file volume case.
+        Try<Nothing> mkdir = os::mkdir(Path(mountPoint).dirname());
+        if (mkdir.isError()) {
+          return Error(
+              "Failed to create the target mount file directory at '" +
+              Path(mountPoint).dirname() + "': " + mkdir.error());
+        }
+
+        Try<Nothing> touch = os::touch(mountPoint);
+        if (touch.isError()) {
+          return Error(
+              "Failed to create the target mount file at '" +
+              target + "': " + touch.error());
+        }
+      } else {
+        Try<Nothing> mkdir = os::mkdir(mountPoint);
+        if (mkdir.isError()) {
+          return Error(
+              "Failed to create the target of the mount at '" +
+              mountPoint + "': " + mkdir.error());
+        }
       }
     }
 
     // TODO(jieyu): Consider the mode in the volume.
-    out << "mount -n --rbind '" << source << "' '" << target << "'\n";
+    CommandInfo command;
+    command.set_shell(false);
+    command.set_value("mount");
+    command.add_arguments("mount");
+    command.add_arguments("-n");
+    command.add_arguments("--rbind");
+    command.add_arguments(source);
+    command.add_arguments(target);
+
+    commands.push_back(command);
   }
 
-  return out.str();
+  return commands;
 }
 
 

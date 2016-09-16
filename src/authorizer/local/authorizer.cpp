@@ -35,8 +35,10 @@
 #include <stout/path.hpp>
 #include <stout/protobuf.hpp>
 #include <stout/try.hpp>
+#include <stout/unreachable.hpp>
 
 #include "common/parse.hpp"
+#include "common/http.hpp"
 
 using process::dispatch;
 using process::Failure;
@@ -200,7 +202,8 @@ public:
       permissive_(permissive) {}
 
   virtual Try<bool> approved(
-      const Option<ObjectApprover::Object>& object) const noexcept override {
+      const Option<ObjectApprover::Object>& object) const noexcept override
+  {
     // Construct subject.
     ACL::Entity aclSubject;
     if (subject_.isSome()) {
@@ -225,7 +228,7 @@ public:
         case authorization::CREATE_VOLUME_WITH_ROLE:
         case authorization::DESTROY_VOLUME_WITH_PRINCIPAL:
         case authorization::GET_QUOTA_WITH_ROLE:
-        case authorization::GET_WEIGHT_WITH_ROLE:
+        case authorization::VIEW_ROLE:
         case authorization::UPDATE_WEIGHT_WITH_ROLE:
         case authorization::GET_ENDPOINT_WITH_PATH: {
           // Check object has the required types set.
@@ -253,6 +256,11 @@ public:
           break;
         }
         case authorization::ACCESS_MESOS_LOG: {
+          aclObject.set_type(mesos::ACL::Entity::ANY);
+
+          break;
+        }
+        case authorization::VIEW_FLAGS: {
           aclObject.set_type(mesos::ACL::Entity::ANY);
 
           break;
@@ -396,7 +404,7 @@ class LocalAuthorizerProcess : public ProtobufProcess<LocalAuthorizerProcess>
 {
 public:
   LocalAuthorizerProcess(const ACLs& _acls)
-    : ProcessBase(process::ID::generate("authorizer")), acls(_acls) {}
+    : ProcessBase(process::ID::generate("local-authorizer")), acls(_acls) {}
 
   virtual void initialize()
   {
@@ -610,8 +618,8 @@ private:
         return GenericACLs(acls_, set_quotas, remove_quotas);
         break;
       }
-      case authorization::GET_WEIGHT_WITH_ROLE:
-        foreach (const ACL::GetWeight& acl, acls.get_weights()) {
+      case authorization::VIEW_ROLE:
+        foreach (const ACL::ViewRole& acl, acls.view_roles()) {
           GenericACL acl_;
           acl_.subjects = acl.principals();
           acl_.objects = acl.roles();
@@ -648,6 +656,17 @@ private:
           GenericACL acl_;
           acl_.subjects = acl.principals();
           acl_.objects = acl.logs();
+
+          acls_.push_back(acl_);
+        }
+
+        return acls_;
+        break;
+      case authorization::VIEW_FLAGS:
+        foreach (const ACL::ViewFlags& acl, acls.view_flags()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.flags();
 
           acls_.push_back(acl_);
         }
@@ -759,6 +778,22 @@ Option<Error> LocalAuthorizer::validate(const ACLs& acls)
   foreach (const ACL::AccessMesosLog& acl, acls.access_mesos_logs()) {
     if (acl.logs().type() == ACL::Entity::SOME) {
       return Error("acls.access_mesos_logs type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::ViewFlags& acl, acls.view_flags()) {
+    if (acl.flags().type() == ACL::Entity::SOME) {
+      return Error("acls.view_flags type must be either NONE or ANY");
+    }
+  }
+
+  foreach (const ACL::GetEndpoint& acl, acls.get_endpoints()) {
+    if (acl.paths().type() == ACL::Entity::SOME) {
+      foreach (const string& path, acl.paths().values()) {
+        if (!AUTHORIZABLE_ENDPOINTS.contains(path)) {
+          return Error("Path: '" + path + "' is not an authorizable path");
+        }
+      }
     }
   }
 

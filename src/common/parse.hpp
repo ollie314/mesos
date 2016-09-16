@@ -139,6 +139,41 @@ inline Try<std::vector<unsigned int>> parse(const std::string& value)
   return result;
 }
 
+
+// NOTE: Strings in the set cannot contain commas, since that
+// is the delimiter and we provide no way to escape it.
+//
+// TODO(klueska): Generalize this parser to take any comma separated
+// list and convert it to its appropriate type (i.e., not just for
+// unsigned ints).
+template <>
+inline Try<std::set<std::string>> parse(const std::string& value)
+{
+  std::set<std::string> result;
+
+  foreach (const std::string& token, strings::tokenize(value, ",")) {
+    if (result.count(token) > 0) {
+      return Error("Duplicate token '" + token + "'");
+    }
+
+    result.insert(token);
+  }
+
+  return result;
+}
+
+
+template <>
+inline Try<mesos::CapabilityInfo> parse(const std::string& value)
+{
+  Try<JSON::Object> json = parse<JSON::Object>(value);
+  if (json.isError()) {
+    return Error(json.error());
+  }
+
+  return protobuf::parse<mesos::CapabilityInfo>(json.get());
+}
+
 } // namespace flags {
 
 #endif // __COMMON_PARSE_HPP__

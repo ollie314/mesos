@@ -18,7 +18,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.61])
-AC_INIT([mesos], [1.0.0])
+AC_INIT([mesos], [1.1.0])
 
 # Have autoconf setup some variables related to the system.
 AC_CANONICAL_HOST
@@ -63,6 +63,9 @@ LT_OUTPUT
 # configure scripts.
 CONFIGURE_ARGS="$ac_configure_args"
 AC_SUBST(CONFIGURE_ARGS)
+
+AM_CONDITIONAL([STANDALONE_LIBPROCESS], [false])
+AM_CONDITIONAL([STANDALONE_STOUT], [false])
 
 AC_CONFIG_FILES([Makefile mesos.pc])
 AC_CONFIG_FILES([src/Makefile])
@@ -271,6 +274,13 @@ AC_ARG_WITH([curl],
             AS_HELP_STRING([--with-curl=@<:@=DIR@:>@],
                            [specify where to locate the curl library]),
             [], [])
+
+AC_ARG_WITH([elfio],
+            AS_HELP_STRING([--with-elfio@<:@=DIR@:>@],
+                           [excludes building and using the bundled ELFIO
+                           package in lieu of an installed version at a
+                           location prefixed by the given path]),
+            [without_bundled_elfio=yes], [])
 
 AC_ARG_WITH([glog],
             AS_HELP_STRING([--with-glog@<:@=DIR@:>@],
@@ -728,6 +738,34 @@ libcurl is required for mesos to build.
 ])])
 
 
+# If the user has asked not to include the bundled ELFIO headers,
+# check to see if the path to the ELFIO headers has been specified. If
+# it has, make sure that the path is absolute. If everything is in
+# order, add this path to the CPPFLAGS.
+if test "x$without_bundled_elfio" = "xyes" || \
+   test "x$enable_bundled" != "xyes"; then
+  if test -n "`echo $with_elfio`"; then
+    if test "$with_elfio" = "${with_elfio#/}"; then
+      AC_MSG_ERROR([The path passed to --with-elfio must be absolute.])
+    fi
+     CPPFLAGS="-I${with_elfio} $CPPFLAGS"
+  fi
+
+  AC_CHECK_HEADERS([elfio/elfio.h], [],
+                   [AC_MSG_ERROR([Cannot find the ELFIO headers
+-------------------------------------------------------------------
+You have requested the use of a non-bundled ELFIO but no suitable
+ELFIO headers could be found. Make sure these headers are either
+installed on the system or the path passed via --with-elfio is correct.
+-------------------------------------------------------------------
+  ])])
+else
+  with_bundled_elfio=yes
+fi
+
+AM_CONDITIONAL([WITH_BUNDLED_ELFIO], [test "x$with_bundled_elfio" = "xyes"])
+
+
 # Check if glog prefix path was supplied and if so, add it to CPPFLAGS
 # while extending it by /include and to LDFLAGS while extending it by
 # /lib.
@@ -1031,6 +1069,8 @@ __EOF__
                   [chmod +x src/examples/java/test-multiple-executors-framework])
   AC_CONFIG_FILES([src/examples/java/test-log],
                   [chmod +x src/examples/java/test-log])
+  AC_CONFIG_FILES([src/examples/java/v1-test-framework],
+                  [chmod +x src/examples/java/v1-test-framework])
   AC_CONFIG_FILES([src/java/mesos.pom])
 
   AC_DEFINE([MESOS_HAS_JAVA])
@@ -1616,8 +1656,6 @@ There are two possible workarounds for this issue:
                   [chmod +x src/examples/python/test-executor])
   AC_CONFIG_FILES([src/examples/python/test-framework],
                   [chmod +x src/examples/python/test-framework])
-  AC_CONFIG_FILES([src/examples/python/test-containerizer],
-                  [chmod +x src/examples/python/test-containerizer])
   AC_CONFIG_FILES([src/python/setup.py])
   AC_CONFIG_FILES([src/python/cli/setup.py])
   AC_CONFIG_FILES([src/python/interface/setup.py])

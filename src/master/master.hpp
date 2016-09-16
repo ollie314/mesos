@@ -305,6 +305,12 @@ struct Slave
   // Executors running on this slave.
   hashmap<FrameworkID, hashmap<ExecutorID, ExecutorInfo>> executors;
 
+  // Tasks that have not yet been launched because they are currently
+  // being authorized. This is similar to Framework's pendingTasks but we
+  // track pendingTasks per agent separately to determine if any offer
+  // operation for this agent would change resources requested by these tasks.
+  hashmap<FrameworkID, hashmap<TaskID, TaskInfo>> pendingTasks;
+
   // Tasks present on this slave.
   // TODO(bmahler): The task pointer ownership complexity arises from the fact
   // that we own the pointer here, but it's shared with the Framework struct.
@@ -321,7 +327,11 @@ struct Slave
   // Active inverse offers on this slave.
   hashset<InverseOffer*> inverseOffers;
 
-  hashmap<FrameworkID, Resources> usedResources;  // Active task / executors.
+  // Resources for active task / executors. Note that we maintain multiple
+  // copies of each shared resource in `usedResources` as they are used by
+  // multiple tasks.
+  hashmap<FrameworkID, Resources> usedResources;
+
   Resources offeredResources; // Offers.
 
   // Resources that should be checkpointed by the slave (e.g.,
@@ -480,6 +490,7 @@ public:
       const std::vector<Resource>& checkpointedResources,
       const std::vector<ExecutorInfo>& executorInfos,
       const std::vector<Task>& tasks,
+      const std::vector<FrameworkInfo>& frameworks,
       const std::vector<Archive::Framework>& completedFrameworks,
       const std::string& version);
 
@@ -557,6 +568,7 @@ public:
       const std::vector<Resource>& checkpointedResources,
       const std::vector<ExecutorInfo>& executorInfos,
       const std::vector<Task>& tasks,
+      const std::vector<FrameworkInfo>& frameworks,
       const std::vector<Archive::Framework>& completedFrameworks,
       const std::string& version,
       const process::Future<bool>& readmit);
@@ -612,7 +624,8 @@ protected:
 
   void __reregisterSlave(
       Slave* slave,
-      const std::vector<Task>& tasks);
+      const std::vector<Task>& tasks,
+      const std::vector<FrameworkInfo>& frameworks);
 
   // 'authenticate' is the future returned by the authenticator.
   void _authenticate(
@@ -811,15 +824,6 @@ protected:
       const FrameworkID& frameworkId,
       const ExecutorID& executorId);
 
-  // Updates the allocator and updates the slave's resources by
-  // applying the given operation. It also sends a
-  // 'CheckpointResourcesMessage' to the slave with the updated
-  // checkpointed resources.
-  void apply(
-      Framework* framework,
-      Slave* slave,
-      const Offer::Operation& operation);
-
   // Attempts to update the allocator by applying the given operation.
   // If successful, updates the slave's resources, sends a
   // 'CheckpointResourcesMessage' to the slave with the updated
@@ -856,6 +860,9 @@ protected:
   SlaveID newSlaveId();
 
 private:
+  // Updates the slave's resources by applying the given operation.
+  // It also sends a 'CheckpointResourcesMessage' to the slave with
+  // the updated checkpointed resources.
   void _apply(Slave* slave, const Offer::Operation& operation);
 
   void drop(
@@ -983,6 +990,11 @@ private:
 
     // Returns a list of set quotas.
     process::Future<process::http::Response> status(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> status(
         const process::http::Request& request,
         const Option<std::string>& principal) const;
 
@@ -992,6 +1004,10 @@ private:
 
     process::Future<process::http::Response> set(
         const process::http::Request& request,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> remove(
+        const mesos::master::Call& call,
         const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> remove(
@@ -1059,10 +1075,8 @@ private:
         const Option<std::string>& principal,
         const mesos::quota::QuotaInfo& quotaInfo) const;
 
-    process::Future<process::http::Response> _status(
-        const process::http::Request& request,
-        const std::vector<mesos::quota::QuotaInfo>& quotaInfos,
-        const std::list<bool>& authorized) const;
+    process::Future<mesos::quota::QuotaStatus> _status(
+        const Option<std::string>& principal) const;
 
     process::Future<process::http::Response> _set(
         const mesos::quota::QuotaRequest& quotaRequest,
@@ -1073,6 +1087,10 @@ private:
         bool forced) const;
 
     process::Future<process::http::Response> _remove(
+        const std::string& role,
+        const Option<std::string>& principal) const;
+
+    process::Future<process::http::Response> __remove(
         const std::string& role) const;
 
     // To perform actions related to quota management, we require access to the
@@ -1109,6 +1127,11 @@ private:
         const process::http::Request& request,
         const Option<std::string>& principal) const;
 
+    process::Future<process::http::Response> update(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
   private:
     process::Future<bool> authorizeGetWeight(
         const Option<std::string>& principal,
@@ -1125,7 +1148,12 @@ private:
     process::Future<std::vector<WeightInfo>> _getWeights(
         const Option<std::string>& principal) const;
 
-    process::Future<process::http::Response> _update(
+    process::Future<process::http::Response>_updateWeights(
+        const Option<std::string>& principal,
+        const google::protobuf::RepeatedPtrField<WeightInfo>& weightInfos)
+            const;
+
+    process::Future<process::http::Response> __updateWeights(
         const std::vector<WeightInfo>& updateWeightInfos) const;
 
     // Rescind all outstanding offers if any of the 'weightInfos' roles has
@@ -1280,7 +1308,12 @@ private:
     static std::string WEIGHTS_HELP();
 
   private:
-    JSON::Object _flags() const;
+    JSON::Object __flags() const;
+
+    class FlagsError; // Forward declaration.
+
+    process::Future<Try<JSON::Object, FlagsError>> _flags(
+        const Option<std::string>& principal) const;
 
     process::Future<std::vector<const Task*>> _tasks(
         const size_t limit,
@@ -1349,12 +1382,17 @@ private:
         Resources required,
         const Offer::Operation& operation) const;
 
+    process::Future<std::vector<std::string>> _roles(
+        const Option<std::string>& principal) const;
+
     // Master API handlers.
 
     process::Future<process::http::Response> getAgents(
         const mesos::master::Call& call,
         const Option<std::string>& principal,
         ContentType contentType) const;
+
+    mesos::master::Response::GetAgents _getAgents() const;
 
     process::Future<process::http::Response> getFlags(
         const mesos::master::Call& call,
@@ -1391,7 +1429,12 @@ private:
         const Option<std::string>& principal,
         ContentType contentType) const;
 
-    process::Future<process::http::Response> getLeadingMaster(
+    process::Future<process::http::Response> listFiles(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getMaster(
         const mesos::master::Call& call,
         const Option<std::string>& principal,
         ContentType contentType) const;
@@ -1426,6 +1469,10 @@ private:
         const Option<std::string>& principal,
         ContentType contentType) const;
 
+    mesos::master::Response::GetTasks _getTasks(
+        const process::Owned<ObjectApprover>& frameworksApprover,
+        const process::Owned<ObjectApprover>& tasksApprover) const;
+
     process::Future<process::http::Response> createVolumes(
         const mesos::master::Call& call,
         const Option<std::string>& principal,
@@ -1442,6 +1489,43 @@ private:
         ContentType contentType) const;
 
     process::Future<process::http::Response> unreserveResources(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> getFrameworks(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    mesos::master::Response::GetFrameworks _getFrameworks(
+        const process::Owned<ObjectApprover>& frameworksApprover) const;
+
+    process::Future<process::http::Response> getExecutors(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    mesos::master::Response::GetExecutors _getExecutors(
+        const process::Owned<ObjectApprover>& frameworksApprover,
+        const process::Owned<ObjectApprover>& executorsApprover) const;
+
+    process::Future<process::http::Response> getState(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    mesos::master::Response::GetState _getState(
+        const process::Owned<ObjectApprover>& frameworksApprover,
+        const process::Owned<ObjectApprover>& taskApprover,
+        const process::Owned<ObjectApprover>& executorsApprover) const;
+
+    process::Future<process::http::Response> subscribe(
+        const mesos::master::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> readFile(
         const mesos::master::Call& call,
         const Option<std::string>& principal,
         ContentType contentType) const;
@@ -1517,8 +1601,8 @@ private:
     Option<process::Timer> recoveredTimer;
 
     // Slaves that have been recovered from the registrar but have yet
-    // to re-register. We keep a "reregistrationTimer" above to ensure
-    // we remove these slaves if they do not re-register.
+    // to re-register. We use `recoveredTimer` above to ensure we
+    // remove these slaves if they do not re-register.
     hashset<SlaveID> recovered;
 
     // Slaves that are in the process of registering.
@@ -1635,6 +1719,11 @@ private:
       : completed(masterFlags.max_completed_frameworks) {}
 
     hashmap<FrameworkID, Framework*> registered;
+
+    // 'Recovered' contains 'FrameworkInfo's for frameworks which
+    // would otherwise be unknown during recovery after master
+    // failover.
+    hashmap<FrameworkID, FrameworkInfo> recovered;
     boost::circular_buffer<std::shared_ptr<Framework>> completed;
 
     // Principals of frameworks keyed by PID.
@@ -1669,6 +1758,19 @@ private:
       Subscriber(const HttpConnection& _http)
         : http(_http) {}
 
+      // Not copyable, not assignable.
+      Subscriber(const Subscriber&) = delete;
+      Subscriber& operator=(const Subscriber&) = delete;
+
+      ~Subscriber()
+      {
+        // TODO(anand): Refactor `HttpConnection` to being a RAII class instead.
+        // It is possible that a caller might accidently invoke `close()` after
+        // passing ownership to the `Subscriber` object. See MESOS-5843 for more
+        // details.
+        http.close();
+      }
+
       HttpConnection http;
     };
 
@@ -1677,7 +1779,7 @@ private:
 
     // Active subscribers to the 'api/vX' endpoint keyed by the stream
     // identifier.
-    hashmap<UUID, Subscriber> subscribed;
+    hashmap<UUID, process::Owned<Subscriber>> subscribed;
   } subscribers;
 
   hashmap<OfferID, Offer*> offers;
@@ -1793,7 +1895,7 @@ private:
 };
 
 
-// Implementation of slave admission Registrar operation.
+// Add a new slave to the list of admitted slaves.
 class AdmitSlave : public Operation
 {
 public:
@@ -1808,7 +1910,7 @@ protected:
       hashset<SlaveID>* slaveIDs,
       bool strict)
   {
-    // Check and see if this slave already exists.
+    // Check and see if this slave is currently admitted.
     if (slaveIDs->contains(info.id())) {
       if (strict) {
         return Error("Agent already admitted");
@@ -1817,9 +1919,123 @@ protected:
       }
     }
 
+    // TODO(neilc): Check if the slave appears in the list of
+    // `unreachable` slaves in the registry?
+
     Registry::Slave* slave = registry->mutable_slaves()->add_slaves();
     slave->mutable_info()->CopyFrom(info);
     slaveIDs->insert(info.id());
+    return true; // Mutation.
+  }
+
+private:
+  const SlaveInfo info;
+};
+
+
+// Move a slave from the list of admitted slaves to the list of
+// unreachable slaves.
+class MarkSlaveUnreachable : public Operation
+{
+public:
+  explicit MarkSlaveUnreachable(const SlaveInfo& _info) : info(_info) {
+    CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
+  }
+
+protected:
+  virtual Try<bool> perform(
+      Registry* registry,
+      hashset<SlaveID>* slaveIDs,
+      bool strict)
+  {
+    // As currently implemented, this should not be possible: the
+    // master will only mark slaves unreachable that are currently
+    // admitted.
+    if (!slaveIDs->contains(info.id())) {
+      return Error("Agent not yet admitted");
+    }
+
+    for (int i = 0; i < registry->slaves().slaves().size(); i++) {
+      const Registry::Slave& slave = registry->slaves().slaves(i);
+
+      if (slave.info().id() == info.id()) {
+        registry->mutable_slaves()->mutable_slaves()->DeleteSubrange(i, 1);
+        slaveIDs->erase(info.id());
+
+        Registry::UnreachableSlave* unreachable =
+          registry->mutable_unreachable()->add_slaves();
+
+        unreachable->mutable_id()->CopyFrom(info.id());
+        unreachable->mutable_timestamp()->CopyFrom(protobuf::getCurrentTime());
+
+        return true; // Mutation.
+      }
+    }
+
+    // Should not happen.
+    return Error("Failed to find agent " + stringify(info.id()));
+  }
+
+private:
+  const SlaveInfo info;
+};
+
+
+// Add a slave back to the list of admitted slaves. The slave will
+// typically be in the "unreachable" list; if so, it is removed from
+// that list. The slave might also be in the "admitted" list already.
+// Finally, the slave might be in neither the "unreachable" or
+// "admitted" lists, if its metadata has been garbage collected from
+// the registry.
+class MarkSlaveReachable : public Operation
+{
+public:
+  explicit MarkSlaveReachable(const SlaveInfo& _info) : info(_info) {
+    CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
+  }
+
+protected:
+  virtual Try<bool> perform(
+      Registry* registry,
+      hashset<SlaveID>* slaveIDs,
+      bool strict)
+  {
+    // A slave might try to reregister that appears in the list of
+    // admitted slaves. This can occur when the master fails over:
+    // agents will usually attempt to reregister with the new master
+    // before they are marked unreachable. In this situation, the
+    // registry is already in the correct state, so no changes are
+    // needed.
+    if (slaveIDs->contains(info.id())) {
+      return false; // No mutation.
+    }
+
+    // Check whether the slave is in the unreachable list.
+    // TODO(neilc): Optimize this to avoid linear scan.
+    bool found = false;
+    for (int i = 0; i < registry->unreachable().slaves().size(); i++) {
+      const Registry::UnreachableSlave& slave =
+        registry->unreachable().slaves(i);
+
+      if (slave.id() == info.id()) {
+        registry->mutable_unreachable()->mutable_slaves()->DeleteSubrange(i, 1);
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      LOG(WARNING) << "Allowing UNKNOWN agent to reregister: " << info;
+    }
+
+    // Add the slave to the admitted list, even if we didn't find it
+    // in the unreachable list. This accounts for when the slave was
+    // unreachable for a long time, was GC'd from the unreachable
+    // list, but then eventually reregistered.
+    Registry::Slave* slave = registry->mutable_slaves()->add_slaves();
+    slave->mutable_info()->CopyFrom(info);
+    slaveIDs->insert(info.id());
+
     return true; // Mutation.
   }
 
@@ -2345,6 +2561,9 @@ struct Framework
 
   // Active task / executor resources.
   Resources totalUsedResources;
+
+  // Note that we maintain multiple copies of each shared resource in
+  // `usedResources` as they are used by multiple tasks.
   hashmap<SlaveID, Resources> usedResources;
 
   // Offered resources.

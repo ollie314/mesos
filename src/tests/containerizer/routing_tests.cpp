@@ -47,6 +47,7 @@
 #include "linux/routing/filter/ip.hpp"
 
 #include "linux/routing/link/link.hpp"
+#include "linux/routing/link/veth.hpp"
 
 #include "linux/routing/queueing/fq_codel.hpp"
 #include "linux/routing/queueing/htb.hpp"
@@ -68,47 +69,7 @@ namespace mesos {
 namespace internal {
 namespace tests {
 
-
-static const string TEST_VETH_LINK = "veth-test";
-static const string TEST_PEER_LINK = "veth-peer";
-
-
-class RoutingTest : public ::testing::Test
-{
-protected:
-  virtual void SetUp()
-  {
-    ASSERT_SOME(routing::check())
-      << "-------------------------------------------------------------\n"
-      << "We cannot run any routing tests because either your libnl\n"
-      << "library or kernel is not new enough. You can either upgrade,\n"
-      << "or disable this test case\n"
-      << "-------------------------------------------------------------";
-  }
-};
-
-
-// Tests that require setting up virtual ethernet on host.
-class RoutingVethTest : public RoutingTest
-{
-protected:
-  virtual void SetUp()
-  {
-    RoutingTest::SetUp();
-
-    // Clean up the test links, in case it wasn't cleaned up properly
-    // from previous tests.
-    link::remove(TEST_VETH_LINK);
-
-    ASSERT_SOME_FALSE(link::exists(TEST_VETH_LINK));
-    ASSERT_SOME_FALSE(link::exists(TEST_PEER_LINK));
-  }
-
-  virtual void TearDown()
-  {
-    link::remove(TEST_VETH_LINK);
-  }
-};
+class RoutingTest : public ::testing::Test {};
 
 
 TEST_F(RoutingTest, PortRange)
@@ -149,19 +110,9 @@ TEST_F(RoutingTest, PortRange)
 }
 
 
-TEST_F(RoutingTest, RouteTable)
-{
-  Try<vector<route::Rule> > table = route::table();
-  EXPECT_SOME(table);
-
-  Result<net::IP> gateway = route::defaultGateway();
-  EXPECT_FALSE(gateway.isError());
-}
-
-
 TEST_F(RoutingTest, LinkIndex)
 {
-  Try<set<string> > links = net::links();
+  Try<set<string>> links = net::links();
   ASSERT_SOME(links);
 
   foreach (const string& link, links.get()) {
@@ -174,7 +125,7 @@ TEST_F(RoutingTest, LinkIndex)
 
 TEST_F(RoutingTest, LinkName)
 {
-  Try<set<string> > links = net::links();
+  Try<set<string>> links = net::links();
   ASSERT_SOME(links);
 
   foreach (const string& link, links.get()) {
@@ -186,11 +137,11 @@ TEST_F(RoutingTest, LinkName)
 
 TEST_F(RoutingTest, LinkStatistics)
 {
-  Try<set<string> > links = net::links();
+  Try<set<string>> links = net::links();
   ASSERT_SOME(links);
 
   foreach (const string& link, links.get()) {
-    Result<hashmap<string, uint64_t> > statistics = link::statistics(link);
+    Result<hashmap<string, uint64_t>> statistics = link::statistics(link);
 
     ASSERT_SOME(statistics);
     EXPECT_TRUE(statistics.get().contains("rx_packets"));
@@ -205,7 +156,7 @@ TEST_F(RoutingTest, LinkStatistics)
 
 TEST_F(RoutingTest, LinkExists)
 {
-  Try<set<string> > links = net::links();
+  Try<set<string>> links = net::links();
   ASSERT_SOME(links);
 
   foreach (const string& link, links.get()) {
@@ -238,9 +189,34 @@ TEST_F(RoutingTest, Lo)
 }
 
 
-TEST_F(RoutingTest, INETSockets)
+TEST_F(RoutingTest, RouteTable)
 {
-  Try<vector<diagnosis::socket::Info> > infos =
+  Try<vector<route::Rule>> table = route::table();
+  EXPECT_SOME(table);
+
+  Result<net::IP> gateway = route::defaultGateway();
+  EXPECT_FALSE(gateway.isError());
+}
+
+
+class RoutingAdvancedTest : public RoutingTest
+{
+protected:
+  virtual void SetUp()
+  {
+    ASSERT_SOME(routing::check())
+      << "-------------------------------------------------------------\n"
+      << "We cannot run any routing advanced tests because either your\n"
+      << "libnl library or kernel is not new enough. You can either\n"
+      << "upgrade, or disable this test case\n"
+      << "-------------------------------------------------------------";
+  }
+};
+
+
+TEST_F(RoutingAdvancedTest, INETSockets)
+{
+  Try<vector<diagnosis::socket::Info>> infos =
     diagnosis::socket::infos(AF_INET, diagnosis::socket::state::ALL);
 
   EXPECT_SOME(infos);
@@ -254,9 +230,36 @@ TEST_F(RoutingTest, INETSockets)
 }
 
 
+constexpr char TEST_VETH_LINK[] = "veth-test";
+constexpr char TEST_PEER_LINK[] = "veth-peer";
+
+
+// Tests that require setting up virtual ethernet on host.
+class RoutingVethTest : public RoutingAdvancedTest
+{
+protected:
+  virtual void SetUp()
+  {
+    RoutingAdvancedTest::SetUp();
+
+    // Clean up the test links, in case it wasn't cleaned up properly
+    // from previous tests.
+    link::remove(TEST_VETH_LINK);
+
+    ASSERT_SOME_FALSE(link::exists(TEST_VETH_LINK));
+    ASSERT_SOME_FALSE(link::exists(TEST_PEER_LINK));
+  }
+
+  virtual void TearDown()
+  {
+    link::remove(TEST_VETH_LINK);
+  }
+};
+
+
 TEST_F(RoutingVethTest, ROOT_LinkCreate)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -265,13 +268,13 @@ TEST_F(RoutingVethTest, ROOT_LinkCreate)
   EXPECT_SOME_NE(0, link::index(TEST_PEER_LINK));
 
   // Test the case where the veth (with the same name) already exists.
-  EXPECT_SOME_FALSE(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  EXPECT_SOME_FALSE(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 }
 
 
 TEST_F(RoutingVethTest, ROOT_LinkRemove)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::remove(TEST_VETH_LINK));
   EXPECT_SOME_FALSE(link::remove(TEST_VETH_LINK));
@@ -307,7 +310,7 @@ TEST_F(RoutingVethTest, ROOT_LinkCreatePid)
   ASSERT_NE(-1, pid);
 
   // In parent process.
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, pid));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, pid));
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
 
   // The peer should not exist in parent network namespace.
@@ -333,7 +336,7 @@ TEST_F(RoutingVethTest, ROOT_LinkWait)
 {
   AWAIT_READY(link::removed(TEST_VETH_LINK));
 
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -348,7 +351,7 @@ TEST_F(RoutingVethTest, ROOT_LinkWait)
 
 TEST_F(RoutingVethTest, ROOT_LinkSetUp)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -368,7 +371,7 @@ TEST_F(RoutingVethTest, ROOT_LinkSetUp)
 
 TEST_F(RoutingVethTest, ROOT_LinkSetMAC)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -399,7 +402,7 @@ TEST_F(RoutingVethTest, ROOT_LinkSetMAC)
 
 TEST_F(RoutingVethTest, ROOT_LinkMTU)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -420,7 +423,7 @@ TEST_F(RoutingVethTest, ROOT_IngressQdisc)
   // Test for a qdisc on a nonexistent interface should fail.
   EXPECT_SOME_FALSE(ingress::exists("noSuchInterface"));
 
-  EXPECT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  EXPECT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -484,7 +487,7 @@ TEST_F(RoutingVethTest, ROOT_HTBQdisc)
   // Test for a qdisc on a nonexistent interface should fail.
   EXPECT_SOME_FALSE(htb::exists("noSuchInterface", EGRESS_ROOT));
 
-  EXPECT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  EXPECT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -568,7 +571,7 @@ TEST_F(RoutingVethTest, ROOT_FqCodeQdisc)
   // Test for a qdisc on a nonexistent interface should fail.
   EXPECT_SOME_FALSE(fq_codel::exists("noSuchInterface", EGRESS_ROOT));
 
-  EXPECT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  EXPECT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -649,7 +652,7 @@ TEST_F(RoutingVethTest, ROOT_FqCodeQdisc)
 
 TEST_F(RoutingVethTest, ROOT_FqCodelClassifier)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -725,7 +728,7 @@ TEST_F(RoutingVethTest, ROOT_FqCodelClassifier)
 
 TEST_F(RoutingVethTest, ROOT_ARPFilterCreate)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -745,7 +748,7 @@ TEST_F(RoutingVethTest, ROOT_ARPFilterCreate)
 
 TEST_F(RoutingVethTest, ROOT_ARPFilterCreateDuplicated)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -775,7 +778,7 @@ TEST_F(RoutingVethTest, ROOT_ARPFilterCreateDuplicated)
 
 TEST_F(RoutingVethTest, ROOT_ARPFilterRemove)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -800,7 +803,7 @@ TEST_F(RoutingVethTest, ROOT_ARPFilterRemove)
 
 TEST_F(RoutingVethTest, ROOT_ARPFilterUpdate)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -837,7 +840,7 @@ TEST_F(RoutingVethTest, ROOT_ARPFilterUpdate)
 
 TEST_F(RoutingVethTest, ROOT_ICMPFilterCreate)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -858,7 +861,7 @@ TEST_F(RoutingVethTest, ROOT_ICMPFilterCreate)
       ingress::HANDLE,
       icmp::Classifier(ip)));
 
-  Result<vector<icmp::Classifier> > classifiers =
+  Result<vector<icmp::Classifier>> classifiers =
     icmp::classifiers(TEST_VETH_LINK, ingress::HANDLE);
 
   ASSERT_SOME(classifiers);
@@ -869,7 +872,7 @@ TEST_F(RoutingVethTest, ROOT_ICMPFilterCreate)
 
 TEST_F(RoutingVethTest, ROOT_ICMPFilterCreateDuplicated)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -902,7 +905,7 @@ TEST_F(RoutingVethTest, ROOT_ICMPFilterCreateDuplicated)
 
 TEST_F(RoutingVethTest, ROOT_ICMPFilterCreateMultiple)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -926,7 +929,7 @@ TEST_F(RoutingVethTest, ROOT_ICMPFilterCreateMultiple)
       Priority(1, 2),
       action::Redirect(TEST_PEER_LINK)));
 
-  Result<vector<icmp::Classifier> > classifiers =
+  Result<vector<icmp::Classifier>> classifiers =
     icmp::classifiers(TEST_VETH_LINK, ingress::HANDLE);
 
   ASSERT_SOME(classifiers);
@@ -938,7 +941,7 @@ TEST_F(RoutingVethTest, ROOT_ICMPFilterCreateMultiple)
 
 TEST_F(RoutingVethTest, ROOT_ICMPFilterRemove)
 {
-  ASSERT_SOME(link::create(
+  ASSERT_SOME(link::veth::create(
       TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
@@ -972,7 +975,7 @@ TEST_F(RoutingVethTest, ROOT_ICMPFilterRemove)
 
 TEST_F(RoutingVethTest, ROOT_ICMPFilterUpdate)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -1028,7 +1031,7 @@ TEST_F(RoutingVethTest, ROOT_ICMPFilterUpdate)
 
 TEST_F(RoutingVethTest, ROOT_IPFilterCreate)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -1066,7 +1069,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterCreate)
 
   EXPECT_SOME_TRUE(ip::exists(TEST_VETH_LINK, ingress::HANDLE, classifier));
 
-  Result<vector<ip::Classifier> > classifiers =
+  Result<vector<ip::Classifier>> classifiers =
     ip::classifiers(TEST_VETH_LINK, ingress::HANDLE);
 
   ASSERT_SOME(classifiers);
@@ -1086,7 +1089,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterCreate)
 
 TEST_F(RoutingVethTest, ROOT_IPFilterCreate2)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -1107,7 +1110,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterCreate2)
       ingress::HANDLE,
       ip::Classifier(None(), ip, None(), None())));
 
-  Result<vector<ip::Classifier> > classifiers =
+  Result<vector<ip::Classifier>> classifiers =
     ip::classifiers(TEST_VETH_LINK, ingress::HANDLE);
 
   ASSERT_SOME(classifiers);
@@ -1121,7 +1124,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterCreate2)
 
 TEST_F(RoutingVethTest, ROOT_IPFilterCreateDuplicated)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -1170,7 +1173,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterCreateDuplicated)
 
 TEST_F(RoutingVethTest, ROOT_IPFilterCreateMultiple)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -1230,7 +1233,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterCreateMultiple)
       Priority(2, 2),
       action::Redirect(TEST_PEER_LINK)));
 
-  Result<vector<ip::Classifier> > classifiers =
+  Result<vector<ip::Classifier>> classifiers =
     ip::classifiers(TEST_VETH_LINK, ingress::HANDLE);
 
   ASSERT_SOME(classifiers);
@@ -1262,7 +1265,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterCreateMultiple)
 
 TEST_F(RoutingVethTest, ROOT_IPFilterRemove)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));
@@ -1328,7 +1331,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterRemove)
   EXPECT_SOME_TRUE(ip::remove(TEST_VETH_LINK, ingress::HANDLE, classifier2));
   EXPECT_SOME_FALSE(ip::exists(TEST_VETH_LINK, ingress::HANDLE, classifier2));
 
-  Result<vector<ip::Classifier> > classifiers =
+  Result<vector<ip::Classifier>> classifiers =
     ip::classifiers(TEST_VETH_LINK, ingress::HANDLE);
 
   ASSERT_SOME(classifiers);
@@ -1339,7 +1342,7 @@ TEST_F(RoutingVethTest, ROOT_IPFilterRemove)
 // Test the workaround introduced for MESOS-1617.
 TEST_F(RoutingVethTest, ROOT_HandleGeneration)
 {
-  ASSERT_SOME(link::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
+  ASSERT_SOME(link::veth::create(TEST_VETH_LINK, TEST_PEER_LINK, None()));
 
   EXPECT_SOME_TRUE(link::exists(TEST_VETH_LINK));
   EXPECT_SOME_TRUE(link::exists(TEST_PEER_LINK));

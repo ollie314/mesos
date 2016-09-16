@@ -78,17 +78,17 @@ TEST(NsTest, ROOT_setns)
   }
 
   vector<string> argv;
-  argv.push_back("setns-test-helper");
+  argv.push_back("test-helper");
   argv.push_back(SetnsTestHelper::NAME);
 
   Try<Subprocess> s = subprocess(
-      getTestHelperPath("setns-test-helper"),
+      getTestHelperPath("test-helper"),
       argv,
       Subprocess::FD(STDIN_FILENO),
       Subprocess::FD(STDOUT_FILENO),
       Subprocess::FD(STDERR_FILENO),
       NO_SETSID,
-      None(),
+      nullptr,
       None(),
       lambda::bind(&os::clone, lambda::_1, flags | SIGCHLD));
 

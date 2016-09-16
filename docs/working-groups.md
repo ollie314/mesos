@@ -18,6 +18,7 @@ layout: documentation
 * **GPU support**
 	* communication:
 		* irc: mesos-gpus
+		* slack: [#gpus](https://mesos.slack.com/messages/gpus/)
 		* mailing list subject prefix: GPU
 	* members:
 		* Benjamin Mahler
@@ -32,6 +33,7 @@ layout: documentation
 * **HTTP API**
 	* communication:
 		* irc: mesos-http-api
+		* slack: [#http-api](https://mesos.slack.com/messages/http-api/)
 		* mailing list subject prefix: HTTP API
 	* members:
 		* Anand Mazumdar
@@ -44,7 +46,7 @@ layout: documentation
 		* [MESOS-2288](https://issues.apache.org/jira/browse/MESOS-2288)
 		* [MESOS-3302](https://issues.apache.org/jira/browse/MESOS-3302)
 		* [Scheduler HTTP API Design doc](https://docs.google.com/document/d/1pnIY_HckimKNvpqhKRhbc9eSItWNFT-priXh_urR-T0/edit?usp=sharing)
-		* [Scheduler HTTP API User doc](https://github.com/apache/mesos/blob/master/docs/scheduler_http_api.md)
+		* [Scheduler HTTP API User doc](scheduler-http-api.md)
 		* [Versioning HTTP API](https://docs.google.com/document/d/1-iQjo6778H_fU_1Zi_Yk6szg8qj-wqYgVgnx7u3h6OU/edit?usp=sharing)
 * **Nested Container**
 	* communication:
@@ -61,6 +63,8 @@ layout: documentation
 		* Jie Yu
 		* Kapil Arya
 		* Niklas Nielsen
+	* communication:
+	    * slack [#networking](https://mesos.slack.com/messages/networking/)
 	* resources:
 		* [IP Address Manager Enable Per-Container IP in Mesos](https://docs.google.com/document/d/17mXtAmdAXcNBwp_JfrxmZcQrs7EO6ancSbejrqjLQ0g/edit)
 		* [MESOS-2044](https://issues.apache.org/jira/browse/MESOS-2044)
@@ -91,6 +95,9 @@ layout: documentation
 		* [MESOS-4138](https://issues.apache.org/jira/browse/MESOS-4138)
 		* [Mesos: exclusive resources](https://docs.google.com/document/d/1Aby-U3-MPKE51s4aYd41L4Co2S97eM6LPtyzjyR_ecI/edit)
 * **Resource Allocation**
+	* communication:
+		* slack: [#allocator](https://mesos.slack.com/messages/allocator/)
+		* [slack archive](http://mesos.slackarchive.io/allocator/)
 	* members:
 		* Alex Rukletsov
 		* Benjamin Hindman

@@ -21,7 +21,6 @@
 #include <mesos/mesos.hpp>
 #include <mesos/type_utils.hpp>
 
-
 #include <stout/check.hpp>
 #include <stout/fs.hpp>
 #include <stout/nothing.hpp>
@@ -29,6 +28,7 @@
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
 #include <stout/try.hpp>
+#include <stout/unreachable.hpp>
 
 #include "messages/messages.hpp"
 
@@ -56,6 +56,7 @@ const char FORKED_PID_FILE[] = "forked.pid";
 const char TASK_INFO_FILE[] = "task.info";
 const char TASK_UPDATES_FILE[] = "task.updates";
 const char RESOURCES_INFO_FILE[] = "resources.info";
+const char RESOURCES_TARGET_FILE[] = "resources.target";
 
 
 const char SLAVES_DIR[] = "slaves";
@@ -434,6 +435,13 @@ string getResourcesInfoPath(
     const string& rootDir)
 {
   return path::join(rootDir, "resources", RESOURCES_INFO_FILE);
+}
+
+
+string getResourcesTargetPath(
+    const string& rootDir)
+{
+  return path::join(rootDir, "resources", RESOURCES_TARGET_FILE);
 }
 
 

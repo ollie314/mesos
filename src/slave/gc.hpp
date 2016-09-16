@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <process/future.hpp>
+#include <process/id.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
 #include <process/timeout.hpp>
@@ -86,6 +87,9 @@ class GarbageCollectorProcess :
     public process::Process<GarbageCollectorProcess>
 {
 public:
+  GarbageCollectorProcess()
+    : ProcessBase(process::ID::generate("agent-garbage-collector")) {}
+
   virtual ~GarbageCollectorProcess();
 
   process::Future<Nothing> schedule(
@@ -104,7 +108,7 @@ private:
   struct PathInfo
   {
     PathInfo(const std::string& _path,
-             process::Owned<process::Promise<Nothing> > _promise)
+             process::Owned<process::Promise<Nothing>> _promise)
       : path(_path), promise(_promise) {}
 
     bool operator==(const PathInfo& that) const
@@ -113,7 +117,7 @@ private:
     }
 
     const std::string path;
-    const process::Owned<process::Promise<Nothing> > promise;
+    const process::Owned<process::Promise<Nothing>> promise;
   };
 
   // Store all the timeouts and corresponding paths to delete.

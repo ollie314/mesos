@@ -38,7 +38,7 @@ static T devolve(const google::protobuf::Message& message)
     << " while devolving to " << t.GetTypeName();
 
   // NOTE: We need to use 'ParsePartialFromString' instead of
-  // 'ParsePartialFromString' because some required fields might not
+  // 'ParseFromString' because some required fields might not
   // be set and we don't want an exception to get thrown.
   CHECK(t.ParsePartialFromString(data))
     << "Failed to parse " << t.GetTypeName()
@@ -91,6 +91,12 @@ ExecutorID devolve(const v1::ExecutorID& executorId)
 }
 
 
+HealthCheck devolve(const v1::HealthCheck& check)
+{
+  return devolve<HealthCheck>(check);
+}
+
+
 Offer devolve(const v1::Offer& offer)
 {
   return devolve<Offer>(offer);
@@ -109,15 +115,33 @@ Credential devolve(const v1::Credential& credential)
 }
 
 
+TaskID devolve(const v1::TaskID& taskId)
+{
+  return devolve<TaskID>(taskId);
+}
+
+
 TaskStatus devolve(const v1::TaskStatus& status)
 {
   return devolve<TaskStatus>(status);
 }
 
 
+CommandInfo devolve(const v1::CommandInfo& command)
+{
+  return devolve<CommandInfo>(command);
+}
+
+
 executor::Call devolve(const v1::executor::Call& call)
 {
   return devolve<executor::Call>(call);
+}
+
+
+executor::Event devolve(const v1::executor::Event& event)
+{
+  return devolve<executor::Event>(event);
 }
 
 

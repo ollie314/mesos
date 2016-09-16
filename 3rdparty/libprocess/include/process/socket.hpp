@@ -59,12 +59,16 @@ public:
 
   /**
    * Returns an instance of a `Socket` using the specified kind of
-   * implementation.
+   * implementation. All implementations will set the NONBLOCK and
+   * CLOEXEC options on the returned socket.
    *
    * @param kind Optional. The desired `Socket` implementation.
    * @param s Optional.  The file descriptor to wrap with the `Socket`.
    *
    * @return An instance of a `Socket`.
+   *
+   * TODO(josephw): MESOS-5729: Consider making the CLOEXEC option
+   * configurable by the caller of the interface.
    */
   static Try<Socket> create(Kind kind = DEFAULT_KIND(), Option<int> s = None());
 
@@ -102,11 +106,9 @@ public:
   public:
     virtual ~Impl()
     {
-      CHECK(s >= 0);
-      Try<Nothing> close = os::close(s);
-      if (close.isError()) {
-        ABORT("Failed to close socket " +
-              stringify(s) + ": " + close.error());
+      // Don't close if the socket was released.
+      if (s >= 0) {
+        CHECK_SOME(os::close(s)) << "Failed to close socket";
       }
     }
 
@@ -137,7 +139,17 @@ public:
     Try<Address> bind(const Address& address);
 
     virtual Try<Nothing> listen(int backlog) = 0;
+
+    /**
+     * Returns a socket corresponding to the next pending connection
+     * for the listening socket. All implementations will set the
+     * NONBLOCK and CLOEXEC options on the returned socket.
+     *
+     * TODO(josephw): MESOS-5729: Consider making the CLOEXEC option
+     * configurable by the caller of the interface.
+     */
     virtual Future<Socket> accept() = 0;
+
     virtual Future<Nothing> connect(const Address& address) = 0;
     virtual Future<size_t> recv(char* data, size_t size) = 0;
     virtual Future<size_t> send(const char* data, size_t size) = 0;
@@ -213,6 +225,19 @@ public:
 
   protected:
     explicit Impl(int _s) : s(_s) { CHECK(s >= 0); }
+
+    /**
+     * Releases ownership of the file descriptor. Not exposed
+     * via the `Socket` interface as this is only intended to
+     * support `Socket::Impl` implementations that need to
+     * override the file descriptor ownership.
+     */
+    int release()
+    {
+      int released = s;
+      s = -1;
+      return released;
+    }
 
     /**
      * Construct a `Socket` wrapper from this implementation.

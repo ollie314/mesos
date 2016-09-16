@@ -4,9 +4,13 @@ layout: documentation
 ---
 # Software Projects Built on Mesos
 
+## DevOps tooling
+
+* [Vamp](http://vamp.io) is a deployment and workflow tool for container orchestration systems, including Mesos/Marathon. It brings canary releasing, A/B testing, auto scaling and self healing through a web UI, CLI and REST API.
+
 ## Long Running Services
 
-* [Aurora](http://aurora.incubator.apache.org) is a service scheduler that runs on top of Mesos, enabling you to run long-running services that take advantage of Mesos' scalability, fault-tolerance, and resource isolation.
+* [Aurora](http://aurora.apache.org) is a service scheduler that runs on top of Mesos, enabling you to run long-running services that take advantage of Mesos' scalability, fault-tolerance, and resource isolation.
 * [Marathon](https://github.com/mesosphere/marathon) is a private PaaS built on Mesos. It automatically handles hardware or software failures and ensures that an app is "always on".
 * [Singularity](https://github.com/HubSpot/Singularity) is a scheduler (HTTP API and web interface) for running Mesos tasks: long running processes, one-off tasks, and scheduled jobs.
 * [SSSP](https://github.com/mesosphere/sssp) is a simple web application that provides a white-label "Megaupload" for storing and sharing files in S3.
@@ -20,7 +24,7 @@ layout: documentation
 * [Hama](http://wiki.apache.org/hama/GettingStartedMesos) is a distributed computing framework based on Bulk Synchronous Parallel computing techniques for massive scientific computations e.g., matrix, graph and network algorithms.
 * [MPI](https://github.com/mesosphere/mesos-hydra) is a message-passing system designed to function on a wide variety of parallel computers.
 * [Spark](http://spark.incubator.apache.org/) is a fast and general-purpose cluster computing system which makes parallel jobs easy to write.
-* [Storm](https://github.com/mesosphere/storm-mesos) is a distributed realtime computation system. Storm makes it easy to reliably process unbounded streams of data, doing for realtime processing what Hadoop did for batch processing.
+* [Storm](https://github.com/mesos/storm) is a distributed realtime computation system. Storm makes it easy to reliably process unbounded streams of data, doing for realtime processing what Hadoop did for batch processing.
 
 ## Batch Scheduling
 
@@ -28,10 +32,12 @@ layout: documentation
 * [Jenkins](https://github.com/jenkinsci/mesos-plugin) is a continuous integration server. The mesos-jenkins plugin allows it to dynamically launch workers on a Mesos cluster depending on the workload.
 * [JobServer](http://www.grandlogic.com/content/html_docs/jobserver.html) is a distributed job scheduler and processor  which allows developers to build custom batch processing Tasklets using point and click web UI.
 * [GoDocker](https://bitbucket.org/osallou/go-docker) is a batch computing job scheduler like SGE, Torque, etc. It schedules batch computing tasks via webui, API or CLI for system or LDAP users, mounting their home directory or other shared resources in a Docker container. It targets scientists, not developers, and provides plugin mechanisms to extend or modify the default behavior.
+* [Cook](https://github.com/twosigma/cook) is a job scheduler like Torque that not only supports individual tasks, but also Spark. Cook provides powerful automatic preemption and multitenancy features for shared clusters, in order to guarantee throughput to all users while allowing individuals to temporarily "burst" to additional resources as needed. Cook provides a simple REST API & Java client for interaction.
 
 ## Data Storage
 
 * [Alluxio](http://alluxio.org) is a memory-centric distributed storage system enabling reliable data sharing at memory-speed across cluster frameworks.
 * [Cassandra](https://github.com/mesosphere/cassandra-mesos) is a performant and highly available distributed database. Linear scalability and proven fault-tolerance on commodity hardware or cloud infrastructure make it the perfect platform for mission-critical data.
-* [ElasticSearch](https://github.com/mesosphere/elasticsearch-mesos) is a distributed search engine. Mesos makes it easy to run and scale.
+* [ElasticSearch](https://github.com/mesos/elasticsearch) is a distributed search engine. Mesos makes it easy to run and scale.
 * [Hypertable](https://code.google.com/p/hypertable/wiki/Mesos) is a high performance, scalable, distributed storage and processing system for structured and unstructured data.
+* [MrRedis](https://github.com/mesos/mr-redis) MrRedis is a Mesos framework for provisioning [Redis](http://redis.io/) in-memory cache instances. The scheduler provides auto Redis master election, auto recovery of Redis slaves and comes with the CLI and a UI.

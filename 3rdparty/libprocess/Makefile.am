@@ -18,30 +18,57 @@ ACLOCAL_AMFLAGS = -I m4
 AUTOMAKE_OPTIONS = foreign
 LIBPROCESS_BUILD_DIR=@abs_builddir@
 
+if STANDALONE_LIBPROCESS
+MAYBE_3RDPARTY = 3rdparty
+BUNDLED_DIR = 3rdparty
+else
+MAYBE_3RDPARTY =
+BUNDLED_DIR = ..
+endif
+
 # NOTE: The libprocess headers were moved to the Makefile in "include"
 # subdirectory to make it easy to preserve the directory structure of
 # the header files during installation.
-SUBDIRS = . include
+SUBDIRS = $(MAYBE_3RDPARTY) . include
 
 include ../versions.am
 
 STOUT = ../stout
-BOOST = ../boost-$(BOOST_VERSION)
-GLOG = ../glog-$(GLOG_VERSION)
-GMOCK = ../gmock-$(GMOCK_VERSION)
-GPERFTOOLS = ../gperftools-$(GPERFTOOLS_VERSION)
-GTEST = $(GMOCK)/gtest
-LIBEV = ../libev-$(LIBEV_VERSION)
-PICOJSON = ../picojson-$(PICOJSON_VERSION)
 
+BOOST = $(BUNDLED_DIR)/boost-$(BOOST_VERSION)
+ELFIO = $(BUNDLED_DIR)/elfio-$(ELFIO_VERSION)
+GLOG = $(BUNDLED_DIR)/glog-$(GLOG_VERSION)
+GMOCK = $(BUNDLED_DIR)/gmock-$(GMOCK_VERSION)
+GPERFTOOLS = $(BUNDLED_DIR)/gperftools-$(GPERFTOOLS_VERSION)
+GTEST = $(GMOCK)/gtest
+HTTP_PARSER = $(BUNDLED_DIR)/http-parser-$(HTTP_PARSER_VERSION)
+LIBEV = $(BUNDLED_DIR)/libev-$(LIBEV_VERSION)
+PICOJSON = $(BUNDLED_DIR)/picojson-$(PICOJSON_VERSION)
+PROTOBUF = $(BUNDLED_DIR)/protobuf-$(PROTOBUF_VERSION)
+
+# Dependencies for all-local.
+BUNDLED_DEPS = # Initialize BUNDLED_DEPENDENCIES so we can add to it.
+
+
+# Ensure bundled software is build properly.
+%-stamp:
+	@cd $(BUNDLED_DIR) && $(MAKE) $(AM_MAKEFLAGS) $(@F)
 
 if WITH_BUNDLED_BOOST
 BOOST_INCLUDE_FLAGS = -isystem $(BOOST)
+BUNDLED_DEPS += $(BOOST)-stamp
+endif
+
+if WITH_BUNDLED_ELFIO
+ELFIO_INCLUDE_FLAGS = -I$(ELFIO)
+BUNDLED_DEPS += $(ELFIO)-stamp
 endif
 
 if WITH_BUNDLED_GLOG
 GLOG_INCLUDE_FLAGS = -I$(GLOG)/src
 LIB_GLOG = $(GLOG)/libglog.la
+$(LIB_GLOG): $(GLOG)-build-stamp
+BUNDLED_DEPS += $(GLOG)-build-stamp
 else
 LIB_GLOG = -lglog
 endif
@@ -49,18 +76,23 @@ endif
 if WITH_BUNDLED_GMOCK
 GMOCK_INCLUDE_FLAGS = -I$(GMOCK)/include
 GTEST_INCLUDE_FLAGS = -I$(GTEST)/include
-LIB_GMOCK = ../libgmock.la
+LIB_GMOCK = $(BUNDLED_DIR)/libgmock.la
+$(LIB_GMOCK): $(GMOCK)-build-stamp
+BUNDLED_DEPS += $(GMOCK)-build-stamp
 endif
 
 if HAS_GPERFTOOLS
 GPERFTOOLS_INCLUDE_FLAGS = -I$(GPERFTOOLS)/src
 LIB_GPERFTOOLS = $(GPERFTOOLS)/libprofiler.la
+$(LIB_GPERFTOOLS): $(GPERFTOOLS)-build-stamp
+BUNDLED_DEPS += $(GPERFTOOLS)-build-stamp
 endif
 
 if WITH_BUNDLED_HTTP_PARSER
-HTTP_PARSER = ../http-parser-$(HTTP_PARSER_VERSION)
 HTTP_PARSER_INCLUDE_FLAGS = -I$(HTTP_PARSER)
-LIB_HTTP_PARSER = ../libry_http_parser.la
+LIB_HTTP_PARSER = $(BUNDLED_DIR)/libry_http_parser.la
+$(LIB_HTTP_PARSER): $(HTTP_PARSER)-build-stamp
+BUNDLED_DEPS += $(HTTP_PARSER)-build-stamp
 else
 LIB_HTTP_PARSER = -lhttp_parser
 endif
@@ -69,6 +101,8 @@ if !ENABLE_LIBEVENT
 if WITH_BUNDLED_LIBEV
 LIB_EV_INCLUDE_FLAGS = -I$(LIBEV)
 LIB_EV = $(LIBEV)/libev.la
+$(LIBEV): $(LIBEV)-build-stamp
+BUNDLED_DEPS += $(LIBEV)-build-stamp
 else
 LIB_EV = -lev
 endif
@@ -79,11 +113,17 @@ PICOJSON_INCLUDE_FLAGS =	\
   -D__STDC_FORMAT_MACROS
 if WITH_BUNDLED_PICOJSON
 PICOJSON_INCLUDE_FLAGS += -I$(PICOJSON)
+BUNDLED_DEPS += $(PICOJSON)-stamp
+endif
+
+if WITH_BUNDLED_PROTOBUF
+BUNDLED_DEPS += $(PROTOBUF)-build-stamp
 endif
 
 if WITH_BUNDLED_STOUT
 STOUT_INCLUDE_FLAGS = -I$(srcdir)/$(STOUT)/include
 endif
+
 
 # Library. It is not installable presently because most people link
 # the libprocess statically into their resulting library or binary and
@@ -139,6 +179,7 @@ libprocess_la_CPPFLAGS =			\
   -DBUILD_DIR=\"$(LIBPROCESS_BUILD_DIR)\"	\
   -I$(srcdir)/include				\
   $(BOOST_INCLUDE_FLAGS)			\
+  $(ELFIO_INCLUDE_FLAGS)			\
   $(GLOG_INCLUDE_FLAGS)				\
   $(GPERFTOOLS_INCLUDE_FLAGS)			\
   $(HTTP_PARSER_INCLUDE_FLAGS)			\
@@ -232,6 +273,12 @@ benchmarks_LDADD =			\
   $(LIB_GMOCK)				\
   libprocess.la
 
+# Used for testing remote links.
+check_PROGRAMS += test-linkee
+test_linkee_SOURCES = src/tests/test_linkee.cpp
+test_linkee_CPPFLAGS = $(libprocess_tests_CPPFLAGS)
+test_linkee_LDADD = $(libprocess_tests_LDADD)
+
 if !ENABLE_STATIC_LIBPROCESS
 # If libprocess is not static, we need to directly link against libglog, etc.
 # When libprocess is configured by Mesos, it is forced to generate a static
@@ -250,6 +297,8 @@ libprocess_tests_LDADD +=		\
   $(LIB_EV)
 endif
 
+BUILT_SOURCES = $(BUNDLED_DEPS)
+
 # We use a check-local target for now to avoid the parallel test
 # runner that ships with newer versions of autotools.
 # See the following discussion for the workaround:
@@ -257,13 +306,25 @@ endif
 check-local: tests
 	./libprocess-tests
 
-# Both libprocess-tests and benchmarks have a dependency on libgmock.la.
-$(LIB_GMOCK):
-	@cd .. && $(MAKE) $(AM_MAKEFLAGS) libgmock.la
-
-tests: all libprocess-tests benchmarks
+tests: all $(BUNDLED_DEPS)
+	$(MAKE) $(AM_MAKEFLAGS) libprocess-tests benchmarks
 
 # TODO(benh): Fix shared builds (tests need libglog, libev, etc).
+
+
+# Make sure we don't recurse into 3rdparty when creating the distribution
+# tarball.
+# When recursing into 3rdparty, it tries to distribute the bundled dependencies
+# such as boost and glog even though they have already been included as part of
+# top-level 3rdparty.
+DIST_SUBDIRS=$(SUBDIRS)
+
+# Explicitly include 3rdparty directory in the distribution tarball since we
+# exclude it from DIST_SUBDIRS (when building it as part of Mesos).
+dist-hook:
+if !STANDALONE_LIBPROCESS
+	cp -r $(srcdir)/3rdparty $(distdir)/
+endif
 
 # Using LT_OUTPUT in configure.ac creates config.lt that doesn't get
 # cleaned up by distclean-libtool. See this bug patch (which doesn't

@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -26,13 +27,12 @@
 
 #include <glog/logging.h>
 
-#include <boost/lexical_cast.hpp>
-
 #include <mesos/v1/resources.hpp>
 #include <mesos/v1/values.hpp>
 
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
+#include <stout/interval.hpp>
 #include <stout/strings.hpp>
 
 using std::max;
@@ -72,11 +72,21 @@ static double convertToFloating(long long fixedValue)
 
 ostream& operator<<(ostream& stream, const Value::Scalar& scalar)
 {
-  // We discard any additional precision from scalar resources before
-  // writing them to an ostream. This is redundant when the scalar is
-  // obtained from one of the operators below, but user-specified
-  // resource values might contain additional precision.
-  return stream << convertToFloating(convertToFixed(scalar.value()));
+  // Output the scalar's full significant digits and save the old
+  // precision.
+  long precision = stream.precision(std::numeric_limits<double>::digits10);
+
+  // We discard any additional precision (of the fractional part)
+  // from scalar resources before writing them to an ostream. This
+  // is redundant when the scalar is obtained from one of the
+  // operators below, but user-specified resource values might
+  // contain additional precision.
+  stream << convertToFloating(convertToFixed(scalar.value()));
+
+  // Return the stream to its original formatting state.
+  stream.precision(precision);
+
+  return stream;
 }
 
 
@@ -267,46 +277,32 @@ void coalesce(Value::Ranges* result, const Value::Range& addedRange)
 }
 
 
-// Removes a range from already coalesced ranges.
-// The algorithms constructs a new vector of ranges which is then
-// coalesced into a Value::Ranges instance.
-static void remove(Value::Ranges* _ranges, const Value::Range& removal)
+// Convert Ranges value to IntervalSet value.
+IntervalSet<uint64_t> rangesToIntervalSet(const Value::Ranges& ranges)
 {
-  vector<internal::Range> ranges;
-  ranges.reserve(_ranges->range_size());
+  IntervalSet<uint64_t> set;
 
-  foreach (const Value::Range& range, _ranges->range()) {
-    // Skip if the entire range is subsumed by `removal`.
-    if (range.begin() >= removal.begin() && range.end() <= removal.end()) {
-      continue;
-    }
-
-    // Divide if the range subsumes the `removal`.
-    if (range.begin() < removal.begin() && range.end() > removal.end()) {
-      // Front.
-      ranges.emplace_back(internal::Range{range.begin(), removal.begin() - 1});
-      // Back.
-      ranges.emplace_back(internal::Range{removal.end() + 1, range.end()});
-    }
-
-    // Fully Emplace if the range doesn't intersect.
-    if (range.end() < removal.begin() || range.begin() > removal.end()) {
-      ranges.emplace_back(internal::Range{range.begin(), range.end()});
-    } else {
-      // Trim if the range does intersect.
-      if (range.end() > removal.end()) {
-        // Trim front.
-        ranges.emplace_back(internal::Range{removal.end() + 1, range.end()});
-      } else {
-        // Trim back.
-        CHECK(range.begin() < removal.begin());
-        ranges.emplace_back(
-            internal::Range{range.begin(), removal.begin() - 1});
-      }
-    }
+  foreach (const Value::Range& range, ranges.range()) {
+    set += (Bound<uint64_t>::closed(range.begin()),
+            Bound<uint64_t>::closed(range.end()));
   }
 
-  internal::coalesce(_ranges, std::move(ranges));
+  return set;
+}
+
+
+// Convert IntervalSet value to Ranges value.
+Value::Ranges intervalSetToRanges(const IntervalSet<uint64_t>& set)
+{
+  Value::Ranges ranges;
+
+  foreach (const Interval<uint64_t>& interval, set) {
+    Value::Range* range = ranges.add_range();
+    range->set_begin(interval.lower());
+    range->set_end(interval.upper() - 1);
+  }
+
+  return ranges;
 }
 
 
@@ -406,13 +402,15 @@ Value::Ranges& operator+=(Value::Ranges& left, const Value::Ranges& right)
 }
 
 
-Value::Ranges& operator-=(Value::Ranges& left, const Value::Ranges& right)
+Value::Ranges& operator-=(Value::Ranges& _left, const Value::Ranges& _right)
 {
-  coalesce(&left);
-  for (int i = 0; i < right.range_size(); ++i) {
-    remove(&left, right.range(i));
-  }
-  return left;
+  IntervalSet<uint64_t> left, right;
+
+  left = rangesToIntervalSet(_left);
+  right = rangesToIntervalSet(_right);
+  _left = intervalSetToRanges(left - right);
+
+  return _left;
 }
 
 
@@ -586,13 +584,8 @@ Try<Value> parse(const string& text)
 {
   Value value;
 
-  // Remove any spaces from the text.
-  string temp;
-  foreach (const char c, text) {
-    if (c != ' ') {
-      temp += c;
-    }
-  }
+  // Remove all spaces.
+  string temp = strings::replace(text, " ", "");
 
   if (temp.length() == 0) {
     return Error("Expecting non-empty string");
@@ -610,7 +603,7 @@ Try<Value> parse(const string& text)
     // This is a Value::Ranges.
     value.set_type(Value::RANGES);
     Value::Ranges* ranges = value.mutable_ranges();
-    const vector<string>& tokens = strings::tokenize(temp, "[]-,\n");
+    const vector<string> tokens = strings::tokenize(temp, "[]-,\n");
     if (tokens.size() % 2 != 0) {
       return Error("Expecting one or more \"ranges\"");
     } else {
@@ -618,13 +611,15 @@ Try<Value> parse(const string& text)
         Value::Range* range = ranges->add_range();
 
         int j = i;
-        try {
-          range->set_begin(boost::lexical_cast<uint64_t>((tokens[j++])));
-          range->set_end(boost::lexical_cast<uint64_t>(tokens[j++]));
-        } catch (const boost::bad_lexical_cast&) {
+        Try<uint64_t> begin = numify<uint64_t>(tokens[j++]);
+        Try<uint64_t> end = numify<uint64_t>(tokens[j++]);
+        if (begin.isError() || end.isError()) {
           return Error(
               "Expecting non-negative integers in '" + tokens[j - 1] + "'");
         }
+
+        range->set_begin(begin.get());
+        range->set_end(end.get());
       }
 
       coalesce(ranges);
@@ -637,19 +632,20 @@ Try<Value> parse(const string& text)
       // This is a set.
       value.set_type(Value::SET);
       Value::Set* set = value.mutable_set();
-      const vector<string>& tokens = strings::tokenize(temp, "{},\n");
+      const vector<string> tokens = strings::tokenize(temp, "{},\n");
       for (size_t i = 0; i < tokens.size(); i++) {
         set->add_item(tokens[i]);
       }
       return value;
     } else if (index == string::npos) {
-      try {
+      Try<double> value_ = numify<double>(temp);
+      if (!value_.isError()) {
         // This is a scalar.
-        value.set_type(Value::SCALAR);
         Value::Scalar* scalar = value.mutable_scalar();
-        scalar->set_value(boost::lexical_cast<double>(temp));
+        value.set_type(Value::SCALAR);
+        scalar->set_value(value_.get());
         return value;
-      } catch (const boost::bad_lexical_cast&) {
+      } else {
         // This is a text.
         value.set_type(Value::TEXT);
         Value::Text* text = value.mutable_text();

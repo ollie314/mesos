@@ -182,13 +182,6 @@ int main(int argc, char** argv)
 
   Try<flags::Warnings> load = flags.load("MESOS_", argc, argv);
 
-  // TODO(marco): this pattern too should be abstracted away
-  // in FlagsBase; I have seen it at least 15 times.
-  if (load.isError()) {
-    cerr << flags.usage(load.error()) << endl;
-    return EXIT_FAILURE;
-  }
-
   if (flags.help) {
     cout << flags.usage() << endl;
     return EXIT_SUCCESS;
@@ -197,6 +190,13 @@ int main(int argc, char** argv)
   if (flags.version) {
     cout << "mesos" << " " << MESOS_VERSION << endl;
     return EXIT_SUCCESS;
+  }
+
+  // TODO(marco): this pattern too should be abstracted away
+  // in FlagsBase; I have seen it at least 15 times.
+  if (load.isError()) {
+    cerr << flags.usage(load.error()) << endl;
+    return EXIT_FAILURE;
   }
 
   if (master.isNone() && flags.master_detector.isNone()) {
@@ -256,7 +256,10 @@ int main(int argc, char** argv)
   // If `process::initialize()` returns `false`, then it was called before this
   // invocation, meaning the authentication realm for libprocess-level HTTP
   // endpoints was set incorrectly. This should be the first invocation.
-  if (!process::initialize(id, DEFAULT_HTTP_AUTHENTICATION_REALM)) {
+  if (!process::initialize(
+          id,
+          READWRITE_HTTP_AUTHENTICATION_REALM,
+          READONLY_HTTP_AUTHENTICATION_REALM)) {
     EXIT(EXIT_FAILURE) << "The call to `process::initialize()` in the agent's "
                        << "`main()` was not the function's first invocation";
   }
@@ -335,7 +338,7 @@ int main(int argc, char** argv)
 
 #ifdef __linux__
   // Initialize systemd if it exists.
-  if (systemd::exists() && flags.systemd_enable_support) {
+  if (flags.systemd_enable_support && systemd::exists()) {
     LOG(INFO) << "Inializing systemd state";
 
     systemd::Flags systemdFlags;
@@ -405,7 +408,7 @@ int main(int argc, char** argv)
         createAuthorizationCallbacks(authorizer_.get()));
   }
 
-  Files files(DEFAULT_HTTP_AUTHENTICATION_REALM);
+  Files files(READONLY_HTTP_AUTHENTICATION_REALM, authorizer_);
   GarbageCollector gc;
   StatusUpdateManager statusUpdateManager(flags);
 
@@ -426,9 +429,6 @@ int main(int argc, char** argv)
          << qosController.error() << endl;
     return EXIT_FAILURE;
   }
-
-
-  LOG(INFO) << "Starting Mesos agent";
 
   Slave* slave = new Slave(
       id,

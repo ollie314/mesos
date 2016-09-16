@@ -43,6 +43,7 @@ pkg3rdpartydir = $(pkglibdir)/3rdparty
 include versions.am
 
 BOOST = boost-$(BOOST_VERSION)
+ELFIO = elfio-$(ELFIO_VERSION)
 GLOG = glog-$(GLOG_VERSION)
 GMOCK = gmock-$(GMOCK_VERSION)
 GPERFTOOLS = gperftools-$(GPERFTOOLS_VERSION)
@@ -60,6 +61,7 @@ ZOOKEEPER = zookeeper-$(ZOOKEEPER_VERSION)
 
 EXTRA_DIST =		\
   $(BOOST).tar.gz	\
+  $(ELFIO).tar.gz	\
   $(GLOG).tar.gz	\
   $(GMOCK).tar.gz	\
   $(GPERFTOOLS).tar.gz	\
@@ -103,6 +105,7 @@ EXTRA_DIST +=		\
 
 CLEAN_EXTRACTED =	\
   $(BOOST)		\
+  $(ELFIO)		\
   $(GLOG)		\
   $(GMOCK)		\
   $(GPERFTOOLS)		\
@@ -146,6 +149,41 @@ if WITH_BUNDLED_BOOST
   ALL_LOCAL += $(BOOST)-stamp
 endif
 
+if WITH_BUNDLED_ELFIO
+# Stout depends on ELFIO. Install ELFIO into $PREFIX/include
+# but don't add it to the source tarball.
+elfiodir = $(includedir)/elfio
+
+nodist_elfio_HEADERS =			\
+  $(ELFIO)/elfio/elf_types.hpp		\
+  $(ELFIO)/elfio/elfio.hpp		\
+  $(ELFIO)/elfio/elfio_dump.hpp		\
+  $(ELFIO)/elfio/elfio_dynamic.hpp	\
+  $(ELFIO)/elfio/elfio_header.hpp	\
+  $(ELFIO)/elfio/elfio_note.hpp		\
+  $(ELFIO)/elfio/elfio_relocation.hpp	\
+  $(ELFIO)/elfio/elfio_section.hpp	\
+  $(ELFIO)/elfio/elfio_segment.hpp	\
+  $(ELFIO)/elfio/elfio_strings.hpp	\
+  $(ELFIO)/elfio/elfio_symbols.hpp	\
+  $(ELFIO)/elfio/elfio_utils.hpp
+
+$(ELFIO)/elfio/elf_types.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_dump.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_dynamic.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_header.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_note.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_relocation.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_section.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_segment.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_strings.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_symbols.hpp: $(ELFIO)-stamp
+$(ELFIO)/elfio/elfio_utils.hpp: $(ELFIO)-stamp
+
+ALL_LOCAL += $(ELFIO)-stamp
+endif
+
 if WITH_BUNDLED_GLOG
 LIB_GLOG = $(GLOG)/libglog.la
 GLOG_LDFLAGS = # Initialize to empty
@@ -153,13 +191,16 @@ if OS_FREEBSD
   GLOG_LDFLAGS += "LDFLAGS='-L/usr/local/lib -lexecinfo'"
 endif
 
+$(LIB_GLOG): $(GLOG)-build-stamp
+
 # NOTE: We explicitly set GTEST_CONFIG=no so that we don't attempt to
 # build glog against a system installed gtest (there's no reason to
 # "test" glog and it's highly likely it will cause a compilation bug
 # when building with clang).
-$(LIB_GLOG): $(GLOG)-stamp
+$(GLOG)-build-stamp: $(GLOG)-stamp
 	cd $(GLOG) && ./configure GTEST_CONFIG=no $(CONFIGURE_ARGS) && \
           $(MAKE) $(AM_MAKEFLAGS) $(GLOG_LDFLAGS)
+	touch $@
 
 ALL_LOCAL += $(LIB_GLOG)
 endif
@@ -187,13 +228,17 @@ libry_http_parser_la_CPPFLAGS = -I$(HTTP_PARSER) -DHTTP_PARSER_STRICT=0
 BUILT_SOURCES += $(nodist_libry_http_parser_la_SOURCES)
 
 $(HTTP_PARSER)/http_parser.c: $(HTTP_PARSER)-stamp
+$(HTTP_PARSER)-build-stamp: libry_http_parser.la
+	touch $@
 endif
 
 if WITH_BUNDLED_LIBEV
-$(LIBEV)/libev.la: $(LIBEV)-stamp
+$(LIBEV)/libev.la: $(LIBEV)-build-stamp
+$(LIBEV)-build-stamp: $(LIBEV)-stamp
 	cd $(LIBEV) && ./configure $(CONFIGURE_ARGS) && \
-          $(MAKE) $(AM_MAKEFLAGS)
-ALL_LOCAL += $(LIBEV)/libev.la
+           $(MAKE) $(AM_MAKEFLAGS)
+	touch $@
+ALL_LOCAL += $(LIBEV)-build-stamp
 endif
 
 if WITH_BUNDLED_NVML
@@ -231,6 +276,10 @@ libgmock_la_CPPFLAGS =			\
   -I$(GMOCK)/include -I$(GMOCK) -I$(GMOCK)/src
 
   gmock_sources.cc: $(GMOCK)-stamp
+
+$(GMOCK)-build-stamp: libgmock.la
+	touch $@
+ALL_LOCAL += $(GMOCK)-build-stamp
 endif
 
 if LINKGTEST
@@ -295,9 +344,19 @@ if WITH_BUNDLED_BOOST
 	  rm -rf $(INSTALLDIR)/include/boost
 	cp -fpR $(BOOST)/boost $(INSTALLDIR)/include/
 endif
+if WITH_BUNDLED_ELFIO
+	@test -d $(INSTALLDIR)/include/elfio || \
+	  rm -rf $(INSTALLDIR)/include/elfio
+	cp -fpR $(ELFIO)/elfio $(INSTALLDIR)/include/
+endif
 if WITH_BUNDLED_GLOG
 	cd $(GLOG) && \
 	  $(MAKE) $(AM_MAKEFLAGS) DESTDIR=$(INSTALLDIR) install
+endif
+if WITH_BUNDLED_NVML
+	@test -d $(INSTALLDIR)/include/nvidia || \
+	  rm -rf $(INSTALLDIR)/include/nvidia
+	cp -fpR $(NVML)/nvidia $(INSTALLDIR)/include/
 endif
 if WITH_BUNDLED_PICOJSON
 	cd $(PICOJSON) && \

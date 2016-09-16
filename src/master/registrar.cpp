@@ -197,15 +197,15 @@ private:
   // Continuations.
   void _recover(
       const MasterInfo& info,
-      const Future<Variable<Registry> >& recovery);
+      const Future<Variable<Registry>>& recovery);
   void __recover(const Future<bool>& recover);
   Future<bool> _apply(Owned<Operation> operation);
 
   // Helper for updating state (performing store).
   void update();
   void _update(
-      const Future<Option<Variable<Registry> > >& store,
-      deque<Owned<Operation> > operations);
+      const Future<Option<Variable<Registry>>>& store,
+      deque<Owned<Operation>> operations);
 
   // Fails all pending operations and transitions the Registrar
   // into an error state in which all subsequent operations will fail.
@@ -213,15 +213,15 @@ private:
   // performing more State storage operations.
   void abort(const string& message);
 
-  Option<Variable<Registry> > variable;
-  deque<Owned<Operation> > operations;
+  Option<Variable<Registry>> variable;
+  deque<Owned<Operation>> operations;
   bool updating; // Used to signify fetching (recovering) or storing.
 
   const Flags flags;
   State* state;
 
   // Used to compose our operations with recovery.
-  Option<Owned<Promise<Registry> > > recovered;
+  Option<Owned<Promise<Registry>>> recovered;
 
   // When an error is encountered from abort(), we'll fail all
   // subsequent operations.
@@ -329,19 +329,19 @@ string RegistrarProcess::registryHelp()
 Future<Registry> RegistrarProcess::recover(const MasterInfo& info)
 {
   if (recovered.isNone()) {
-    LOG(INFO) << "Recovering registrar";
+    VLOG(1) << "Recovering registrar";
 
     metrics.state_fetch.start();
     state->fetch<Registry>("registry")
       .after(flags.registry_fetch_timeout,
              lambda::bind(
-                 &timeout<Variable<Registry> >,
+                 &timeout<Variable<Registry>>,
                  "fetch",
                  flags.registry_fetch_timeout,
                  lambda::_1))
       .onAny(defer(self(), &Self::_recover, info, lambda::_1));
     updating = true;
-    recovered = Owned<Promise<Registry> >(new Promise<Registry>());
+    recovered = Owned<Promise<Registry>>(new Promise<Registry>());
   }
 
   return recovered.get()->future();
@@ -350,7 +350,7 @@ Future<Registry> RegistrarProcess::recover(const MasterInfo& info)
 
 void RegistrarProcess::_recover(
     const MasterInfo& info,
-    const Future<Variable<Registry> >& recovery)
+    const Future<Variable<Registry>>& recovery)
 {
   updating = false;
 
@@ -462,14 +462,14 @@ void RegistrarProcess::update()
   }
 
   LOG(INFO) << "Applied " << operations.size() << " operations in "
-            << stopwatch.elapsed() << "; attempting to update the 'registry'";
+            << stopwatch.elapsed() << "; attempting to update the registry";
 
   // Perform the store, and time the operation.
   metrics.state_store.start();
   state->store(variable.get().mutate(registry))
     .after(flags.registry_store_timeout,
            lambda::bind(
-               &timeout<Option<Variable<Registry> > >,
+               &timeout<Option<Variable<Registry>>>,
                "store",
                flags.registry_store_timeout,
                lambda::_1))
@@ -481,14 +481,14 @@ void RegistrarProcess::update()
 
 
 void RegistrarProcess::_update(
-    const Future<Option<Variable<Registry> > >& store,
-    deque<Owned<Operation> > applied)
+    const Future<Option<Variable<Registry>>>& store,
+    deque<Owned<Operation>> applied)
 {
   updating = false;
 
   // Abort if the storage operation did not succeed.
   if (!store.isReady() || store.get().isNone()) {
-    string message = "Failed to update 'registry': ";
+    string message = "Failed to update registry: ";
 
     if (store.isFailed()) {
       message += store.failure();
@@ -506,7 +506,7 @@ void RegistrarProcess::_update(
 
   Duration elapsed = metrics.state_store.stop();
 
-  LOG(INFO) << "Successfully updated the 'registry' in " << elapsed;
+  LOG(INFO) << "Successfully updated the registry in " << elapsed;
 
   variable = store.get().get();
 

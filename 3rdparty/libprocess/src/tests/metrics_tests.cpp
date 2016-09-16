@@ -50,11 +50,11 @@ using metrics::Gauge;
 using metrics::Timer;
 
 using process::Clock;
-using process::DEFAULT_HTTP_AUTHENTICATION_REALM;
 using process::Failure;
 using process::Future;
 using process::PID;
 using process::Process;
+using process::READONLY_HTTP_AUTHENTICATION_REALM;
 using process::Statistics;
 using process::UPID;
 
@@ -182,7 +182,7 @@ TEST_F(MetricsTest, Statistics)
     ++counter;
   }
 
-  Option<Statistics<double> > statistics = counter.statistics();
+  Option<Statistics<double>> statistics = counter.statistics();
   EXPECT_SOME(statistics);
 
   EXPECT_EQ(11u, statistics.get().count);
@@ -314,6 +314,10 @@ TEST_F(MetricsTest, SnapshotTimeout)
   Future<Response> response = http::get(upid, "snapshot", "timeout=2secs");
 
   // Make sure the request is pending before the timeout is exceeded.
+  //
+  // TODO(neilc): Replace the `sleep` here with a less flaky
+  // synchronization method.
+  os::sleep(Milliseconds(10));
   Clock::settle();
 
   ASSERT_TRUE(response.isPending());
@@ -509,10 +513,10 @@ TEST_F(MetricsTest, SnapshotAuthenticationEnabled)
 
   process::Owned<Authenticator> authenticator(
     new BasicAuthenticator(
-        DEFAULT_HTTP_AUTHENTICATION_REALM, {{"foo", "bar"}}));
+        READONLY_HTTP_AUTHENTICATION_REALM, {{"foo", "bar"}}));
 
   AWAIT_READY(
-      setAuthenticator(DEFAULT_HTTP_AUTHENTICATION_REALM, authenticator));
+      setAuthenticator(READONLY_HTTP_AUTHENTICATION_REALM, authenticator));
 
   UPID upid("metrics", process::address());
 

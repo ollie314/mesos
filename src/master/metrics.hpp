@@ -66,6 +66,10 @@ struct Metrics
   process::metrics::Counter tasks_killed;
   process::metrics::Counter tasks_lost;
   process::metrics::Counter tasks_error;
+  process::metrics::Counter tasks_dropped;
+  process::metrics::Counter tasks_unreachable;
+  process::metrics::Counter tasks_gone;
+  process::metrics::Counter tasks_gone_by_operator;
 
   typedef hashmap<TaskStatus::Reason, process::metrics::Counter> Reasons;
   typedef hashmap<TaskStatus::Source, Reasons> SourcesReasons;
@@ -175,9 +179,16 @@ struct Metrics
   process::metrics::Counter slave_removals_reason_registered;
 
   // Slave observer metrics.
+  //
+  // TODO(neilc): The `slave_shutdowns_xxx` metrics are deprecated and
+  // will always be zero. Remove in Mesos 2.0.
   process::metrics::Counter slave_shutdowns_scheduled;
   process::metrics::Counter slave_shutdowns_completed;
   process::metrics::Counter slave_shutdowns_canceled;
+
+  process::metrics::Counter slave_unreachable_scheduled;
+  process::metrics::Counter slave_unreachable_completed;
+  process::metrics::Counter slave_unreachable_canceled;
 
   // Non-revocable resources.
   std::vector<process::metrics::Gauge> resources_total;

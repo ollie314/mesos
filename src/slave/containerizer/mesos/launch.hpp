@@ -35,7 +35,6 @@ public:
     Flags();
 
     Option<JSON::Object> command;
-    Option<std::string> sandbox;
     Option<std::string> working_directory;
 #ifndef __WINDOWS__
     Option<std::string> rootfs;
@@ -43,7 +42,11 @@ public:
 #endif // __WINDOWS__
     Option<int> pipe_read;
     Option<int> pipe_write;
-    Option<JSON::Object> commands; // Additional preparation commands.
+    Option<JSON::Array> pre_exec_commands;
+#ifdef __linux__
+    bool unshare_namespace_mnt;
+    Option<JSON::Object> capabilities;
+#endif // __linux__
   };
 
   MesosContainerizerLaunch() : Subcommand(NAME) {}

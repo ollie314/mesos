@@ -86,6 +86,9 @@ using mesos::master::contender::MASTER_CONTENDER_ZK_SESSION_TIMEOUT;
 using mesos::master::detector::MasterDetector;
 using mesos::master::detector::StandaloneMasterDetector;
 
+using mesos::v1::scheduler::Call;
+using mesos::v1::scheduler::Event;
+
 using process::Clock;
 using process::Future;
 using process::Owned;
@@ -458,7 +461,10 @@ TEST_F(MasterTest, KillUnknownTask)
   driver.killTask(unknownTaskId);
 
   AWAIT_READY(status);
+
   EXPECT_EQ(TASK_LOST, status.get().state());
+  EXPECT_EQ(TaskStatus::SOURCE_MASTER, status.get().source());
+  EXPECT_EQ(TaskStatus::REASON_RECONCILIATION, status.get().reason());
 
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
@@ -537,22 +543,23 @@ TEST_F(MasterTest, KillUnknownTaskSlaveInTransition)
   slave.get()->terminate();
   slave->reset();
 
-  frameworkId = Future<FrameworkID>();
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .WillOnce(FutureArg<1>(&frameworkId));
+  Future<Nothing> disconnected;
+  EXPECT_CALL(sched, disconnected(&driver))
+    .WillOnce(FutureSatisfy(&disconnected));
 
   // Restart master.
   master = StartMaster();
   ASSERT_SOME(master);
 
-  Future<Nothing> disconnected;
-  EXPECT_CALL(sched, disconnected(&driver))
-    .WillOnce(FutureSatisfy(&disconnected));
+  frameworkId = Future<FrameworkID>();
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
 
   // Simulate a spurious event (e.g., due to ZooKeeper
   // expiration) at the scheduler.
   detector.appoint(master.get()->pid);
 
+  AWAIT_READY(disconnected);
   AWAIT_READY(frameworkId);
 
   // Restart slave.
@@ -1811,8 +1818,11 @@ TEST_F(MasterTest, RecoveredSlaveDoesNotReregister)
   AWAIT_READY(slaveLost);
 
   JSON::Object stats = Metrics();
+  EXPECT_EQ(1, stats.values["master/recovery_slave_removals"]);
   EXPECT_EQ(1, stats.values["master/slave_removals"]);
   EXPECT_EQ(1, stats.values["master/slave_removals/reason_unhealthy"]);
+  EXPECT_EQ(1, stats.values["master/slave_unreachable_completed"]);
+  EXPECT_EQ(1, stats.values["master/slave_unreachable_scheduled"]);
 
   Clock::resume();
 
@@ -3083,7 +3093,9 @@ TEST_F(MasterTest, StateEndpointFrameworkInfo)
 
   vector<FrameworkInfo::Capability::Type> capabilities = {
     FrameworkInfo::Capability::REVOCABLE_RESOURCES,
-    FrameworkInfo::Capability::TASK_KILLING_STATE
+    FrameworkInfo::Capability::TASK_KILLING_STATE,
+    FrameworkInfo::Capability::GPU_RESOURCES,
+    FrameworkInfo::Capability::PARTITION_AWARE
   };
 
   foreach (FrameworkInfo::Capability::Type capability, capabilities) {
@@ -4450,7 +4462,7 @@ TEST_F(MasterTest, MaxCompletedTasksPerFrameworkFlag)
 }
 
 
-// Test get requests on various endpoints without authentication and
+// Test GET requests on various endpoints without authentication and
 // with bad credentials.
 // Note that we have similar checks for the maintenance, roles, quota, teardown,
 // reserve, unreserve, create-volumes, destroy-volumes, observe endpoints in the
@@ -4575,6 +4587,62 @@ TEST_F(MasterTest, EndpointsBadAuthentication)
 }
 
 
+// Test unauthenticated GET requests on various endpoints
+// when authentication is disabled for read-only endpoints.
+TEST_F(MasterTest, ReadonlyEndpointsNoAuthentication)
+{
+  // Set up a master with authentication disabled for read-only endpoints.
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.authenticate_http_readonly = false;
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // `state` endpoint from master should be allowed without authentication.
+  {
+    Future<Response> response = process::http::get(master.get()->pid, "state");
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  }
+
+  // `quota` endpoint from master is controlled by `authenticate_http_readwrite`
+  // flag which is set to true, so an unauthenticated request will be rejected.
+  {
+    Future<Response> response = process::http::get(master.get()->pid, "quota");
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+  }
+}
+
+
+// Test GET requests on various endpoints without authentication
+// when authentication for read-write endpoints is disabled.
+TEST_F(MasterTest, ReadwriteEndpointsNoAuthentication)
+{
+  // Set up a master with authentication disabled for read-write endpoints.
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.authenticate_http_readwrite = false;
+
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // `quota` endpoint from master should be allowed without authentication.
+  {
+    Future<Response> response = process::http::get(master.get()->pid, "quota");
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  }
+
+  // `state` endpoint from master is controlled by `authenticate_http_readonly`
+  // flag which is set to true, so an unauthenticated request will be rejected.
+  {
+    Future<Response> response = process::http::get(master.get()->pid, "state");
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+  }
+}
+
+
 TEST_F(MasterTest, RejectFrameworkWithInvalidFailoverTimeout)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -4599,6 +4667,206 @@ TEST_F(MasterTest, RejectFrameworkWithInvalidFailoverTimeout)
   driver.start();
 
   AWAIT_READY(error);
+}
+
+
+// This test verifies that we recover resources when an orphaned task reaches
+// a terminal state.
+TEST_F(MasterTest, RecoverResourcesOrphanedTask)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto executor = std::make_shared<MockV1HTTPExecutor>();
+
+  ExecutorID executorId = DEFAULT_EXECUTOR_ID;
+  TestContainerizer containerizer(executorId, executor);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, &containerizer);
+  ASSERT_SOME(slave);
+
+  Future<Nothing> connected;
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillOnce(Return());
+
+  ContentType contentType = ContentType::PROTOBUF;
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
+
+  AWAIT_READY(connected);
+
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  {
+    Call call;
+    call.set_type(Call::SUBSCRIBE);
+
+    Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(subscribed);
+
+  v1::FrameworkID frameworkId = subscribed.get().framework_id();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
+
+  v1::executor::Mesos* execMesos = nullptr;
+
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
+
+  EXPECT_CALL(*executor, subscribed(_, _))
+    .WillOnce(SaveArg<0>(&execMesos));
+
+  EXPECT_CALL(*executor, launch(_, _))
+    .WillOnce(executor::SendUpdateFromTask(
+        frameworkId, evolve(executorId), v1::TASK_RUNNING));
+
+  Future<Nothing> acknowledged;
+  EXPECT_CALL(*executor, acknowledged(_, _))
+    .WillOnce(FutureSatisfy(&acknowledged));
+
+  Future<Event::Update> update;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update));
+
+  const v1::Offer& offer = offers->offers(0);
+
+  v1::TaskInfo taskInfo =
+    evolve(createTask(devolve(offer), "", executorId));
+
+  {
+    Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.set_type(Call::ACCEPT);
+
+    Call::Accept* accept = call.mutable_accept();
+    accept->add_offer_ids()->CopyFrom(offers->offers(0).id());
+
+    v1::Offer::Operation* operation = accept->add_operations();
+    operation->set_type(v1::Offer::Operation::LAUNCH);
+    operation->mutable_launch()->add_task_infos()->CopyFrom(taskInfo);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(acknowledged);
+  AWAIT_READY(update);
+
+  EXPECT_EQ(v1::TASK_RUNNING, update->status().state());
+  EXPECT_TRUE(update->status().has_executor_id());
+  EXPECT_EQ(executorId, devolve(update->status().executor_id()));
+
+  Future<Nothing> disconnected;
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .WillOnce(FutureSatisfy(&disconnected));
+
+  // Failover the master.
+  master->reset();
+  master = StartMaster();
+  ASSERT_SOME(master);
+
+  AWAIT_READY(disconnected);
+
+  // Have the agent re-register with the master.
+  detector.appoint(master.get()->pid);
+
+  // Ensure re-registration is complete.
+  Clock::pause();
+  Clock::settle();
+
+  EXPECT_CALL(*executor, acknowledged(_, _));
+
+  Future<v1::executor::Call> updateCall =
+    FUTURE_HTTP_CALL(v1::executor::Call(),
+                     v1::executor::Call::UPDATE,
+                     _,
+                     contentType);
+
+  // Send a terminal status update while the task is an orphan i.e., the
+  // framework has not reconnected.
+  {
+    v1::TaskStatus status;
+    status.mutable_task_id()->CopyFrom(taskInfo.task_id());
+    status.mutable_executor_id()->CopyFrom(evolve(executorId));
+    status.set_state(v1::TASK_FINISHED);
+    status.set_source(v1::TaskStatus::SOURCE_EXECUTOR);
+    status.set_uuid(UUID::random().toBytes());
+
+    v1::executor::Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.mutable_executor_id()->CopyFrom(evolve(executorId));
+
+    call.set_type(v1::executor::Call::UPDATE);
+
+    call.mutable_update()->mutable_status()->CopyFrom(status);
+
+    execMesos->send(call);
+  }
+
+  AWAIT_READY(updateCall);
+
+  // Ensure that the update is processed by the agent.
+  Clock::settle();
+
+  Future<Nothing> recoverResources =
+    FUTURE_DISPATCH(_, &MesosAllocatorProcess::recoverResources);
+
+  // Advance the clock for the status update manager to retry with the
+  // latest state of the task.
+  Clock::advance(slave::STATUS_UPDATE_RETRY_INTERVAL_MIN);
+  Clock::settle();
+
+  // Ensure that the resources are successfully recovered.
+  AWAIT_READY(recoverResources);
+
+  // Ensure that the state of the task is updated to `TASK_FINISHED` on the
+  // master.
+  {
+    v1::master::Call call;
+    call.set_type(v1::master::Call::GET_TASKS);
+
+    process::http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+    headers["Accept"] = stringify(contentType);
+
+    Future<Response> response = process::http::post(
+        master.get()->pid,
+        "api/v1",
+        headers,
+        serialize(contentType, call),
+        stringify(contentType));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+
+    v1::master::Response::GetTasks tasks = deserialize<v1::master::Response>(
+        contentType, response->body).get().get_tasks();
+
+    ASSERT_TRUE(tasks.IsInitialized());
+    ASSERT_EQ(1, tasks.orphan_tasks().size());
+    ASSERT_EQ(TASK_FINISHED, tasks.orphan_tasks(0).state());
+  }
+
+  EXPECT_CALL(*executor, shutdown(_))
+    .Times(AtMost(1));
+
+  EXPECT_CALL(*executor, disconnected(_))
+    .Times(AtMost(1));
 }
 
 } // namespace tests {

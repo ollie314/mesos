@@ -67,7 +67,7 @@ public:
       const process::Subprocess::IO& in,
       const process::Subprocess::IO& out,
       const process::Subprocess::IO& err,
-      const Option<flags::FlagsBase>& flags,
+      const flags::FlagsBase* flags,
       const Option<std::map<std::string, std::string>>& environment,
       const Option<int>& namespaces,
       std::vector<process::Subprocess::Hook> parentHooks =
@@ -75,6 +75,26 @@ public:
 
   // Kill all processes in the containerized context.
   virtual process::Future<Nothing> destroy(const ContainerID& containerId) = 0;
+
+  // Return ContainerStatus information about container.
+  // Currently only returns Executor PID info.
+  virtual process::Future<ContainerStatus> status(
+      const ContainerID& containerId) = 0;
+
+  // Get the the path where to checkpoint the
+  // exit status of the container with `containerId`.
+  virtual std::string getExitStatusCheckpointPath(
+      const ContainerID& containerId) = 0;
+
+protected:
+  // Build a path based on a hierarchy of containers whose leaf container
+  // is `containerId`. The `prefix` parameter is prepended to the
+  // `containerId` as we build the path up the tree (e.g. passing a
+  // `containersId` with a value of 3 and a prefix of `foo` would
+  // result in .../foo/1/foo/2/foo/3).
+  std::string buildPathFromHierarchy(
+      const ContainerID& containerId,
+      const string& prefix);
 };
 
 
@@ -99,7 +119,7 @@ public:
       const process::Subprocess::IO& in,
       const process::Subprocess::IO& out,
       const process::Subprocess::IO& err,
-      const Option<flags::FlagsBase>& flags,
+      const flags::FlagsBase* flags,
       const Option<std::map<std::string, std::string>>& environment,
       const Option<int>& namespaces,
       std::vector<process::Subprocess::Hook> parentHooks =
@@ -107,12 +127,21 @@ public:
 
   virtual process::Future<Nothing> destroy(const ContainerID& containerId);
 
+  virtual process::Future<ContainerStatus> status(
+      const ContainerID& containerId);
+
+  virtual std::string getExitStatusCheckpointPath(
+      const ContainerID& containerId);
+
 protected:
-  PosixLauncher() {}
+  PosixLauncher(const Flags& _flags)
+    : flags(_flags) {}
 
   // The 'pid' is the process id of the first process and also the
   // process group id and session id.
   hashmap<ContainerID, pid_t> pids;
+
+  const Flags flags;
 };
 
 
@@ -126,7 +155,8 @@ public:
   virtual ~WindowsLauncher() {}
 
 private:
-  WindowsLauncher() {}
+  WindowsLauncher(const Flags& flags)
+    : PosixLauncher(flags) {}
 };
 
 } // namespace slave {

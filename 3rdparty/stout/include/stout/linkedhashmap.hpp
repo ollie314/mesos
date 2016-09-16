@@ -29,7 +29,7 @@ class LinkedHashMap
 {
 public:
   typedef std::list<Key> list;
-  typedef hashmap<Key, std::pair<Value, typename list::iterator> > map;
+  typedef hashmap<Key, std::pair<Value, typename list::iterator>> map;
 
   Value& operator[] (const Key& key)
   {
@@ -47,6 +47,16 @@ public:
       return values_.at(key).first;
     }
     return None();
+  }
+
+  Value& at(const Key& key)
+  {
+    return values_.at(key).first;
+  }
+
+  const Value& at(const Key& key) const
+  {
+    return values_.at(key).first;
   }
 
   bool contains(const Key& key) const

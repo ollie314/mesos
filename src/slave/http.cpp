@@ -51,6 +51,7 @@
 #include <stout/numify.hpp>
 #include <stout/stringify.hpp>
 #include <stout/strings.hpp>
+#include <stout/unreachable.hpp>
 
 #include "common/build.hpp"
 #include "common/http.hpp"
@@ -78,6 +79,7 @@ using process::TLDR;
 using process::http::Accepted;
 using process::http::BadRequest;
 using process::http::Forbidden;
+using process::http::NotFound;
 using process::http::InternalServerError;
 using process::http::MethodNotAllowed;
 using process::http::NotAcceptable;
@@ -378,16 +380,25 @@ Future<Response> Slave::Http::api(
       return setLoggingLevel(call, principal, acceptType);
 
     case agent::Call::LIST_FILES:
-      return NotImplemented();
+      return listFiles(call, principal, acceptType);
 
     case agent::Call::READ_FILE:
-      return NotImplemented();
+      return readFile(call, principal, acceptType);
 
     case agent::Call::GET_STATE:
-      return NotImplemented();
+      return getState(call, principal, acceptType);
 
     case agent::Call::GET_CONTAINERS:
       return getContainers(call, principal, acceptType);
+
+    case agent::Call::GET_FRAMEWORKS:
+      return getFrameworks(call, principal, acceptType);
+
+    case agent::Call::GET_EXECUTORS:
+      return getExecutors(call, principal, acceptType);
+
+    case agent::Call::GET_TASKS:
+      return getTasks(call, principal, acceptType);
   }
 
   UNREACHABLE();
@@ -547,7 +558,10 @@ string Slave::Http::FLAGS_HELP()
   return HELP(
     TLDR("Exposes the agent's flag configuration."),
     None(),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "The request principal should be authorized to view all flags.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -561,7 +575,27 @@ Future<Response> Slave::Http::flags(
     return MethodNotAllowed({"GET"}, request.method);
   }
 
-  return OK(_flags(), request.url.query.get("jsonp"));
+  if (slave->authorizer.isNone()) {
+    return OK(_flags(), request.url.query.get("jsonp"));
+  }
+
+  authorization::Request authRequest;
+  authRequest.set_action(authorization::VIEW_FLAGS);
+
+  if (principal.isSome()) {
+    authRequest.mutable_subject()->set_value(principal.get());
+  }
+
+  return slave->authorizer.get()->authorized(authRequest)
+      .then(defer(
+          slave->self(),
+          [this, request](bool authorized) -> Future<Response> {
+            if (authorized) {
+              return OK(_flags(), request.url.query.get("jsonp"));
+            } else {
+              return Forbidden();
+            }
+          }));
 }
 
 
@@ -711,6 +745,54 @@ Future<Response> Slave::Http::setLoggingLevel(
 }
 
 
+Future<Response> Slave::Http::listFiles(
+    const mesos::agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::agent::Call::LIST_FILES, call.type());
+
+  const string& path = call.list_files().path();
+
+  return slave->files->browse(path, principal)
+    .then([contentType](const Try<list<FileInfo>, FilesError>& result)
+      -> Future<Response> {
+      if (result.isError()) {
+        const FilesError& error = result.error();
+
+        switch (error.type) {
+          case FilesError::Type::INVALID:
+            return BadRequest(error.message);
+
+          case FilesError::Type::UNAUTHORIZED:
+            return Forbidden(error.message);
+
+          case FilesError::Type::NOT_FOUND:
+            return NotFound(error.message);
+
+          case FilesError::Type::UNKNOWN:
+            return InternalServerError(error.message);
+        }
+
+        UNREACHABLE();
+      }
+
+      mesos::agent::Response response;
+      response.set_type(mesos::agent::Response::LIST_FILES);
+
+      mesos::agent::Response::ListFiles* listFiles =
+        response.mutable_list_files();
+
+      foreach (const FileInfo& fileInfo, result.get()) {
+        listFiles->add_file_infos()->CopyFrom(fileInfo);
+      }
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    });
+}
+
+
 string Slave::Http::STATE_HELP() {
   return HELP(
     TLDR(
@@ -718,6 +800,8 @@ string Slave::Http::STATE_HELP() {
     DESCRIPTION(
         "This endpoint shows information about the frameworks, executors",
         "and the agent's master as a JSON object.",
+        "The information shown might be filtered based on the user",
+        "accessing the endpoint.",
         "",
         "Example (**Note**: this is not exhaustive):",
         "",
@@ -802,7 +886,12 @@ string Slave::Http::STATE_HELP() {
         "    },",
         "}",
         "```"),
-    AUTHENTICATION(true));
+    AUTHENTICATION(true),
+    AUTHORIZATION(
+        "This endpoint might be filtered based on the user accessing it.",
+        "For example a user might only see the subset of frameworks,",
+        "tasks, and executors they are allowed to view.",
+        "See the authorization documentation for details."));
 }
 
 
@@ -818,6 +907,7 @@ Future<Response> Slave::Http::state(
   Future<Owned<ObjectApprover>> frameworksApprover;
   Future<Owned<ObjectApprover>> tasksApprover;
   Future<Owned<ObjectApprover>> executorsApprover;
+  Future<Owned<ObjectApprover>> flagsApprover;
 
   if (slave->authorizer.isSome()) {
     authorization::Subject subject;
@@ -833,17 +923,27 @@ Future<Response> Slave::Http::state(
 
     executorsApprover = slave->authorizer.get()->getObjectApprover(
         subject, authorization::VIEW_EXECUTOR);
+
+    flagsApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FLAGS);
   } else {
     frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
     tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
     executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    flagsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
   }
 
-  return collect(frameworksApprover, tasksApprover, executorsApprover)
+  return collect(
+      frameworksApprover,
+      tasksApprover,
+      executorsApprover,
+      flagsApprover)
     .then(defer(slave->self(),
         [this, request](const tuple<Owned<ObjectApprover>,
-                        Owned<ObjectApprover>,
-                        Owned<ObjectApprover>>& approvers) -> Response {
+                                    Owned<ObjectApprover>,
+                                    Owned<ObjectApprover>,
+                                    Owned<ObjectApprover>>& approvers)
+          -> Response {
       // This lambda is consumed before the outer lambda
       // returns, hence capture by reference is fine here.
       auto state = [this, &approvers](JSON::ObjectWriter* writer) {
@@ -851,7 +951,11 @@ Future<Response> Slave::Http::state(
         Owned<ObjectApprover> frameworksApprover;
         Owned<ObjectApprover> tasksApprover;
         Owned<ObjectApprover> executorsApprover;
-        tie(frameworksApprover, tasksApprover, executorsApprover) = approvers;
+        Owned<ObjectApprover> flagsApprover;
+        tie(frameworksApprover,
+            tasksApprover,
+            executorsApprover,
+            flagsApprover) = approvers;
 
         writer->field("version", MESOS_VERSION);
 
@@ -888,13 +992,24 @@ Future<Response> Slave::Http::state(
           }
         }
 
-        if (slave->flags.log_dir.isSome()) {
-          writer->field("log_dir", slave->flags.log_dir.get());
-        }
+        if (approveViewFlags(flagsApprover)) {
+          if (slave->flags.log_dir.isSome()) {
+            writer->field("log_dir", slave->flags.log_dir.get());
+          }
 
-        if (slave->flags.external_log_file.isSome()) {
-          writer->field(
-              "external_log_file", slave->flags.external_log_file.get());
+          if (slave->flags.external_log_file.isSome()) {
+            writer->field(
+                "external_log_file", slave->flags.external_log_file.get());
+          }
+
+          writer->field("flags", [this](JSON::ObjectWriter* writer) {
+            foreachvalue (const flags::Flag& flag, slave->flags) {
+              Option<string> value = flag.stringify(slave->flags);
+              if (value.isSome()) {
+                writer->field(flag.effective_name().value, value.get());
+              }
+            }
+          });
         }
 
         // Model all of the frameworks.
@@ -939,19 +1054,437 @@ Future<Response> Slave::Http::state(
             writer->element(frameworkWriter);
           }
         });
-
-        writer->field("flags", [this](JSON::ObjectWriter* writer) {
-            foreachvalue (const flags::Flag& flag, slave->flags) {
-              Option<string> value = flag.stringify(slave->flags);
-              if (value.isSome()) {
-                writer->field(flag.effective_name().value, value.get());
-              }
-            }
-          });
       };
 
       return OK(jsonify(state), request.url.query.get("jsonp"));
     }));
+}
+
+
+Future<Response> Slave::Http::getFrameworks(
+    const agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(agent::Call::GET_FRAMEWORKS, call.type());
+
+  // Retrieve `ObjectApprover`s for authorizing frameworks.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return frameworksApprover
+    .then(defer(slave->self(),
+        [this, contentType](const Owned<ObjectApprover>& frameworksApprover)
+          -> Future<Response> {
+      agent::Response response;
+      response.set_type(agent::Response::GET_FRAMEWORKS);
+      response.mutable_get_frameworks()->CopyFrom(
+          _getFrameworks(frameworksApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    }));
+}
+
+
+agent::Response::GetFrameworks Slave::Http::_getFrameworks(
+    const Owned<ObjectApprover>& frameworksApprover) const
+{
+  agent::Response::GetFrameworks getFrameworks;
+  foreachvalue (const Framework* framework, slave->frameworks) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    getFrameworks.add_frameworks()->mutable_framework_info()
+      ->CopyFrom(framework->info);
+  }
+
+  foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    getFrameworks.add_completed_frameworks()->mutable_framework_info()
+      ->CopyFrom(framework->info);
+  }
+
+  return getFrameworks;
+}
+
+
+Future<Response> Slave::Http::getExecutors(
+    const agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(agent::Call::GET_EXECUTORS, call.type());
+
+  // Retrieve `ObjectApprover`s for authorizing frameworks and executors.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> executorsApprover;
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    executorsApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_EXECUTOR);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, executorsApprover)
+    .then(defer(slave->self(),
+        [this, contentType](const tuple<Owned<ObjectApprover>,
+                                        Owned<ObjectApprover>>& approvers)
+          -> Future<Response> {
+      // Get approver from tuple.
+      Owned<ObjectApprover> frameworksApprover;
+      Owned<ObjectApprover> executorsApprover;
+      tie(frameworksApprover, executorsApprover) = approvers;
+
+      agent::Response response;
+      response.set_type(agent::Response::GET_EXECUTORS);
+
+      response.mutable_get_executors()->CopyFrom(
+          _getExecutors(frameworksApprover, executorsApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    }));
+}
+
+
+agent::Response::GetExecutors Slave::Http::_getExecutors(
+    const Owned<ObjectApprover>& frameworksApprover,
+    const Owned<ObjectApprover>& executorsApprover) const
+{
+  // Construct framework list with both active and completed frameworks.
+  vector<const Framework*> frameworks;
+  foreachvalue (Framework* framework, slave->frameworks) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework);
+  }
+
+  foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework.get());
+  }
+
+  agent::Response::GetExecutors getExecutors;
+
+  foreach (const Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      // Skip unauthorized executors.
+      if (!approveViewExecutorInfo(executorsApprover,
+                                   executor->info,
+                                   framework->info)) {
+        continue;
+      }
+
+      getExecutors.add_executors()->mutable_executor_info()->CopyFrom(
+          executor->info);
+    }
+
+    foreach (const Owned<Executor>& executor, framework->completedExecutors) {
+      // Skip unauthorized executors.
+      if (!approveViewExecutorInfo(executorsApprover,
+                                   executor->info,
+                                   framework->info)) {
+        continue;
+      }
+
+      getExecutors.add_completed_executors()->mutable_executor_info()->CopyFrom(
+          executor->info);
+    }
+  }
+
+  return getExecutors;
+}
+
+
+Future<Response> Slave::Http::getTasks(
+    const agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(agent::Call::GET_TASKS, call.type());
+
+  // Retrieve Approvers for authorizing frameworks and tasks.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> tasksApprover;
+  Future<Owned<ObjectApprover>> executorsApprover;
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    tasksApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_TASK);
+
+    executorsApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_EXECUTOR);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, tasksApprover, executorsApprover)
+    .then(defer(slave->self(),
+      [this, contentType](const tuple<Owned<ObjectApprover>,
+                                      Owned<ObjectApprover>,
+                                      Owned<ObjectApprover>>& approvers)
+        -> Future<Response> {
+      // Get approver from tuple.
+      Owned<ObjectApprover> frameworksApprover;
+      Owned<ObjectApprover> tasksApprover;
+      Owned<ObjectApprover> executorsApprover;
+      tie(frameworksApprover, tasksApprover, executorsApprover) = approvers;
+
+      agent::Response response;
+      response.set_type(agent::Response::GET_TASKS);
+
+      response.mutable_get_tasks()->CopyFrom(
+          _getTasks(frameworksApprover,
+                    tasksApprover,
+                    executorsApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+  }));
+}
+
+
+agent::Response::GetTasks Slave::Http::_getTasks(
+    const Owned<ObjectApprover>& frameworksApprover,
+    const Owned<ObjectApprover>& tasksApprover,
+    const Owned<ObjectApprover>& executorsApprover) const
+{
+  // Construct framework list with both active and completed frameworks.
+  vector<const Framework*> frameworks;
+  foreachvalue (Framework* framework, slave->frameworks) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework);
+  }
+
+  foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
+    // Skip unauthorized frameworks.
+    if (!approveViewFrameworkInfo(frameworksApprover, framework->info)) {
+      continue;
+    }
+
+    frameworks.push_back(framework.get());
+  }
+
+  // Construct executor list with both active and completed executors.
+  hashmap<const Executor*, const Framework*> executors;
+  foreach (const Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      // Skip unauthorized executors.
+      if (!approveViewExecutorInfo(executorsApprover,
+                                   executor->info,
+                                   framework->info)) {
+        continue;
+      }
+
+      executors.put(executor, framework);
+    }
+
+    foreach (const Owned<Executor>& executor, framework->completedExecutors) {
+      // Skip unauthorized executors.
+      if (!approveViewExecutorInfo(executorsApprover,
+                                   executor->info,
+                                   framework->info)) {
+        continue;
+      }
+
+      executors.put(executor.get(), framework);
+    }
+  }
+
+  agent::Response::GetTasks getTasks;
+
+  foreach (const Framework* framework, frameworks) {
+    // Pending tasks.
+    typedef hashmap<TaskID, TaskInfo> TaskMap;
+    foreachvalue (const TaskMap& taskInfos, framework->pending) {
+      foreachvalue (const TaskInfo& taskInfo, taskInfos) {
+        // Skip unauthorized tasks.
+        if (!approveViewTaskInfo(tasksApprover, taskInfo, framework->info)) {
+          continue;
+        }
+
+        const Task& task =
+          protobuf::createTask(taskInfo, TASK_STAGING, framework->id());
+
+        getTasks.add_pending_tasks()->CopyFrom(task);
+      }
+    }
+  }
+
+  foreachpair (const Executor* executor,
+               const Framework* framework,
+               executors) {
+    // Queued tasks.
+    foreach (const TaskInfo& taskInfo, executor->queuedTasks.values()) {
+      // Skip unauthorized tasks.
+      if (!approveViewTaskInfo(tasksApprover, taskInfo, framework->info)) {
+        continue;
+      }
+
+      const Task& task =
+        protobuf::createTask(taskInfo, TASK_STAGING, framework->id());
+
+      getTasks.add_queued_tasks()->CopyFrom(task);
+    }
+
+    // Launched tasks.
+    foreach (Task* task, executor->launchedTasks.values()) {
+      CHECK_NOTNULL(task);
+      // Skip unauthorized tasks.
+      if (!approveViewTask(tasksApprover, *task, framework->info)) {
+        continue;
+      }
+
+      getTasks.add_launched_tasks()->CopyFrom(*task);
+    }
+
+    // Terminated tasks.
+    foreach (Task* task, executor->terminatedTasks.values()) {
+      CHECK_NOTNULL(task);
+      // Skip unauthorized tasks.
+      if (!approveViewTask(tasksApprover, *task, framework->info)) {
+        continue;
+      }
+
+      getTasks.add_terminated_tasks()->CopyFrom(*task);
+    }
+
+    // Completed tasks.
+    foreach (const std::shared_ptr<Task>& task, executor->completedTasks) {
+      // Skip unauthorized tasks.
+      if (!approveViewTask(tasksApprover, *task.get(), framework->info)) {
+        continue;
+      }
+
+      getTasks.add_completed_tasks()->CopyFrom(*task);
+    }
+  }
+
+  return getTasks;
+}
+
+
+Future<Response> Slave::Http::getState(
+    const agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(agent::Call::GET_STATE, call.type());
+
+  // Retrieve Approvers for authorizing frameworks and tasks.
+  Future<Owned<ObjectApprover>> frameworksApprover;
+  Future<Owned<ObjectApprover>> tasksApprover;
+  Future<Owned<ObjectApprover>> executorsApprover;
+  if (slave->authorizer.isSome()) {
+    authorization::Subject subject;
+    if (principal.isSome()) {
+      subject.set_value(principal.get());
+    }
+
+    frameworksApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_FRAMEWORK);
+
+    tasksApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_TASK);
+
+    executorsApprover = slave->authorizer.get()->getObjectApprover(
+        subject, authorization::VIEW_EXECUTOR);
+  } else {
+    frameworksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    tasksApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+    executorsApprover = Owned<ObjectApprover>(new AcceptingObjectApprover());
+  }
+
+  return collect(frameworksApprover, tasksApprover, executorsApprover)
+    .then(defer(slave->self(),
+      [=](const tuple<Owned<ObjectApprover>,
+                      Owned<ObjectApprover>,
+                      Owned<ObjectApprover>>& approvers)
+        -> Future<Response> {
+      // Get approver from tuple.
+      Owned<ObjectApprover> frameworksApprover;
+      Owned<ObjectApprover> tasksApprover;
+      Owned<ObjectApprover> executorsApprover;
+      tie(frameworksApprover, tasksApprover, executorsApprover) = approvers;
+
+      agent::Response response;
+      response.set_type(agent::Response::GET_STATE);
+      response.mutable_get_state()->CopyFrom(
+          _getState(frameworksApprover,
+                    tasksApprover,
+                    executorsApprover));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    }));
+}
+
+
+agent::Response::GetState Slave::Http::_getState(
+    const Owned<ObjectApprover>& frameworksApprover,
+    const Owned<ObjectApprover>& tasksApprover,
+    const Owned<ObjectApprover>& executorsApprover) const
+{
+  agent::Response::GetState getState;
+
+  getState.mutable_get_tasks()->CopyFrom(
+    _getTasks(frameworksApprover, tasksApprover, executorsApprover));
+
+  getState.mutable_get_executors()->CopyFrom(
+    _getExecutors(frameworksApprover, executorsApprover));
+
+  getState.mutable_get_frameworks()->CopyFrom(
+    _getFrameworks(frameworksApprover));
+
+  return getState;
 }
 
 
@@ -1011,7 +1544,11 @@ Future<Response> Slave::Http::statistics(
     return Failure("Failed to extract endpoint: " + endpoint.error());
   }
 
-  return authorizeEndpoint(principal, endpoint.get(), request.method)
+  return authorizeEndpoint(
+      endpoint.get(),
+      request.method,
+      slave->authorizer,
+      principal)
     .then(defer(
         slave->self(),
         [this, request](bool authorized) -> Future<Response> {
@@ -1116,7 +1653,11 @@ Future<Response> Slave::Http::containers(
     return Failure("Failed to extract endpoint: " + endpoint.error());
   }
 
-  return authorizeEndpoint(principal, endpoint.get(), request.method)
+  return authorizeEndpoint(
+      endpoint.get(),
+      request.method,
+      slave->authorizer,
+      principal)
     .then(defer(
         slave->self(),
         [this, request](bool authorized) -> Future<Response> {
@@ -1187,6 +1728,12 @@ Future<JSON::Array> Slave::Http::__containers() const
 
   foreachvalue (const Framework* framework, slave->frameworks) {
     foreachvalue (const Executor* executor, framework->executors) {
+      // No need to get statistics and status if we know that the
+      // executor has already terminated.
+      if (executor->state == Executor::TERMINATED) {
+        continue;
+      }
+
       const ExecutorInfo& info = executor->info;
       const ContainerID& containerId = executor->containerId;
 
@@ -1278,37 +1825,53 @@ Try<string> Slave::Http::extractEndpoint(const process::http::URL& url) const
 }
 
 
-Future<bool> Slave::Http::authorizeEndpoint(
+Future<Response> Slave::Http::readFile(
+    const mesos::agent::Call& call,
     const Option<string>& principal,
-    const string& endpoint,
-    const string& method) const
+    ContentType contentType) const
 {
-  if (slave->authorizer.isNone()) {
-    return true;
+  CHECK_EQ(mesos::agent::Call::READ_FILE, call.type());
+
+  const size_t offset = call.read_file().offset();
+  const string& path = call.read_file().path();
+
+  Option<size_t> length;
+  if (call.read_file().has_length()) {
+    length = call.read_file().length();
   }
 
-  authorization::Request request;
+  return slave->files->read(offset, length, path, principal)
+    .then([contentType](const Try<tuple<size_t, string>, FilesError>& result)
+        -> Future<Response> {
+      if (result.isError()) {
+        const FilesError& error = result.error();
 
-  // TODO(nfnt): Add an additional case when POST requests
-  // need to be authorized separately from GET requests.
-  if (method == "GET") {
-    request.set_action(authorization::GET_ENDPOINT_WITH_PATH);
-  } else {
-    return Failure("Unexpected request method '" + method + "'");
-  }
+        switch (error.type) {
+          case FilesError::Type::INVALID:
+            return BadRequest(error.message);
 
-  if (principal.isSome()) {
-    request.mutable_subject()->set_value(principal.get());
-  }
+          case FilesError::Type::UNAUTHORIZED:
+            return Forbidden(error.message);
 
-  request.mutable_object()->set_value(endpoint);
+          case FilesError::Type::NOT_FOUND:
+            return NotFound(error.message);
 
-  LOG(INFO) << "Authorizing principal '"
-            << (principal.isSome() ? principal.get() : "ANY")
-            << "' to " <<  method
-            << " the '" << endpoint << "' endpoint";
+          case FilesError::Type::UNKNOWN:
+            return InternalServerError(error.message);
+        }
 
-  return slave->authorizer.get()->authorized(request);
+        UNREACHABLE();
+      }
+
+      mesos::agent::Response response;
+      response.set_type(mesos::agent::Response::READ_FILE);
+
+      response.mutable_read_file()->set_size(std::get<0>(result.get()));
+      response.mutable_read_file()->set_data(std::get<1>(result.get()));
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    });
 }
 
 } // namespace slave {

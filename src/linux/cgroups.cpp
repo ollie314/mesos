@@ -37,6 +37,7 @@
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
+#include <process/id.hpp>
 #include <process/io.hpp>
 #include <process/process.hpp>
 #include <process/reap.hpp>
@@ -429,7 +430,7 @@ Try<string> prepare(
   if (hierarchy.isError()) {
     return Error(
         "Failed to determine the hierarchy where the subsystem " +
-        subsystem + " is attached");
+        subsystem + " is attached: " + hierarchy.error());
   }
 
   if (hierarchy.isNone()) {
@@ -1192,7 +1193,8 @@ public:
            const string& _cgroup,
            const string& _control,
            const Option<string>& _args)
-    : hierarchy(_hierarchy),
+    : ProcessBase(ID::generate("cgroups-listener")),
+      hierarchy(_hierarchy),
       cgroup(_cgroup),
       control(_control),
       args(_args),
@@ -1382,7 +1384,8 @@ public:
   Freezer(
       const string& _hierarchy,
       const string& _cgroup)
-    : hierarchy(_hierarchy),
+    : ProcessBase(ID::generate("cgroups-freezer")),
+      hierarchy(_hierarchy),
       cgroup(_cgroup),
       start(Clock::now()) {}
 
@@ -1482,7 +1485,9 @@ class TasksKiller : public Process<TasksKiller>
 {
 public:
   TasksKiller(const string& _hierarchy, const string& _cgroup)
-    : hierarchy(_hierarchy), cgroup(_cgroup) {}
+    : ProcessBase(ID::generate("cgroups-tasks-killer")),
+      hierarchy(_hierarchy),
+      cgroup(_cgroup) {}
 
   virtual ~TasksKiller() {}
 
@@ -1621,7 +1626,9 @@ class Destroyer : public Process<Destroyer>
 {
 public:
   Destroyer(const string& _hierarchy, const vector<string>& _cgroups)
-    : hierarchy(_hierarchy), cgroups(_cgroups) {}
+    : ProcessBase(ID::generate("cgroups-destroyer")),
+      hierarchy(_hierarchy),
+      cgroups(_cgroups) {}
 
   virtual ~Destroyer() {}
 
@@ -2294,20 +2301,14 @@ namespace pressure {
 ostream& operator<<(ostream& stream, Level level)
 {
   switch (level) {
-    case LOW:
-      stream << "low";
-      break;
-    case MEDIUM:
-      stream << "medium";
-      break;
-    case CRITICAL:
-      stream << "critical";
-      break;
-    default:
-      UNREACHABLE();
+    case LOW:      return stream << "low";
+    case MEDIUM:   return stream << "medium";
+    case CRITICAL: return stream << "critical";
+    // We omit the default case because we assume -Wswitch
+    // will trigger a compile-time error if a case is missed.
   }
 
-  return stream;
+  UNREACHABLE();
 }
 
 
@@ -2319,7 +2320,8 @@ public:
   CounterProcess(const string& hierarchy,
                  const string& cgroup,
                  Level level)
-    : value_(0),
+    : ProcessBase(ID::generate("cgroups-counter")),
+      value_(0),
       error(None()),
       process(new event::Listener(
           hierarchy,
@@ -2420,23 +2422,23 @@ Future<uint64_t> Counter::value() const
 
 namespace devices {
 
-ostream& operator<<(ostream& stream, const Entry::Selector& selector)
+ostream& operator<<(ostream& stream, const Entry::Selector::Type& type)
 {
-  switch (selector.type) {
-    case Entry::Selector::Type::ALL:
-      stream << "a";
-      break;
-    case Entry::Selector::Type::BLOCK:
-      stream << "b";
-      break;
-    case Entry::Selector::Type::CHARACTER:
-      stream << "c";
-      break;
+  switch (type) {
+    case Entry::Selector::Type::ALL:       return stream << "a";
+    case Entry::Selector::Type::BLOCK:     return stream << "b";
+    case Entry::Selector::Type::CHARACTER: return stream << "c";
     // We omit the default case because we assume -Wswitch
     // will trigger a compile-time error if a case is missed.
   }
 
-  stream << " ";
+  UNREACHABLE();
+}
+
+
+ostream& operator<<(ostream& stream, const Entry::Selector& selector)
+{
+  stream << selector.type << " ";
 
   if (selector.major.isSome()) {
     stream << stringify(selector.major.get());

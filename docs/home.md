@@ -22,7 +22,6 @@ layout: documentation
     * [Docker Volume Support](docker-volume.md)
     * [CNI support](cni.md)
   * [Docker Containerizer](docker-containerizer.md) for launching a Docker image as a Task, or as an Executor.
-  * [External Containerizer](external-containerizer.md) for custom containerization implementations (deprecated).
 * [Roles](roles.md)
 * [Weights](weights.md)
 * [Authentication](authentication.md)
@@ -45,12 +44,22 @@ layout: documentation
 * [Networking](networking.md)
   * [Container Network Interface (CNI)](cni.md)
   * [Port Mapping Isolator](port-mapping-isolator.md)
+* [Nvidia GPU Support](gpu-support.md) for how to run Mesos with Nvidia GPU support.
 * [Oversubscription](oversubscription.md) for how to configure Mesos to take advantage of unused resources to launch "best-effort" tasks.
 * [Persistent Volume](persistent-volume.md) for how to allow tasks to access persistent storage resources.
 * [Multiple Disks](multiple-disk.md) for how to to allow tasks to use multiple isolated disk resources.
 * [Quota](quota.md) for how to configure Mesos to provide guaranteed resource allocations for use by a role.
 * [Reservation](reservation.md) for how operators and frameworks can reserve resources on individual agents for use by a role.
 * [Replicated Log](replicated-log-internals.md) for information on the Mesos replicated log.
+
+## APIs
+* [Scheduler HTTP API](scheduler-http-api.md) describes the new HTTP API for communication between schedulers and the Mesos master.
+* [Executor HTTP API](executor-http-api.md) describes the new HTTP API for communication between executors and the Mesos agent.
+* [Operator HTTP API](operator-http-api.md) describes the new HTTP API for communication between operators and Mesos master/agent.
+* [API Client Libraries](api-client-libraries.md) lists client libraries for the HTTP APIs.
+* [Versioning](versioning.md) describes HTTP API and release versioning.
+* [Javadoc](/api/latest/java/) documents the old Java API.
+* [Doxygen](/api/latest/c++/namespacemesos.html) documents the C++ API.
 
 ## Running Mesos Frameworks
 
@@ -62,12 +71,7 @@ layout: documentation
 * [Framework Development Guide](app-framework-development-guide.md) describes how to build applications on top of Mesos.
 * [Designing Highly Available Mesos Frameworks](high-availability-framework-guide.md)
 * [Reconciliation](reconciliation.md) for ensuring a framework's state remains eventually consistent in the face of failures.
-* [Scheduler HTTP API](scheduler-http-api.md) describes the new HTTP API for communication between schedulers and the Mesos master.
-* [Executor HTTP API](executor-http-api.md) describes the new HTTP API for communication between executors and the Mesos agent.
-* [Javadoc](/api/latest/java/) documents the Mesos Java API.
-* [Doxygen](/api/latest/c++/namespacemesos.html) documents the Mesos C++ API.
 * [Developer Tools](tools.md) for hacking on Mesos or writing frameworks.
-* [Versioning](versioning.md) describes how Mesos does API and release versioning.
 
 ## Extending Mesos
 
@@ -78,6 +82,7 @@ layout: documentation
 
 * [Reporting an Issue, Improvement, or Feature](reporting-a-bug.md) for getting started with JIRA.
 * [Submitting a Patch](submitting-a-patch.md) for getting started with ReviewBoard and our tooling around it.
+* [Reopening a Review](reopening-reviews.md) for our policy around reviving reviews on ReviewBoard.
 * [Testing Patterns](testing-patterns.md) for tips and tricks used in Mesos tests.
 * [Effective Code Reviewing](effective-code-reviewing.md) guidelines, tips, and learnings for how to do effective code reviews.
 * [Engineering Principles and Practices](engineering-principles-and-practices.md) to serve as a shared set of project-level values for the community.
@@ -97,3 +102,26 @@ layout: documentation
 * [Powered by Mesos](powered-by-mesos.md) lists organizations and software that are powered by Apache Mesos.
 * [Academic Papers and Project History](https://www.usenix.org/conference/nsdi11/mesos-platform-fine-grained-resource-sharing-data-center)
 * [Design docs](design-docs.md) list of design documents for various Mesos features
+
+## Books on Mesos
+
+<div class="row">
+  <div class="col-xs-6 col-md-4">
+    <a href="https://www.packtpub.com/big-data-and-business-intelligence/apache-mesos-essentials" class="thumbnail">
+      <img src="https://www.packtpub.com/sites/default/files/9781783288762.png" alt="Apache Mesos Essentials by Dharmesh Kakadia">
+    </a>
+    <p class="text-center">Apache Mesos Essentials by Dharmesh Kakadia (Packt, 2015)</p>
+  </div>
+  <div class="col-xs-6 col-md-4">
+    <a href="http://shop.oreilly.com/product/0636920039952.do" class="thumbnail">
+      <img src="http://akamaicovers.oreilly.com/images/0636920039952/lrg.jpg" alt="Building Applications on Mesos by David Greenberg">
+    </a>
+    <p class="text-center">Building Applications on Mesos by David Greenberg (O'Reilly, 2015)</p>
+  </div>
+  <div class="col-xs-6 col-md-4">
+    <a href="https://www.manning.com/books/mesos-in-action" class="thumbnail">
+      <img src="https://images.manning.com/255/340/resize/book/d/62f5c9b-0946-4569-ad50-ffdb84876ddc/Ignazio-Mesos-HI.png" alt="Mesos in Action by Roger Ignazio">
+    </a>
+  <p class="text-center">Mesos in Action by Roger Ignazio (Manning, 2016)
+  </div>
+</div>

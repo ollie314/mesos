@@ -69,6 +69,7 @@ v1::TaskInfo evolve(const TaskInfo& taskInfo);
 v1::TaskStatus evolve(const TaskStatus& status);
 v1::Task evolve(const Task& task);
 v1::MasterInfo evolve(const MasterInfo& masterInfo);
+v1::FileInfo evolve(const FileInfo& fileInfo);
 v1::Resource evolve(const Resource& resource);
 
 v1::agent::Response evolve(const mesos::agent::Response& response);
@@ -110,8 +111,8 @@ v1::scheduler::Event evolve(const ExitedExecutorMessage& message);
 v1::scheduler::Event evolve(const ExecutorToFrameworkMessage& message);
 v1::scheduler::Event evolve(const FrameworkErrorMessage& message);
 
-
-v1::executor::Event evolve(const mesos::executor::Event& event);
+v1::executor::Call evolve(const executor::Call& call);
+v1::executor::Event evolve(const executor::Event& event);
 
 
 // Helper functions that evolve old style internal messages to a
@@ -142,8 +143,8 @@ v1::master::Response evolve(const JSON::Object& object);
 
 // Helper functions that evolve old style internal messages to a
 // v1::master::Response.
-v1::master::Response evolve(const mesos::maintenance::ClusterStatus& status);
-v1::master::Response evolve(const mesos::maintenance::Schedule& schedule);
+v1::master::Response evolve(const maintenance::ClusterStatus& status);
+v1::master::Response evolve(const maintenance::Schedule& schedule);
 
 
 // Declaration of helper functions for evolving JSON objects used in agent's

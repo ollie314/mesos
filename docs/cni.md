@@ -3,16 +3,16 @@
 This document describes the `network/cni` isolator, a network isolator
 for the [MesosContainerizer](mesos-containerizer.md) that implements
 the [Container Network Interface
-(CNI)](https://github.com/containernetworking/cni) specification for
-enabling networking support for Mesos containers.  The `network/cni`
-isolator allows containers launched using the `MesosContainerizer` to
-be attached to several different types of IP networks.  The network
-technologies on which containers can possibly be launched, using the
-`network/cni` isolator, range from traditional layer 3/layer 2
-networks such as VLAN, ipvlan, macvlan, to the new class of networks
-designed for container orchestration such as
-[Calico](https://www.projectcalico.org/), [Weave](https://weave.in/)
-and [Flannel](https://coreos.com/flannel/docs/latest/).  The
+(CNI)](https://github.com/containernetworking/cni) specification.  The
+`network/cni` isolator allows containers launched using the
+`MesosContainerizer` to be attached to several different types of IP
+networks.  The network technologies on which containers can possibly
+be launched range from traditional layer 3/layer 2 networks such as
+VLAN, ipvlan, macvlan, to the new class of networks designed for
+container orchestration such as
+[Calico](https://www.projectcalico.org/),
+[Weave](https://weave.works/) and
+[Flannel](https://coreos.com/flannel/docs/latest/).  The
 `MesosContainerizer` has the `network/cni` isolator enabled by
 default.
 
@@ -23,32 +23,32 @@ default.
   - [Attaching containers to CNI networks](#attaching-containers-to-cni-networks)
   - [Accessing container network namespace](#accessing-container-network-namespace)
   - [Mesos meta-data to CNI plugins](#mesos-meta-data-to-cni-plugins)
+  - [Adding/Deleting/Modifying CNI networks](#adding-modifying-deleting)
 - [Networking Recipes](#networking-recipes)
   - [A bridge network](#a-bridge-network)
   - [A Calico network](#a-calico-network)
+  - [A Weave network](#a-weave-network)
 - [Limitations](#limitations)
 
 
 ### <a name="motivation"></a>Motivation
 
-The idea of having a separate network namespace for
-each container is attractive for orchestration engines such as Mesos,
-since it provides network isolation to containers and allows users to
-operate on containers as if they were operating on an end-host.
-Without network isolation users have to deal with managing
-network resources such as TCP/UDP ports on an end host, complicating
-the design of their application.
+Having a separate network namespace for each container is attractive
+for orchestration engines such as Mesos, since it provides containers
+with network isolation and allows users to operate on containers as if
+they were operating on an end-host.  Without network isolation users
+have to deal with managing network resources such as TCP/UDP ports on
+an end host, complicating the design of their application.
 
-The challenge in allocating each container with its own network
-namespace is in implementing the ability in the orchestration engine
-to communicate with the underlying network in order to configure IP
-connectivity to the container.  This problem arises due  the diversity
-in terms of the choices of IPAM (IP address management system) and
-networking technologies available for enabling IP connectivity. To
-solve this problem we would need to adopt a driver based network
-orchestration model, where the `MesosContainerizer` can offload the
-business intelligence of configuring IP connectivity to a container,
-to network specific drivers.
+The challenge is in implementing the ability in the orchestration
+engine to communicate with the underlying network in order to
+configure IP connectivity to the container.  This problem arises due
+to the diversity in terms of the choices of IPAM (IP address
+management system) and networking technologies available for enabling
+IP connectivity. To solve this problem we would need to adopt a driver
+based network orchestration model, where the `MesosContainerizer` can
+offload the business intelligence of configuring IP connectivity to a
+container, to network specific drivers.
 
 The **[Container Network Interface
 (CNI)](https://github.com/containernetworking/cni)** is a
@@ -58,16 +58,16 @@ and outputs expected of a CNI plugin (network driver). The
 specification also provides a clear separation of concerns for the
 container run time and the CNI plugin. As per the specification the
 container run time is expected to configure the namespace for the
-container, a unique identifier for the container (container ID),
-and a JSON formatted input to the plugin that defines the
-configuration parameters for a given network. The responsibility of
-the plugin is to create a *veth* pair and attach one of the *veth*
-pair to the network namespace of the container, and the other end to a
-network understood by the plugin.  The CNI specification also allows
-for multiple networks to exist simultaneously, with each network
-represented by a canonical name, and associated with a unique CNI
-configuration. There are already CNI plugins for a variety of networks
-such as bridge, ipvlan, macvlan, Calico, Weave and Flannel.
+container, a unique identifier for the container (container ID), and a
+JSON formatted input to the plugin that defines the configuration
+parameters for a given network. The responsibility of the plugin is to
+create a *veth* pair and attach one of the *veth* pairs to the network
+namespace of the container, and the other end to a network understood
+by the plugin.  The CNI specification also allows for multiple
+networks to exist simultaneously, with each network represented by a
+canonical name, and associated with a unique CNI configuration. There
+are already CNI plugins for a variety of networks such as bridge,
+ipvlan, macvlan, Calico, Weave and Flannel.
 
 Thus, introducing support for CNI in Mesos through the `network/cni`
 isolator provides Mesos with tremendous flexibility to orchestrate
@@ -76,11 +76,11 @@ containers on a wide variety of network technologies.
 
 ### <a name="usage"></a>Usage
 
-The `network/cni` isolator is enabled by default.
-However, to use the isolator there are certain actions required by the
-operator and the frameworks. In this section we specify the steps
-required by the operator to configure CNI networks on Mesos and the
-steps required by frameworks to attach containers to a CNI network.
+The `network/cni` isolator is enabled by default.  However, to use the
+isolator there are certain actions required by the operator and the
+frameworks. In this section we specify the steps required by the
+operator to configure CNI networks on Mesos and the steps required by
+frameworks to attach containers to a CNI network.
 
 #### <a name="configuring-cni-networks"></a>Configuring CNI networks
 
@@ -89,18 +89,18 @@ specifies two flags at Agent startup as follows:
 
 ```{.console}
 sudo mesos-slave --master=<master IP> --ip=<Agent IP>
---work_dir=/var/lib/mesos
---network_cni_config_dir=<location of CNI configs>
---network_cni_plugins_dir=<location of CNI plugsin>
+  --work_dir=/var/lib/mesos
+  --network_cni_config_dir=<location of CNI configs>
+  --network_cni_plugins_dir=<location of CNI plugsin>
 ```
 
-Note that the `network/cni` isolator learns all the available
-networks by looking at the CNI configuration in the
-`--network_cni_config_dir` at startup. This implies that if a new CNI
-network needs to be added after Agent startup, the Agent needs to be
-restarted. The `network/cni` isolator has been designed with `recover`
-capabilities and hence restarting the Agent (and therefore the
-`network/cni` isolator) will not affect container orchestration.
+Note that the `network/cni` isolator learns all the available networks
+by looking at the CNI configuration in the `--network_cni_config_dir`
+at startup. This implies that if a new CNI network needs to be added
+after Agent startup, the Agent needs to be restarted. The
+`network/cni` isolator has been designed with `recover` capabilities
+and hence restarting the Agent (and therefore the `network/cni`
+isolator) will not affect container orchestration.
 
 #### <a name="attaching-containers-to-cni-networks"></a>Attaching containers to CNI networks
 
@@ -215,6 +215,39 @@ completed, executing commands within the container network namespace
 would be simplified and we will no longer have a dependency on the
 `iproute2` package to debug Mesos container networking.
 
+#### <a name="adding-modifying-deleting"></a>Adding/Deleting/Modifying CNI networks
+
+The `network/cni` isolator learns about all the CNI networks by
+reading the CNI configuration specified in `--network_cni_config_dir`
+at startup. Hence, if the operator wants to add a CNI network, the
+corresponding configuration needs to be added to
+`--network_cni_config_dir` and the agent needs to be restarted.
+
+While the `network/cni` isolator learns the CNI networks at startup,
+it does not keep an in-memory copy of the CNI configurations. Whenever
+the `network/cni` isolator needs to attach a container to a CNI
+network, it reads the corresponding configuration from the disk and
+invokes the appropriate plugin with the specified JSON configuration.
+Though the `network/cni` isolator does not keep an in-memory copy of
+the JSON configuration, it checkpoints the CNI configuration used to
+launch a container.  Checkpointing the CNI configuration protects the
+resources associated with the container to be freed correctly when the
+container is destroyed, even if the CNI configuration is deleted.
+Thus, to delete a CNI network, the operator needs to delete the
+corresponding configuration and restart the agent.
+
+While addition and deletion of CNI networks require an agent restart,
+modification to a CNI network does not need a restart. To modify a CNI
+network the operator needs to only change the JSON CNI configuration
+for the network on the disk. The changes made to the CNI configuration
+will be used when the next container on that specific network is
+launched. It is important to note that the changes made to the CNI
+configuration will not affect any existing containers that were
+launched with the un-modified CNI configuration. Since, to tear down
+an exiting container the `network/cni` isolator will be using the
+checkpointed configuration.
+
+
 ### <a name="networking-recipes"></a>Networking Recipes
 
 This section presents examples for launching containers on different
@@ -260,6 +293,13 @@ to the container by invoking a
 [host-local](https://github.com/containernetworking/cni/blob/master/Documentation/host-local.md)
 IPAM.
 
+First, build the CNI plugin according to the instructions in the [CNI
+repository](https://github.com/containernetworking/cni) then copy the
+bridge binary to the plugins directory on each agent.
+
+Next, create the configuration file and copy this to the CNI
+configuration directory on each agent.
+
 ```{.json}
 {
 "name": "cni-test",
@@ -304,8 +344,8 @@ container using the `mesos-execute` framework as follows:
 
 ```{.console}
 sudo mesos-execute --command=/bin/bash
---docker_image=ubuntu:latest --master=<master IP>:5050 --name=ubuntu
---networks=cni-test --no-shell
+  --docker_image=ubuntu:latest --master=<master IP>:5050 --name=ubuntu
+  --networks=cni-test --no-shell
 ```
 
 The above command would pull the `Ubuntu` image from the docker hub
@@ -338,52 +378,50 @@ default via 192.168.0.1 dev eth0
 ```
 
 #### <a name="a-calico-network">A Calico network</a>
-[Calico](https://projectcalico.org/) is an example of an 3rd-party CNI plugin
+
+[Calico](https://projectcalico.org/) provides 3rd-party CNI plugin
 that works out-of-the-box with Mesos CNI.
 
-Calico takes a pure Layer-3 approach to networking, allocating a unique,
-routable IP address to each Meso task. Task routes are distributed by a BGP
-vRouter run on each Agent, which leverages the existing Linux kernel forwarding
-engine without needing tunnels, NAT, or overlays. Additionally, Calico supports
-rich and flexible network policy which it enforces using bookended ACLs on
-each compute node to provide tenant isolation, security groups, and external
-reachability constraints.
+Calico takes a pure Layer-3 approach to networking, allocating a
+unique, routable IP address to each Meso task. Task routes are
+distributed by a BGP vRouter run on each Agent, which leverages the
+existing Linux kernel forwarding engine without needing tunnels, NAT,
+or overlays. Additionally, Calico supports rich and flexible network
+policy which it enforces using bookended ACLs on each compute node to
+provide tenant isolation, security groups, and external reachability
+constraints.
 
-For information on setting up and using Calico-CNI, see
-[Calico's guide on adding Calico-CNI to Mesos](https://github.com/projectcalico/calico-containers/blob/master/docs/mesos/ManualInstallCalicoCNI.md).
+For information on setting up and using Calico-CNI, see [Calico's
+guide on adding Calico-CNI to
+Mesos](https://github.com/projectcalico/calico-containers/blob/master/docs/mesos/ManualInstallCalicoCNI.md).
 
+
+#### <a name="a-weave-network">A Weave network</a>
+
+[Weave](https://weave.works) provides a CNI implementation that works
+out-of-the-box with Mesos.
+
+Weave provides hassle free configuration by assigning an
+ip-per-container and providing a fast DNS on each node. Weave is fast,
+by automatically choosing the fastest path between hosts. Multicast
+addressing and routing is fully supported. It has built in NAT
+traversal and encryption and continues to work even during a network
+partition.  Finally, Multi-cloud deployments are easy to setup and
+maintain, even when there are multiple hops.
+
+For more information on setting up and using Weave CNI, see [Weave's
+CNI
+documentation](https://www.weave.works/docs/net/latest/cni-plugin/)
 
 ### <a name="limitations"></a>Limitations
 
-Although the CNI specification caters to a broad set of network technologies
-the specification still has the following open questions:
-
-* If the IP address of the container is not routeable from outside the
-host, how do users (frameworks) expose TCP/UDP ports for services
-running on their container?
-* What should be the behavior of containers when the CNI configuration
-of the network, on which the containers were launched, is modified or
-deleted?
-
-Given the unspecified nature of these answers, in the current release
-we not aiming to address these questions. Accordingly there are two
-limitations to the `network/cni` isolator:
-
-* Currently the `network/cni` isolator does not provide any
-port mapping capabilities. Therefore if operators are running services
-on networks that are not addressable from outside the Agent host, the
-operators will need to run proxies/gateways for the services on the
-host network to direct traffic to their services.
-* Currently, if the CNI configuration that was used to launch a
-container is deleted or modified, while the container is still
-operational, while it will not hamper the operation of the container,
-the user might encounter errors when the container is deleted, which
-could potentially lead to leakage of resources (IP addresses).
-
-In future releases we plan to address both these limitations.
-[MESOS-4823](https://issues.apache.org/jira/browse/MESOS-4823) is
-tracking the development of port-mapping functionality for the
-`network/cni` isolator and
-[MESOS-5310](https://issues.apache.org/jira/browse/MESOS-5310) is
-tracking the progress of adding the ability to modify and delete CNI
-configuration without affecting container orchestration.
+Currently the `network/cni` isolator does not provide any port mapping
+capabilities. Therefore if operators are running services on networks
+that are not addressable from outside the Agent host, the operators
+will need to run proxies/gateways for the services on the host network
+to direct traffic to their services. We plan to address this
+limitation by having a CNI plugin, within the Mesos repository, that
+provides port mapping functionality and can be used with any other CNI
+plugin, such as the CNI bridge plugin. We are tracking this effort
+through
+[MESOS-6014](https://issues.apache.org/jira/browse/MESOS-6014).

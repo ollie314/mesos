@@ -96,6 +96,8 @@ using mesos::master::detector::MasterDetector;
 using mesos::master::detector::StandaloneMasterDetector;
 using mesos::master::detector::ZooKeeperMasterDetector;
 
+using mesos::slave::ContainerTermination;
+
 namespace mesos {
 namespace internal {
 namespace tests {
@@ -242,7 +244,7 @@ Try<process::Owned<Master>> Master::start(
   // Instantiate some other master dependencies.
   master->state.reset(new mesos::state::protobuf::State(master->storage.get()));
   master->registrar.reset(new master::Registrar(
-      flags, master->state.get(), master::DEFAULT_HTTP_AUTHENTICATION_REALM));
+      flags, master->state.get(), master::READONLY_HTTP_AUTHENTICATION_REALM));
 
   if (slaveRemovalLimiter.isNone() && flags.agent_removal_rate_limit.isSome()) {
     // Parse the flag value.
@@ -341,7 +343,9 @@ Master::~Master()
   // NOTE: Authenticators' lifetimes are tied to libprocess's lifetime.
   // This means that multiple masters in tests are not supported.
   process::http::authentication::unsetAuthenticator(
-      master::DEFAULT_HTTP_AUTHENTICATION_REALM);
+      master::READONLY_HTTP_AUTHENTICATION_REALM);
+  process::http::authentication::unsetAuthenticator(
+      master::READWRITE_HTTP_AUTHENTICATION_REALM);
 
   process::terminate(pid);
   process::wait(pid);
@@ -518,6 +522,11 @@ Slave::~Slave()
     process::http::authorization::unsetCallbacks();
   }
 
+  process::http::authentication::unsetAuthenticator(
+      slave::READONLY_HTTP_AUTHENTICATION_REALM);
+  process::http::authentication::unsetAuthenticator(
+      slave::READWRITE_HTTP_AUTHENTICATION_REALM);
+
   // If either `shutdown()` or `terminate()` were called already,
   // skip the below container cleanup logic.  Additionally, we can skip
   // termination, as the shutdown/terminate will do this too.
@@ -543,7 +552,7 @@ Slave::~Slave()
     AWAIT_READY(containers);
 
     foreach (const ContainerID& containerId, containers.get()) {
-      process::Future<containerizer::Termination> wait =
+      process::Future<ContainerTermination> wait =
         containerizer->wait(containerId);
 
       containerizer->destroy(containerId);

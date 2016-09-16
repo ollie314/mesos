@@ -102,6 +102,18 @@ TEST_F(OsTest, Environment)
 }
 
 
+TEST_F(OsTest, Argv)
+{
+  vector<string> args = {"arg0", "arg1", "arg2"};
+
+  os::raw::Argv _argv(args);
+  char** argv = _argv;
+  for (size_t i = 0; i < args.size(); i++) {
+    EXPECT_EQ(args[i], argv[i]);
+  }
+}
+
+
 TEST_F(OsTest, System)
 {
   EXPECT_EQ(0, os::system("exit 0"));
@@ -156,7 +168,7 @@ TEST_F(OsTest, Nonblock)
   close(pipes[1]);
 
   EXPECT_ERROR(os::nonblock(pipes[0]));
-  EXPECT_ERROR(os::nonblock(pipes[0]));
+  EXPECT_ERROR(os::nonblock(pipes[1]));
 }
 
 
@@ -250,7 +262,7 @@ TEST_F(OsTest, Sysctl)
   ASSERT_SOME(maxproc);
 
   // Table test.
-  Try<vector<kinfo_proc> > processes =
+  Try<vector<kinfo_proc>> processes =
     os::sysctl(CTL_KERN, KERN_PROC, KERN_PROC_ALL).table(maxproc.get());
 
   ASSERT_SOME(processes);
@@ -282,7 +294,7 @@ TEST_F(OsTest, Sysctl)
 
 TEST_F(OsTest, Children)
 {
-  Try<set<pid_t> > children = os::children(getpid());
+  Try<set<pid_t>> children = os::children(getpid());
 
   ASSERT_SOME(children);
   EXPECT_EQ(0u, children.get().size());
@@ -400,7 +412,7 @@ TEST_F(OsTest, Killtree)
 
   // Kill the process tree and follow sessions and groups to make sure
   // we cross the broken link due to the grandchild.
-  Try<list<ProcessTree> > trees =
+  Try<list<ProcessTree>> trees =
     os::killtree(child, SIGKILL, true, true);
 
   ASSERT_SOME(trees);

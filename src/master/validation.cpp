@@ -29,6 +29,8 @@
 #include <stout/none.hpp>
 #include <stout/stringify.hpp>
 
+#include "health-check/health_checker.hpp"
+
 #include "master/master.hpp"
 #include "master/validation.hpp"
 
@@ -108,19 +110,16 @@ Option<Error> validate(
     case mesos::master::Call::GET_STATE:
       return None();
 
-    case mesos::master::Call::GET_STATE_SUMMARY:
-      return None();
-
     case mesos::master::Call::GET_AGENTS:
       return None();
 
     case mesos::master::Call::GET_FRAMEWORKS:
       return None();
 
+    case mesos::master::Call::GET_EXECUTORS:
+      return None();
+
     case mesos::master::Call::GET_TASKS:
-      if (!call.has_get_tasks()) {
-        return Error("Expecting 'get_tasks' to be present");
-      }
       return None();
 
     case mesos::master::Call::GET_ROLES:
@@ -130,22 +129,43 @@ Option<Error> validate(
       return None();
 
     case mesos::master::Call::UPDATE_WEIGHTS:
+      if (!call.has_update_weights()) {
+        return Error("Expecting 'update_weights' to be present");
+      }
       return None();
 
-    case mesos::master::Call::GET_LEADING_MASTER:
+    case mesos::master::Call::GET_MASTER:
       return None();
 
-    case mesos::master::Call::RESERVE_RESOURCES:
+    case mesos::master::Call::RESERVE_RESOURCES: {
       if (!call.has_reserve_resources()) {
         return Error("Expecting 'reserve_resources' to be present");
       }
-      return None();
 
-    case mesos::master::Call::UNRESERVE_RESOURCES:
+      Option<Error> error =
+        Resources::validate(call.reserve_resources().resources());
+
+      if (error.isSome()) {
+        return error;
+      }
+
+      return None();
+    }
+
+    case mesos::master::Call::UNRESERVE_RESOURCES: {
       if (!call.has_unreserve_resources()) {
         return Error("Expecting 'unreserve_resources' to be present");
       }
+
+      Option<Error> error =
+        Resources::validate(call.unreserve_resources().resources());
+
+      if (error.isSome()) {
+        return error;
+      }
+
       return None();
+    }
 
     case mesos::master::Call::CREATE_VOLUMES:
       if (!call.has_create_volumes()) {
@@ -427,12 +447,12 @@ Option<Error> validateDiskInfo(const RepeatedPtrField<Resource>& resources)
 // Validates the uniqueness of the persistence IDs used in the given
 // resources. They need to be unique per role on each slave.
 Option<Error> validateUniquePersistenceID(
-    const RepeatedPtrField<Resource>& resources)
+    const Resources& resources)
 {
   hashmap<string, hashset<string>> persistenceIds;
 
   // Check duplicated persistence ID within the given resources.
-  Resources volumes = Resources(resources).persistentVolumes();
+  Resources volumes = resources.persistentVolumes();
 
   foreach (const Resource& volume, volumes) {
     const string& role = volume.role();
@@ -444,6 +464,25 @@ Option<Error> validateUniquePersistenceID(
     }
 
     persistenceIds[role].insert(id);
+  }
+
+  return None();
+}
+
+
+// Validates that revocable and non-revocable
+// resources of the same name do not exist.
+//
+// TODO(vinod): Is this the right place to do this?
+Option<Error> validateRevocableAndNonRevocableResources(
+    const Resources& _resources)
+{
+  foreach (const string& name, _resources.names()) {
+    Resources resources = _resources.get(name);
+    if (!resources.revocable().empty() && resources != resources.revocable()) {
+      return Error("Cannot use both revocable and non-revocable '" + name +
+                   "' at the same time");
+    }
   }
 
   return None();
@@ -485,13 +524,170 @@ Option<Error> validate(const RepeatedPtrField<Resource>& resources)
 
   error = validateDynamicReservationInfo(resources);
   if (error.isSome()) {
-      return Error("Invalid ReservationInfo: " + error.get().message);
+    return Error("Invalid ReservationInfo: " + error.get().message);
   }
 
   return None();
 }
 
 } // namespace resource {
+
+
+namespace executor {
+namespace internal {
+
+Option<Error> validateType(const ExecutorInfo& executor)
+{
+  switch (executor.type()) {
+    case ExecutorInfo::DEFAULT:
+      if (executor.has_command()) {
+        return Error(
+            "'ExecutorInfo.command' must not be set for 'DEFAULT' executor");
+      }
+      break;
+
+    case ExecutorInfo::CUSTOM:
+      if (!executor.has_command()) {
+        return Error(
+            "'ExecutorInfo.command' must be set for 'CUSTOM' executor");
+      }
+      break;
+
+    case ExecutorInfo::UNKNOWN:
+      // This could happen if a new executor type is introduced in the
+      // protos but the  master doesn't know about it yet (e.g., new
+      // scheduler launches new type of executor on an old master).
+      return None();
+  }
+
+  return None();
+}
+
+
+Option<Error> validateCompatibleExecutorInfo(
+    const ExecutorInfo& executor,
+    Framework* framework,
+    Slave* slave)
+{
+  CHECK_NOTNULL(framework);
+  CHECK_NOTNULL(slave);
+
+  const ExecutorID& executorId = executor.executor_id();
+  Option<ExecutorInfo> executorInfo = None();
+
+  if (slave->hasExecutor(framework->id(), executorId)) {
+    executorInfo =
+      slave->executors.at(framework->id()).at(executorId);
+  }
+
+  if (executorInfo.isSome() && !(executor == executorInfo.get())) {
+    return Error(
+        "ExecutorInfo is not compatible with existing ExecutorInfo"
+        " with same ExecutorID).\n"
+        "------------------------------------------------------------\n"
+        "Existing ExecutorInfo:\n" +
+        stringify(executorInfo.get()) + "\n"
+        "------------------------------------------------------------\n"
+        "ExecutorInfo:\n" +
+        stringify(executor) + "\n"
+        "------------------------------------------------------------\n");
+  }
+
+  return None();
+}
+
+
+Option<Error> validateFrameworkID(
+    const ExecutorInfo& executor,
+    Framework* framework)
+{
+  CHECK_NOTNULL(framework);
+
+  // The master fills in `ExecutorInfo.framework_id` for
+  // executors used in Launch operations.
+  if (!executor.has_framework_id()) {
+    return Error("'ExecutorInfo.framework_id' must be set");
+  }
+
+  if (executor.framework_id() != framework->id()) {
+    return Error(
+        "ExecutorInfo has an invalid FrameworkID"
+        " (Actual: " + stringify(executor.framework_id()) +
+        " vs Expected: " + stringify(framework->id()) + ")");
+  }
+
+  return None();
+}
+
+
+Option<Error> validateShutdownGracePeriod(const ExecutorInfo& executor)
+{
+  // Make sure provided duration is non-negative.
+  if (executor.has_shutdown_grace_period() &&
+      Nanoseconds(executor.shutdown_grace_period().nanoseconds()) <
+        Duration::zero()) {
+    return Error(
+        "ExecutorInfo's 'shutdown_grace_period' must be non-negative");
+  }
+
+  return None();
+}
+
+
+Option<Error> validateResources(const ExecutorInfo& executor)
+{
+  Option<Error> error = resource::validate(executor.resources());
+  if (error.isSome()) {
+    return Error("Executor uses invalid resources: " + error->message);
+  }
+
+  const Resources& resources = executor.resources();
+
+  error = resource::validateUniquePersistenceID(resources);
+  if (error.isSome()) {
+    return Error(
+        "Executor uses duplicate persistence ID: " + error->message);
+  }
+
+  error = resource::validateRevocableAndNonRevocableResources(resources);
+  if (error.isSome()) {
+    return Error("Executor mixes revocable and non-revocable resources: " +
+                 error->message);
+  }
+
+  return None();
+}
+
+
+Option<Error> validate(
+    const ExecutorInfo& executor,
+    Framework* framework,
+    Slave* slave)
+{
+  CHECK_NOTNULL(framework);
+  CHECK_NOTNULL(slave);
+
+  vector<lambda::function<Option<Error>()>> validators = {
+    lambda::bind(internal::validateType, executor),
+    lambda::bind(internal::validateFrameworkID, executor, framework),
+    lambda::bind(internal::validateShutdownGracePeriod, executor),
+    lambda::bind(internal::validateResources, executor),
+    lambda::bind(
+        internal::validateCompatibleExecutorInfo, executor, framework, slave)
+  };
+
+  foreach (const lambda::function<Option<Error>()>& validator, validators) {
+    Option<Error> error = validator();
+    if (error.isSome()) {
+      return error;
+    }
+  }
+
+  return None();
+}
+
+} // namespace internal {
+} // namespace executor {
 
 
 namespace task {
@@ -514,8 +710,7 @@ Option<Error> validateTaskID(const TaskInfo& task)
 
 // Validates that the TaskID does not collide with any existing tasks
 // for the framework.
-Option<Error> validateUniqueTaskID(const TaskInfo& task, Framework*
-    framework)
+Option<Error> validateUniqueTaskID(const TaskInfo& task, Framework* framework)
 {
   const TaskID& taskId = task.task_id();
 
@@ -540,171 +735,6 @@ Option<Error> validateSlaveID(const TaskInfo& task, Slave* slave)
 }
 
 
-// Validates that tasks that use the "same" executor (i.e., same
-// ExecutorID) have an identical ExecutorInfo.
-Option<Error> validateExecutorInfo(
-    const TaskInfo& task, Framework* framework, Slave* slave)
-{
-  if (task.has_executor() == task.has_command()) {
-    return Error(
-        "Task should have at least one (but not both) of CommandInfo or "
-        "ExecutorInfo present");
-  }
-
-  if (task.has_executor()) {
-    // The master currently expects ExecutorInfo.framework_id to be
-    // set even though it is an optional field. Currently, the
-    // scheduler driver ensures that the field is set. For schedulers
-    // not using the driver, we need to do the validation here.
-    CHECK(task.executor().has_framework_id());
-
-    if (task.executor().framework_id() != framework->id()) {
-      return Error(
-          "ExecutorInfo has an invalid FrameworkID"
-          " (Actual: " + stringify(task.executor().framework_id()) +
-          " vs Expected: " + stringify(framework->id()) + ")");
-    }
-
-    const ExecutorID& executorId = task.executor().executor_id();
-    Option<ExecutorInfo> executorInfo = None();
-
-    if (slave->hasExecutor(framework->id(), executorId)) {
-      executorInfo =
-        slave->executors.get(framework->id()).get().get(executorId);
-    }
-
-    if (executorInfo.isSome() && !(task.executor() == executorInfo.get())) {
-      return Error(
-          "Task has invalid ExecutorInfo (existing ExecutorInfo"
-          " with same ExecutorID is not compatible).\n"
-          "------------------------------------------------------------\n"
-          "Existing ExecutorInfo:\n" +
-          stringify(executorInfo.get()) + "\n"
-          "------------------------------------------------------------\n"
-          "Task's ExecutorInfo:\n" +
-          stringify(task.executor()) + "\n"
-          "------------------------------------------------------------\n");
-    }
-
-    // Make sure provided duration is non-negative.
-    if (task.executor().has_shutdown_grace_period() &&
-        Nanoseconds(task.executor().shutdown_grace_period().nanoseconds()) <
-          Duration::zero()) {
-      return Error(
-          "ExecutorInfo's 'shutdown_grace_period' must be non-negative");
-    }
-  }
-
-  return None();
-}
-
-
-// Validates that the task and the executor are using proper amount of
-// resources. For instance, the used resources by a task on a slave
-// should not exceed the total resources offered on that slave.
-Option<Error> validateResourceUsage(
-    const TaskInfo& task,
-    Framework* framework,
-    Slave* slave,
-    const Resources& offered)
-{
-  Resources taskResources = task.resources();
-
-  if (taskResources.empty()) {
-    return Error("Task uses no resources");
-  }
-
-  Resources executorResources;
-  if (task.has_executor()) {
-    executorResources = task.executor().resources();
-  }
-
-  // Validate minimal cpus and memory resources of executor and log
-  // warnings if not set.
-  if (task.has_executor()) {
-    // TODO(martin): MESOS-1807. Return Error instead of logging a
-    // warning in 0.22.0.
-    Option<double> cpus =  executorResources.cpus();
-    if (cpus.isNone() || cpus.get() < MIN_CPUS) {
-      LOG(WARNING)
-        << "Executor " << stringify(task.executor().executor_id())
-        << " for task " << stringify(task.task_id())
-        << " uses less CPUs ("
-        << (cpus.isSome() ? stringify(cpus.get()) : "None")
-        << ") than the minimum required (" << MIN_CPUS
-        << "). Please update your executor, as this will be mandatory "
-        << "in future releases.";
-    }
-
-    Option<Bytes> mem = executorResources.mem();
-    if (mem.isNone() || mem.get() < MIN_MEM) {
-      LOG(WARNING)
-        << "Executor " << stringify(task.executor().executor_id())
-        << " for task " << stringify(task.task_id())
-        << " uses less memory ("
-        << (mem.isSome() ? stringify(mem.get().megabytes()) : "None")
-        << ") than the minimum required (" << MIN_MEM
-        << "). Please update your executor, as this will be mandatory "
-        << "in future releases.";
-    }
-  }
-
-  // Validate if resources needed by the task (and its executor in
-  // case the executor is new) are available.
-  Resources total = taskResources;
-  if (!slave->hasExecutor(framework->id(), task.executor().executor_id())) {
-    total += executorResources;
-  }
-
-  if (!offered.contains(total)) {
-    return Error(
-        "Task uses more resources " + stringify(total) +
-        " than available " + stringify(offered));
-  }
-
-  return None();
-}
-
-
-// Validates that the resources specified by the task are valid.
-Option<Error> validateResources(const TaskInfo& task)
-{
-  Option<Error> error = resource::validate(task.resources());
-  if (error.isSome()) {
-    return Error("Task uses invalid resources: " + error.get().message);
-  }
-
-  Resources total = task.resources();
-
-  if (task.has_executor()) {
-    error = resource::validate(task.executor().resources());
-    if (error.isSome()) {
-      return Error("Executor uses invalid resources: " + error.get().message);
-    }
-
-    total += task.executor().resources();
-  }
-
-  // A task and its executor can either use non-revocable resources
-  // or revocable resources of a given name but not both.
-  foreach (const string& name, total.names()) {
-    Resources resources = total.get(name);
-    if (!resources.revocable().empty() &&
-        resources != resources.revocable()) {
-      return Error("Task (and its executor, if exists) uses both revocable and"
-                   " non-revocable " + name);
-    }
-  }
-
-  error = resource::validateUniquePersistenceID(total);
-  if (error.isSome()) {
-    return error;
-  }
-
-  return None();
-}
-
-
 Option<Error> validateKillPolicy(const TaskInfo& task)
 {
   if (task.has_kill_policy() &&
@@ -718,34 +748,95 @@ Option<Error> validateKillPolicy(const TaskInfo& task)
 }
 
 
-} // namespace internal {
+Option<Error> validateHealthCheck(const TaskInfo& task)
+{
+  if (task.has_health_check()) {
+    Option<Error> error = health::validation::healthCheck(task.health_check());
+    if (error.isSome()) {
+      return Error("Task uses invalid health check: " + error->message);
+    }
+  }
+
+  return None();
+}
 
 
-Option<Error> validate(
+Option<Error> validateResources(const TaskInfo& task)
+{
+  if (task.resources().empty()) {
+    return Error("Task uses no resources");
+  }
+
+  Option<Error> error = resource::validate(task.resources());
+  if (error.isSome()) {
+    return Error("Task uses invalid resources: " + error->message);
+  }
+
+  const Resources& resources = task.resources();
+
+  error = resource::validateUniquePersistenceID(resources);
+  if (error.isSome()) {
+    return Error("Task uses duplicate persistence ID: " + error->message);
+  }
+
+  error = resource::validateRevocableAndNonRevocableResources(resources);
+  if (error.isSome()) {
+    return Error("Task mixes revocable and non-revocable resources: " +
+                 error->message);
+  }
+
+  return None();
+}
+
+
+Option<Error> validateTaskAndExecutorResources(const TaskInfo& task)
+{
+  Resources total = task.resources();
+  if (task.has_executor()) {
+    total += task.executor().resources();
+  }
+
+  Option<Error> error = resource::validate(total);
+  if (error.isSome()) {
+    return Error(
+        "Task and its executor use invalid resources: " + error->message);
+  }
+
+  error = resource::validateUniquePersistenceID(total);
+  if (error.isSome()) {
+    return Error("Task and its executor use duplicate persistence ID: " +
+                 error->message);
+  }
+
+  error = resource::validateRevocableAndNonRevocableResources(total);
+  if (error.isSome()) {
+    return Error("Task and its executor mix revocable and non-revocable"
+                 " resources: " + error->message);
+  }
+
+  return None();
+}
+
+
+// Validates task specific fields except its executor (if it exists).
+Option<Error> validateTask(
     const TaskInfo& task,
     Framework* framework,
-    Slave* slave,
-    const Resources& offered)
+    Slave* slave)
 {
   CHECK_NOTNULL(framework);
   CHECK_NOTNULL(slave);
 
   // NOTE: The order in which the following validate functions are
-  // executed does matter! For example, 'validateResourceUsage'
-  // assumes that ExecutorInfo is valid which is verified by
-  // 'validateExecutorInfo'.
+  // executed does matter!
   vector<lambda::function<Option<Error>()>> validators = {
     lambda::bind(internal::validateTaskID, task),
     lambda::bind(internal::validateUniqueTaskID, task, framework),
     lambda::bind(internal::validateSlaveID, task, slave),
-    lambda::bind(internal::validateExecutorInfo, task, framework, slave),
-    lambda::bind(internal::validateResources, task),
     lambda::bind(internal::validateKillPolicy, task),
-    lambda::bind(
-        internal::validateResourceUsage, task, framework, slave, offered)
+    lambda::bind(internal::validateHealthCheck, task),
+    lambda::bind(internal::validateResources, task)
   };
-
-  // TODO(benh): Add a validateHealthCheck function.
 
   // TODO(jieyu): Add a validateCommandInfo function.
 
@@ -758,6 +849,326 @@ Option<Error> validate(
 
   return None();
 }
+
+
+// Validates `Task.executor` if it exists.
+Option<Error> validateExecutor(
+    const TaskInfo& task,
+    Framework* framework,
+    Slave* slave,
+    const Resources& offered)
+{
+  CHECK_NOTNULL(framework);
+  CHECK_NOTNULL(slave);
+
+  if (task.has_executor() == task.has_command()) {
+    return Error(
+        "Task should have at least one (but not both) of CommandInfo or "
+        "ExecutorInfo present");
+  }
+
+  Resources total = task.resources();
+
+  Option<Error> error = None();
+
+  if (task.has_executor()) {
+    const ExecutorInfo& executor = task.executor();
+
+    // Do the general validation first.
+    error = executor::internal::validate(executor, framework, slave);
+    if (error.isSome()) {
+      return error;
+    }
+
+    // Now do specific validation when an executor is specified on `Task`.
+
+    // TODO(vinod): Revisit this when we allow schedulers to explicitly
+    // specify 'DEFAULT' executor in the `LAUNCH` operation.
+
+    if (executor.has_type() && executor.type() != ExecutorInfo::CUSTOM) {
+      return Error("'ExecutorInfo.type' must be 'CUSTOM'");
+    }
+
+    // While `ExecutorInfo.command` is optional in the protobuf,
+    // semantically it is still required for backwards compatibility.
+    if (!executor.has_command()) {
+      return Error("'ExecutorInfo.command' must be set");
+    }
+
+    // TODO(martin): MESOS-1807. Return Error instead of logging a
+    // warning.
+    const Resources& executorResources = executor.resources();
+
+    // Ensure there are no shared resources in the executor resources.
+    //
+    // TODO(anindya_sinha): For simplicity we currently don't
+    // allow shared resources in ExecutorInfo. See comments in
+    // `HierarchicalAllocatorProcess::updateAllocation()` for more
+    // details. Remove this check once we start supporting it.
+    if (!executorResources.shared().empty()) {
+      return Error(
+          "Executor resources " + stringify(executorResources) +
+          " should not contain any shared resources");
+    }
+
+    Option<double> cpus =  executorResources.cpus();
+    if (cpus.isNone() || cpus.get() < MIN_CPUS) {
+      LOG(WARNING)
+        << "Executor '" << task.executor().executor_id()
+        << "' for task '" << task.task_id()
+        << "' uses less CPUs ("
+        << (cpus.isSome() ? stringify(cpus.get()) : "None")
+        << ") than the minimum required (" << MIN_CPUS
+        << "). Please update your executor, as this will be mandatory "
+        << "in future releases.";
+    }
+
+    Option<Bytes> mem = executorResources.mem();
+    if (mem.isNone() || mem.get() < MIN_MEM) {
+      LOG(WARNING)
+        << "Executor '" << task.executor().executor_id()
+        << "' for task '" << task.task_id()
+        << "' uses less memory ("
+        << (mem.isSome() ? stringify(mem.get().megabytes()) : "None")
+        << ") than the minimum required (" << MIN_MEM
+        << "). Please update your executor, as this will be mandatory "
+        << "in future releases.";
+    }
+
+    if (!slave->hasExecutor(framework->id(), task.executor().executor_id())) {
+      total += executorResources;
+    }
+  }
+
+  // Now validate combined resources of task and executor.
+
+  // NOTE: This is refactored into a separate function
+  // so that it can be easily unit tested.
+  error = task::internal::validateTaskAndExecutorResources(task);
+  if (error.isSome()) {
+    return error;
+  }
+
+  if (!offered.contains(total)) {
+    return Error(
+        "Total resources " + stringify(total) + " required by task and its"
+        " executor is more than available " + stringify(offered));
+  }
+
+  return None();
+}
+
+} // namespace internal {
+
+
+// Validate task and its executor (if it exists).
+Option<Error> validate(
+    const TaskInfo& task,
+    Framework* framework,
+    Slave* slave,
+    const Resources& offered)
+{
+  CHECK_NOTNULL(framework);
+  CHECK_NOTNULL(slave);
+
+  vector<lambda::function<Option<Error>()>> validators = {
+    lambda::bind(internal::validateTask, task, framework, slave),
+    lambda::bind(internal::validateExecutor, task, framework, slave, offered)
+  };
+
+  foreach (const lambda::function<Option<Error>()>& validator, validators) {
+    Option<Error> error = validator();
+    if (error.isSome()) {
+      return error;
+    }
+  }
+
+  return None();
+}
+
+
+namespace group {
+
+namespace internal {
+
+Option<Error> validateTask(
+    const TaskInfo& task,
+    Framework* framework,
+    Slave* slave)
+{
+  CHECK_NOTNULL(framework);
+  CHECK_NOTNULL(slave);
+
+  // Do the general validation first.
+  Option<Error> error = task::internal::validateTask(task, framework, slave);
+  if (error.isSome()) {
+    return error;
+  }
+
+  // Now do `TaskGroup` specific validation.
+
+  if (task.has_executor()) {
+    return Error("'TaskInfo.executor' must not be set");
+  }
+
+  if (task.has_container()) {
+    if (task.container().network_infos().size() > 0) {
+      return Error("NetworkInfos must not be set on the task");
+    }
+
+    if (task.container().type() == ContainerInfo::DOCKER) {
+      return Error("Docker ContainerInfo is not supported on the task");
+    }
+  }
+
+  return None();
+}
+
+
+Option<Error> validateTaskGroupAndExecutorResources(
+    const TaskGroupInfo& taskGroup,
+    const ExecutorInfo& executor)
+{
+  Resources total = executor.resources();
+  foreach (const TaskInfo& task, taskGroup.tasks()) {
+    total += task.resources();
+  }
+
+  Option<Error> error = resource::validateUniquePersistenceID(total);
+  if (error.isSome()) {
+    return Error("Task group and executor use duplicate persistence ID: " +
+                 error->message);
+  }
+
+  error = resource::validateRevocableAndNonRevocableResources(total);
+  if (error.isSome()) {
+    return Error("Task group and executor mix revocable and non-revocable"
+                 " resources: " + error->message);
+  }
+
+  return None();
+}
+
+
+Option<Error> validateExecutor(
+    const TaskGroupInfo& taskGroup,
+    const ExecutorInfo& executor,
+    Framework* framework,
+    Slave* slave,
+    const Resources& offered)
+{
+  CHECK_NOTNULL(framework);
+  CHECK_NOTNULL(slave);
+
+  // Do the general validation first.
+  Option<Error> error =
+    executor::internal::validate(executor, framework, slave);
+
+  if (error.isSome()) {
+    return error;
+  }
+
+  // Now do `TaskGroup` specific validation.
+
+  if (!executor.has_type()) {
+    return Error("'ExecutorInfo.type' must be set");
+  }
+
+  if (executor.type() == ExecutorInfo::UNKNOWN) {
+    return Error("Unknown executor type");
+  }
+
+  if (executor.has_container() &&
+      executor.container().type() == ContainerInfo::DOCKER) {
+    return Error("Docker ContainerInfo is not supported on the executor");
+  }
+
+  const Resources& executorResources = executor.resources();
+
+  // Validate minimal cpus and memory resources of executor.
+  Option<double> cpus =  executorResources.cpus();
+  if (cpus.isNone() || cpus.get() < MIN_CPUS) {
+    return Error(
+      "Executor '" + stringify(executor.executor_id()) +
+      "' uses less CPUs (" +
+      (cpus.isSome() ? stringify(cpus.get()) : "None") +
+      ") than the minimum required (" + stringify(MIN_CPUS) + ")");
+  }
+
+  Option<Bytes> mem = executorResources.mem();
+  if (mem.isNone() || mem.get() < MIN_MEM) {
+    return Error(
+      "Executor '" + stringify(executor.executor_id()) +
+      "' uses less memory (" +
+      (mem.isSome() ? stringify(mem.get().megabytes()) : "None") +
+      ") than the minimum required (" + stringify(MIN_MEM) + ")");
+  }
+
+  Option<Bytes> disk = executorResources.disk();
+  if (disk.isNone()) {
+    return Error(
+      "Executor '" + stringify(executor.executor_id()) + "' uses no disk");
+  }
+
+  // Validate combined resources of task group and executor.
+
+  // NOTE: This is refactored into a separate function so that it can
+  // be easily unit tested.
+  error = internal::validateTaskGroupAndExecutorResources(taskGroup, executor);
+  if (error.isSome()) {
+    return error;
+  }
+
+  Resources total;
+  foreach (const TaskInfo& task, taskGroup.tasks()) {
+    total += task.resources();
+  }
+
+  if (!slave->hasExecutor(framework->id(), executor.executor_id())) {
+    total += executorResources;
+  }
+
+  if (!offered.contains(total)) {
+    return Error(
+        "Total resources " + stringify(total) + " required by task group and"
+        " its executor are more than available " + stringify(offered));
+  }
+
+  return None();
+}
+
+} // namespace internal {
+
+
+Option<Error> validate(
+    const TaskGroupInfo& taskGroup,
+    const ExecutorInfo& executor,
+    Framework* framework,
+    Slave* slave,
+    const Resources& offered)
+{
+  CHECK_NOTNULL(framework);
+  CHECK_NOTNULL(slave);
+
+  foreach (const TaskInfo& task, taskGroup.tasks()) {
+    Option<Error> error = internal::validateTask(task, framework, slave);
+    if (error.isSome()) {
+      return Error("Task '" + stringify(task.task_id()) + "' is invalid: " +
+                   error->message);
+    }
+  }
+
+  Option<Error> error =
+    internal::validateExecutor(taskGroup, executor, framework, slave, offered);
+
+  if (error.isSome()) {
+    return error;
+  }
+
+  return None();
+}
+
+} // namespace group {
 
 } // namespace task {
 
@@ -893,7 +1304,8 @@ Option<Error> validateFramework(
 
 // Validates that all offers belong to the same valid slave.
 Option<Error> validateSlave(
-    const RepeatedPtrField<OfferID>& offerIds, Master* master)
+    const RepeatedPtrField<OfferID>& offerIds,
+    Master* master)
 {
   Option<SlaveID> slaveId;
 
@@ -1116,7 +1528,9 @@ Option<Error> validate(
 
 Option<Error> validate(
     const Offer::Operation::Destroy& destroy,
-    const Resources& checkpointedResources)
+    const Resources& checkpointedResources,
+    const hashmap<FrameworkID, Resources>& usedResources,
+    const hashmap<FrameworkID, hashmap<TaskID, TaskInfo>>& pendingTasks)
 {
   Option<Error> error = resource::validate(destroy.volumes());
   if (error.isSome()) {
@@ -1130,6 +1544,39 @@ Option<Error> validate(
 
   if (!checkpointedResources.contains(destroy.volumes())) {
     return Error("Persistent volumes not found");
+  }
+
+  // Ensure the volumes being destroyed are not in use currently.
+  // This check is mainly to validate destruction of shared volumes since
+  // it is not possible for a non-shared resource to appear in an offer
+  // if it is already in use.
+  foreachvalue (const Resources& resources, usedResources) {
+    foreach (const Resource& volume, destroy.volumes()) {
+      if (resources.contains(volume)) {
+        return Error("Persistent volumes in use");
+      }
+    }
+  }
+
+  // Ensure that the volumes being destroyed are not requested by any pending
+  // task. This check is mainly to validate destruction of shared volumes.
+  // Note that resource requirements in pending tasks are not validated yet
+  // so it is possible that the DESTROY validation fails due to invalid
+  // pending tasks.
+  typedef hashmap<TaskID, TaskInfo> TaskMap;
+  foreachvalue(const TaskMap& tasks, pendingTasks) {
+    foreachvalue (const TaskInfo& task, tasks) {
+      Resources resources = task.resources();
+      if (task.has_executor()) {
+        resources += task.executor().resources();
+      }
+
+      foreach (const Resource& volume, destroy.volumes()) {
+        if (resources.contains(volume)) {
+          return Error("Persistent volume in pending tasks");
+        }
+      }
+    }
   }
 
   return None();

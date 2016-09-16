@@ -17,6 +17,7 @@
 #ifndef __NETWORK_CNI_ISOLATOR_HPP__
 #define __NETWORK_CNI_ISOLATOR_HPP__
 
+#include <process/id.hpp>
 #include <process/subprocess.hpp>
 
 #include <stout/subcommand.hpp>
@@ -31,6 +32,10 @@
 namespace mesos {
 namespace internal {
 namespace slave {
+
+// Forward declarations.
+class NetworkCniIsolatorSetup;
+
 
 // This isolator implements support for Container Network Interface (CNI)
 // specification <https://github.com/appc/cni/blob/master/SPEC.md> . It
@@ -110,7 +115,8 @@ private:
       const hashmap<std::string, NetworkConfigInfo>& _networkConfigs,
       const Option<std::string>& _rootDir = None(),
       const Option<std::string>& _pluginDir = None())
-    : flags(_flags),
+    : ProcessBase(process::ID::generate("mesos-network-cni-isolator")),
+      flags(_flags),
       networkConfigs(_networkConfigs),
       rootDir(_rootDir),
       pluginDir(_pluginDir) {}
@@ -119,6 +125,9 @@ private:
       const ContainerID& containerId,
       pid_t pid,
       const list<process::Future<Nothing>>& attaches);
+
+  process::Future<Nothing> __isolate(
+      const NetworkCniIsolatorSetup& setup);
 
   Try<Nothing> _recover(
       const ContainerID& containerId,

@@ -60,34 +60,36 @@
 
 #include "usage/usage.hpp"
 
+using namespace process;
 
 using std::list;
 using std::map;
 using std::string;
 using std::vector;
 
-using namespace process;
-
 using mesos::slave::ContainerLogger;
+using mesos::slave::ContainerTermination;
+
+using mesos::internal::slave::state::SlaveState;
+using mesos::internal::slave::state::FrameworkState;
+using mesos::internal::slave::state::ExecutorState;
+using mesos::internal::slave::state::RunState;
 
 namespace mesos {
 namespace internal {
 namespace slave {
 
-using state::SlaveState;
-using state::FrameworkState;
-using state::ExecutorState;
-using state::RunState;
-
-
 // Declared in header, see explanation there.
 const string DOCKER_NAME_PREFIX = "mesos-";
+
 
 // Declared in header, see explanation there.
 const string DOCKER_NAME_SEPERATOR = ".";
 
+
 // Declared in header, see explanation there.
 const string DOCKER_SYMLINK_DIRECTORY = "docker/links";
+
 
 // Parse the ContainerID from a Docker container and return None if
 // the container was not launched from Mesos.
@@ -131,7 +133,8 @@ Option<ContainerID> parse(const Docker::Container& container)
 
 Try<DockerContainerizer*> DockerContainerizer::create(
     const Flags& flags,
-    Fetcher* fetcher)
+    Fetcher* fetcher,
+    const Option<NvidiaComponents>& nvidia)
 {
   // Create and initialize the container logger module.
   Try<ContainerLogger*> logger =
@@ -241,7 +244,7 @@ DockerContainerizerProcess::Container::create(
     const string& directory,
     const Option<string>& user,
     const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
+    const map<string, string>& environment,
     bool checkpoint,
     const Flags& flags)
 {
@@ -285,7 +288,7 @@ DockerContainerizerProcess::Container::create(
   bool symlinked = false;
   string containerWorkdir = directory;
   // We need to symlink the sandbox directory if the directory
-  // path has a colon, as Docker CLI uses the colon as a seperator.
+  // path has a colon, as Docker CLI uses the colon as a separator.
   if (strings::contains(directory, ":")) {
     containerWorkdir = path::join(dockerSymlinkPath, id.value());
 
@@ -301,7 +304,6 @@ DockerContainerizerProcess::Container::create(
 
   Option<ContainerInfo> containerInfo = None();
   Option<CommandInfo> commandInfo = None();
-  Option<map<string, string>> environment = None();
   bool launchesExecutorContainer = false;
   if (taskInfo.isSome() && flags.docker_mesos_image.isSome()) {
     // Override the container and command to launch an executor
@@ -360,13 +362,6 @@ DockerContainerizerProcess::Container::create(
 
     containerInfo = newContainerInfo;
     commandInfo = newCommandInfo;
-    environment = executorEnvironment(
-        executorInfo,
-        containerWorkdir,
-        slaveId,
-        slavePid,
-        checkpoint,
-        flags);
     launchesExecutorContainer = true;
   }
 
@@ -377,7 +372,6 @@ DockerContainerizerProcess::Container::create(
       containerWorkdir,
       user,
       slaveId,
-      slavePid,
       checkpoint,
       symlinked,
       flags,
@@ -675,35 +669,12 @@ Future<Nothing> DockerContainerizer::recover(
 
 Future<bool> DockerContainerizer::launch(
     const ContainerID& containerId,
+    const Option<TaskInfo>& taskInfo,
     const ExecutorInfo& executorInfo,
     const string& directory,
     const Option<string>& user,
     const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
-    bool checkpoint)
-{
-  return dispatch(
-      process.get(),
-      &DockerContainerizerProcess::launch,
-      containerId,
-      None(),
-      executorInfo,
-      directory,
-      user,
-      slaveId,
-      slavePid,
-      checkpoint);
-}
-
-
-Future<bool> DockerContainerizer::launch(
-    const ContainerID& containerId,
-    const TaskInfo& taskInfo,
-    const ExecutorInfo& executorInfo,
-    const string& directory,
-    const Option<string>& user,
-    const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
+    const map<string, string>& environment,
     bool checkpoint)
 {
   return dispatch(
@@ -715,7 +686,7 @@ Future<bool> DockerContainerizer::launch(
       directory,
       user,
       slaveId,
-      slavePid,
+      environment,
       checkpoint);
 }
 
@@ -743,7 +714,7 @@ Future<ResourceStatistics> DockerContainerizer::usage(
 }
 
 
-Future<containerizer::Termination> DockerContainerizer::wait(
+Future<ContainerTermination> DockerContainerizer::wait(
     const ContainerID& containerId)
 {
   return dispatch(
@@ -818,15 +789,15 @@ Future<Nothing> DockerContainerizerProcess::_recover(
       foreachvalue (const ExecutorState& executor, framework.executors) {
         if (executor.info.isNone()) {
           LOG(WARNING) << "Skipping recovery of executor '" << executor.id
-                       << "' of framework '" << framework.id
-                       << "' because its info could not be recovered";
+                       << "' of framework " << framework.id
+                       << " because its info could not be recovered";
           continue;
         }
 
         if (executor.latest.isNone()) {
           LOG(WARNING) << "Skipping recovery of executor '" << executor.id
-                       << "' of framework '" << framework.id
-                       << "' because its latest run could not be recovered";
+                       << "' of framework " << framework.id
+                       << " because its latest run could not be recovered";
           continue;
         }
 
@@ -840,16 +811,16 @@ Future<Nothing> DockerContainerizerProcess::_recover(
         // We need the pid so the reaper can monitor the executor so
         // skip this executor if it's not present. This is not an
         // error because the slave will try to wait on the container
-        // which will return a failed Termination and everything will
-        // get cleaned up.
+        // which will return a failed 'ContainerTermination' and
+        // everything will get cleaned up.
         if (!run.get().forkedPid.isSome()) {
           continue;
         }
 
         if (run.get().completed) {
           VLOG(1) << "Skipping recovery of executor '" << executor.id
-                  << "' of framework '" << framework.id
-                  << "' because its latest run "
+                  << "' of framework " << framework.id
+                  << " because its latest run "
                   << containerId << " is completed";
           continue;
         }
@@ -858,8 +829,8 @@ Future<Nothing> DockerContainerizerProcess::_recover(
         if (executorInfo.has_container() &&
             executorInfo.container().type() != ContainerInfo::DOCKER) {
           LOG(INFO) << "Skipping recovery of executor '" << executor.id
-                    << "' of framework '" << framework.id
-                    << "' because it was not launched from docker "
+                    << "' of framework " << framework.id
+                    << " because it was not launched from docker "
                     << "containerizer";
           continue;
         }
@@ -867,15 +838,15 @@ Future<Nothing> DockerContainerizerProcess::_recover(
         if (!executorInfo.has_container() &&
             !existingContainers.contains(containerId)) {
           LOG(INFO) << "Skipping recovery of executor '" << executor.id
-                    << "' of framework '" << framework.id
-                    << "' because its executor is not marked as docker "
+                    << "' of framework " << framework.id
+                    << " because its executor is not marked as docker "
                     << "and the docker container doesn't exist";
           continue;
         }
 
         LOG(INFO) << "Recovering container '" << containerId
                   << "' for executor '" << executor.id
-                  << "' of framework '" << framework.id << "'";
+                  << "' of framework " << framework.id;
 
         // Create and store a container.
         Container* container = new Container(containerId);
@@ -995,9 +966,11 @@ Future<bool> DockerContainerizerProcess::launch(
     const string& directory,
     const Option<string>& user,
     const SlaveID& slaveId,
-    const PID<Slave>& slavePid,
+    const map<string, string>& environment,
     bool checkpoint)
 {
+  CHECK(!containerId.has_parent());
+
   if (containers_.contains(containerId)) {
     return Failure("Container already started");
   }
@@ -1027,7 +1000,7 @@ Future<bool> DockerContainerizerProcess::launch(
       directory,
       user,
       slaveId,
-      slavePid,
+      environment,
       checkpoint,
       flags);
 
@@ -1041,11 +1014,11 @@ Future<bool> DockerContainerizerProcess::launch(
     LOG(INFO) << "Starting container '" << containerId
               << "' for task '" << taskInfo.get().task_id()
               << "' (and executor '" << executorInfo.executor_id()
-              << "') of framework '" << executorInfo.framework_id() << "'";
+              << "') of framework " << executorInfo.framework_id();
   } else {
     LOG(INFO) << "Starting container '" << containerId
               << "' for executor '" << executorInfo.executor_id()
-              << "' and framework '" << executorInfo.framework_id() << "'";
+              << "' and framework " << executorInfo.framework_id();
   }
 
   Future<Nothing> f = Nothing();
@@ -1228,6 +1201,7 @@ Future<Docker::Container> DockerContainerizerProcess::launchExecutorContainer(
         flags.sandbox_directory,
         container->resources,
         container->environment,
+        None(), // No extra devices.
         subprocessInfo.out,
         subprocessInfo.err);
 
@@ -1358,7 +1332,7 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
         subprocessInfo.out,
         subprocessInfo.err,
         SETSID,
-        launchFlags,
+        &launchFlags,
         environment,
         None(),
         parentHooks,
@@ -1423,24 +1397,25 @@ Future<Nothing> DockerContainerizerProcess::update(
     const Resources& _resources,
     bool force)
 {
+  CHECK(!containerId.has_parent());
+
   if (!containers_.contains(containerId)) {
-    LOG(WARNING) << "Ignoring updating unknown container: "
-                 << containerId;
+    LOG(WARNING) << "Ignoring updating unknown container " << containerId;
     return Nothing();
   }
 
   Container* container = containers_[containerId];
 
   if (container->state == Container::DESTROYING)  {
-    LOG(INFO) << "Ignoring updating container '" << containerId
-              << "' that is being destroyed";
+    LOG(INFO) << "Ignoring updating container " << containerId
+              << " that is being destroyed";
     return Nothing();
   }
 
   if (container->resources == _resources && !force) {
-    LOG(INFO) << "Ignoring updating container '" << containerId
-              << "' with resources passed to update is identical to "
-              << "existing resources";
+    LOG(INFO) << "Ignoring updating container " << containerId
+              << " because resources passed to update are identical to"
+              << " existing resources";
     return Nothing();
   }
 
@@ -1529,8 +1504,8 @@ Future<Nothing> DockerContainerizerProcess::__update(
                    cpuCgroup.error());
   } else if (cpuCgroup.isNone()) {
     LOG(WARNING) << "Container " << containerId
-                 << " does not appear to be a member of a cgroup "
-                 << "where the 'cpu' subsystem is mounted";
+                 << " does not appear to be a member of a cgroup"
+                 << " where the 'cpu' subsystem is mounted";
   }
 
   // And update the CPU shares (if applicable).
@@ -1591,8 +1566,8 @@ Future<Nothing> DockerContainerizerProcess::__update(
                    memoryCgroup.error());
   } else if (memoryCgroup.isNone()) {
     LOG(WARNING) << "Container " << containerId
-                 << " does not appear to be a member of a cgroup "
-                 << "where the 'memory' subsystem is mounted";
+                 << " does not appear to be a member of a cgroup"
+                 << " where the 'memory' subsystem is mounted";
   }
 
   // And update the memory limits (if applicable).
@@ -1653,6 +1628,8 @@ Future<Nothing> DockerContainerizerProcess::__update(
 Future<ResourceStatistics> DockerContainerizerProcess::usage(
     const ContainerID& containerId)
 {
+  CHECK(!containerId.has_parent());
+
 #ifndef __linux__
   return Failure("Does not support usage() on non-linux platform");
 #else
@@ -1803,9 +1780,11 @@ Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
 }
 
 
-Future<containerizer::Termination> DockerContainerizerProcess::wait(
+Future<ContainerTermination> DockerContainerizerProcess::wait(
     const ContainerID& containerId)
 {
+  CHECK(!containerId.has_parent());
+
   if (!containers_.contains(containerId)) {
     return Failure("Unknown container: " + stringify(containerId));
   }
@@ -1818,15 +1797,17 @@ void DockerContainerizerProcess::destroy(
     const ContainerID& containerId,
     bool killed)
 {
+  CHECK(!containerId.has_parent());
+
   if (!containers_.contains(containerId)) {
-    LOG(WARNING) << "Ignoring destroy of unknown container: " << containerId;
+    LOG(WARNING) << "Ignoring destroy of unknown container " << containerId;
     return;
   }
 
   Container* container = containers_[containerId];
 
   if (container->launch.isFailed()) {
-    VLOG(1) << "Container '" << containerId << "' launch failed";
+    VLOG(1) << "Container " << containerId << " launch failed";
 
     // This means we failed to launch the container and we're trying to
     // cleanup.
@@ -1834,7 +1815,7 @@ void DockerContainerizerProcess::destroy(
 
     // NOTE: The launch error message will be retrieved by the slave
     // and properly set in the corresponding status update.
-    container->termination.set(containerizer::Termination());
+    container->termination.set(ContainerTermination());
 
     containers_.erase(containerId);
     delete container;
@@ -1847,7 +1828,7 @@ void DockerContainerizerProcess::destroy(
     return;
   }
 
-  LOG(INFO) << "Destroying container '" << containerId << "'";
+  LOG(INFO) << "Destroying container " << containerId;
 
   // It's possible that destroy is getting called before
   // DockerContainerizer::launch has completed (i.e., after we've
@@ -1871,12 +1852,11 @@ void DockerContainerizerProcess::destroy(
   // cleanup.
 
   if (container->state == Container::FETCHING) {
-    LOG(INFO) << "Destroying Container '"
-              << containerId << "' in FETCHING state";
+    LOG(INFO) << "Destroying container " << containerId << " in FETCHING state";
 
     fetcher->kill(containerId);
 
-    containerizer::Termination termination;
+    ContainerTermination termination;
     termination.set_message("Container destroyed while fetching");
     container->termination.set(termination);
 
@@ -1890,12 +1870,11 @@ void DockerContainerizerProcess::destroy(
   }
 
   if (container->state == Container::PULLING) {
-    LOG(INFO) << "Destroying Container '"
-              << containerId << "' in PULLING state";
+    LOG(INFO) << "Destroying container " << containerId << " in PULLING state";
 
     container->pull.discard();
 
-    containerizer::Termination termination;
+    ContainerTermination termination;
     termination.set_message("Container destroyed while pulling image");
     container->termination.set(termination);
 
@@ -1906,19 +1885,17 @@ void DockerContainerizerProcess::destroy(
   }
 
   if (container->state == Container::MOUNTING) {
-    LOG(INFO) << "Destroying Container '" << containerId
-              << "' in MOUNTING state";
+    LOG(INFO) << "Destroying container " << containerId << " in MOUNTING state";
 
     // Persistent volumes might already been mounted, remove them
     // if necessary.
     Try<Nothing> unmount = unmountPersistentVolumes(containerId);
     if (unmount.isError()) {
-      LOG(WARNING) << "Failed to remove persistent volumes on destroy for "
-                   << "container '" << containerId << "': "
-                   << unmount.error();
+      LOG(WARNING) << "Failed to remove persistent volumes on destroy for"
+                   << " container " << containerId << ": " << unmount.error();
     }
 
-    containerizer::Termination termination;
+    ContainerTermination termination;
     termination.set_message("Container destroyed while mounting volumes");
     container->termination.set(termination);
 
@@ -1975,7 +1952,7 @@ void DockerContainerizerProcess::_destroy(
   // event that we had just launched a container for an executor) or
   // the mesos-docker-executor (in the case we launched a container
   // for a task).
-  LOG(INFO) << "Running docker stop on container '" << containerId << "'";
+  LOG(INFO) << "Running docker stop on container " << containerId;
 
   if (killed) {
     // TODO(alexr): After the deprecation cycle (started in 1.0), update
@@ -2050,14 +2027,13 @@ void DockerContainerizerProcess::___destroy(
     // leads to leaving the volume on the host, and we won't retry
     // again since the Docker container is removed. We should consider
     // not removing the container so we can retry.
-    LOG(WARNING) << "Failed to remove persistent volumes on destroy for "
-                 << "container '" << containerId << "': "
-                 << unmount.error();
+    LOG(WARNING) << "Failed to remove persistent volumes on destroy for"
+                 << " container " << containerId << ": " << unmount.error();
   }
 
   Container* container = containers_[containerId];
 
-  containerizer::Termination termination;
+  ContainerTermination termination;
 
   if (status.isReady() && status.get().isSome()) {
     termination.set_status(status.get().get());
@@ -2087,8 +2063,7 @@ Future<Nothing> DockerContainerizerProcess::destroyTimeout(
 {
   CHECK(containers_.contains(containerId));
 
-  LOG(WARNING) << "Docker stop timed out for "
-               << "container '" << containerId << "'";
+  LOG(WARNING) << "Docker stop timed out for container " << containerId;
 
   Container* container = containers_[containerId];
 
@@ -2127,7 +2102,7 @@ void DockerContainerizerProcess::reaped(const ContainerID& containerId)
     return;
   }
 
-  LOG(INFO) << "Executor for container '" << containerId << "' has exited";
+  LOG(INFO) << "Executor for container " << containerId << " has exited";
 
   // The executor has exited so destroy the container.
   destroy(containerId, false);

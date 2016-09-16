@@ -399,7 +399,7 @@ TEST_F(MasterQuotaTest, SetExistingQuota)
 TEST_F(MasterQuotaTest, RemoveSingleQuota)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -568,7 +568,7 @@ TEST_F(MasterQuotaTest, Status)
 TEST_F(MasterQuotaTest, InsufficientResourcesSingleAgent)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -630,7 +630,7 @@ TEST_F(MasterQuotaTest, InsufficientResourcesSingleAgent)
 TEST_F(MasterQuotaTest, InsufficientResourcesMultipleAgents)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -707,7 +707,7 @@ TEST_F(MasterQuotaTest, InsufficientResourcesMultipleAgents)
 TEST_F(MasterQuotaTest, AvailableResourcesSingleAgent)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -757,7 +757,7 @@ TEST_F(MasterQuotaTest, AvailableResourcesSingleAgent)
 TEST_F(MasterQuotaTest, AvailableResourcesMultipleAgents)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -826,7 +826,7 @@ TEST_F(MasterQuotaTest, AvailableResourcesMultipleAgents)
 TEST_F(MasterQuotaTest, AvailableResourcesAfterRescinding)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -1041,17 +1041,15 @@ TEST_F(MasterQuotaTest, AvailableResourcesAfterRescinding)
 TEST_F(MasterQuotaTest, NoAuthenticationNoAuthorization)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
-  // Disable authentication and authorization.
+  // Disable http_readwrite authentication and authorization.
   // TODO(alexr): Setting master `--acls` flag to `ACLs()` or `None()` seems
   // to be semantically equal, however, the test harness currently does not
   // allow `None()`. Once MESOS-4196 is resolved, use `None()` for clarity.
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.acls = ACLs();
-  masterFlags.authenticate_http = false;
-  masterFlags.authenticate_http_frameworks = false;
-  masterFlags.credentials = None();
+  masterFlags.authenticate_http_readwrite = false;
 
   Try<Owned<cluster::Master>> master = StartMaster(&allocator, masterFlags);
   ASSERT_SOME(master);
@@ -1153,7 +1151,7 @@ TEST_F(MasterQuotaTest, UnauthenticatedQuotaRequest)
 TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   // Setup ACLs so that only the default principal can modify quotas
   // for `ROLE1` and read status.
@@ -1336,7 +1334,7 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequests)
 TEST_F(MasterQuotaTest, AuthorizeSetAndRemoveQuotaRequests)
 {
   TestAllocator<> allocator;
-  EXPECT_CALL(allocator, initialize(_, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
 
   // Setup ACLs so that only the default principal can set and see
   // quotas for `ROLE1` and can remove its own quotas.
@@ -1538,7 +1536,8 @@ TEST_F(MasterQuotaTest, AuthorizeGetUpdateQuotaRequestsWithoutPrincipal)
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.acls = acls;
-  masterFlags.authenticate_http = false;
+  masterFlags.authenticate_http_readonly = false;
+  masterFlags.authenticate_http_readwrite = false;
   masterFlags.authenticate_http_frameworks = false;
   masterFlags.credentials = None();
 
@@ -1632,7 +1631,8 @@ TEST_F(MasterQuotaTest, AuthorizeSetRemoveQuotaRequestsWithoutPrincipal)
 
   master::Flags masterFlags = CreateMasterFlags();
   masterFlags.acls = acls;
-  masterFlags.authenticate_http = false;
+  masterFlags.authenticate_http_readonly = false;
+  masterFlags.authenticate_http_readwrite = false;
   masterFlags.authenticate_http_frameworks = false;
   masterFlags.credentials = None();
 

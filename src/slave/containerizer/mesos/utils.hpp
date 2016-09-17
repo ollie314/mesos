@@ -14,34 +14,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __NAMESPACES_PID_ISOLATOR_HPP__
-#define __NAMESPACES_PID_ISOLATOR_HPP__
+#ifndef __MESOS_CONTAINERIZER_UTILS_HPP__
+#define __MESOS_CONTAINERIZER_UTILS_HPP__
 
-#include "slave/flags.hpp"
-
-#include "slave/containerizer/mesos/isolator.hpp"
+#include <mesos/mesos.hpp>
 
 namespace mesos {
 namespace internal {
 namespace slave {
 
-class NamespacesPidIsolatorProcess : public MesosIsolatorProcess
+static ContainerID getRootContainerId(const ContainerID& containerId)
 {
-public:
-  static Try<mesos::slave::Isolator*> create(const Flags& flags);
+  ContainerID rootContainerId = containerId;
+  while (rootContainerId.has_parent()) {
+    rootContainerId = rootContainerId.parent();
+  }
 
-  virtual ~NamespacesPidIsolatorProcess() {}
-
-  virtual process::Future<Option<mesos::slave::ContainerLaunchInfo>> prepare(
-      const ContainerID& containerId,
-      const mesos::slave::ContainerConfig& containerConfig);
-
-private:
-  NamespacesPidIsolatorProcess();
-};
+  return rootContainerId;
+}
 
 } // namespace slave {
 } // namespace internal {
 } // namespace mesos {
 
-#endif // __NAMESPACES_PID_ISOLATOR_HPP__
+#endif // __MESOS_CONTAINERIZER_UTILS_HPP__

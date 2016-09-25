@@ -24,6 +24,7 @@
 #include <process/gmock.hpp>
 
 #include <stout/option.hpp>
+#include <stout/uuid.hpp>
 
 #include "messages/messages.hpp"
 
@@ -32,6 +33,8 @@
 
 #include "tests/mesos.hpp"
 
+#include "tests/containerizer/mock_containerizer.hpp"
+
 using namespace mesos::internal::slave;
 
 using namespace process;
@@ -39,6 +42,7 @@ using namespace process;
 using std::vector;
 
 using testing::_;
+using testing::DoAll;
 using testing::Return;
 
 using mesos::slave::ContainerTermination;
@@ -47,67 +51,23 @@ namespace mesos {
 namespace internal {
 namespace tests {
 
-
 class ComposingContainerizerTest : public MesosTest {};
 
-class MockContainerizer : public slave::Containerizer
-{
-public:
-  MOCK_METHOD1(
-      recover,
-      process::Future<Nothing>(
-          const Option<slave::state::SlaveState>&));
 
-  MOCK_METHOD8(
-      launch,
-      process::Future<bool>(
-          const ContainerID&,
-          const Option<TaskInfo>&,
-          const ExecutorInfo&,
-          const std::string&,
-          const Option<std::string>&,
-          const SlaveID&,
-          const std::map<std::string, std::string>&,
-          bool));
-
-  MOCK_METHOD2(
-      update,
-      process::Future<Nothing>(
-          const ContainerID&,
-          const Resources&));
-
-  MOCK_METHOD1(
-      usage,
-      process::Future<ResourceStatistics>(
-          const ContainerID&));
-
-  MOCK_METHOD1(
-      wait,
-      process::Future<ContainerTermination>(
-          const ContainerID&));
-
-  MOCK_METHOD1(
-      destroy,
-      void(const ContainerID&));
-
-  MOCK_METHOD0(
-      containers,
-      process::Future<hashset<ContainerID>>());
-};
-
-
-// This test checks if destroy is called while container is being
-// launched, the composing containerizer still calls the underlying
-// containerizer's destroy and skip calling the rest of the
-// containerizers.
-TEST_F(ComposingContainerizerTest, DestroyWhileLaunching)
+// This test ensures that destroy can be called while in the
+// launch loop. The composing containerizer still calls the
+// underlying containerizer's destroy (because it's not sure
+// if the containerizer can handle the type of container being
+// launched). Once the launch is rejected, the composing
+// containerizer should stop the launch loop.
+TEST_F(ComposingContainerizerTest, DestroyDuringLaunchLoop)
 {
   vector<Containerizer*> containerizers;
 
-  MockContainerizer* mockContainerizer = new MockContainerizer();
+  MockContainerizer* mockContainerizer1 = new MockContainerizer();
   MockContainerizer* mockContainerizer2 = new MockContainerizer();
 
-  containerizers.push_back(mockContainerizer);
+  containerizers.push_back(mockContainerizer1);
   containerizers.push_back(mockContainerizer2);
 
   ComposingContainerizer containerizer(containerizers);
@@ -120,13 +80,14 @@ TEST_F(ComposingContainerizerTest, DestroyWhileLaunching)
 
   Promise<bool> launchPromise;
 
-  EXPECT_CALL(*mockContainerizer, launch(_, _, _, _, _, _, _, _))
+  EXPECT_CALL(*mockContainerizer1, launch(_, _, _, _, _, _, _, _))
     .WillOnce(Return(launchPromise.future()));
 
   Future<Nothing> destroy;
 
-  EXPECT_CALL(*mockContainerizer, destroy(_))
-    .WillOnce(FutureSatisfy(&destroy));
+  EXPECT_CALL(*mockContainerizer1, destroy(_))
+    .WillOnce(DoAll(FutureSatisfy(&destroy),
+                    Return(Future<bool>(false))));
 
   Future<bool> launch = containerizer.launch(
       containerId,
@@ -154,6 +115,51 @@ TEST_F(ComposingContainerizerTest, DestroyWhileLaunching)
 
   launchPromise.set(false);
   AWAIT_FAILED(launch);
+}
+
+
+// Ensures the containerizer responds correctly (false Future) to
+// a request to destroy an unknown container.
+TEST_F(ComposingContainerizerTest, DestroyUnknownContainer)
+{
+  vector<Containerizer*> containerizers;
+
+  MockContainerizer* mockContainerizer1 = new MockContainerizer();
+  MockContainerizer* mockContainerizer2 = new MockContainerizer();
+
+  containerizers.push_back(mockContainerizer1);
+  containerizers.push_back(mockContainerizer2);
+
+  ComposingContainerizer containerizer(containerizers);
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  AWAIT_EXPECT_FALSE(containerizer.destroy(containerId));
+}
+
+
+// Ensures the containerizer responds correctly (returns None)
+// to a request to wait on an unknown container.
+TEST_F(ComposingContainerizerTest, WaitUnknownContainer)
+{
+  vector<Containerizer*> containerizers;
+
+  MockContainerizer* mockContainerizer1 = new MockContainerizer();
+  MockContainerizer* mockContainerizer2 = new MockContainerizer();
+
+  containerizers.push_back(mockContainerizer1);
+  containerizers.push_back(mockContainerizer2);
+
+  ComposingContainerizer containerizer(containerizers);
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  Future<Option<ContainerTermination>> wait = containerizer.wait(containerId);
+
+  AWAIT_READY(wait);
+  EXPECT_NONE(wait.get());
 }
 
 } // namespace tests {

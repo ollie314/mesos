@@ -13,6 +13,9 @@
 #ifndef __STOUT_OS_MKTEMP_HPP__
 #define __STOUT_OS_MKTEMP_HPP__
 
+#include <stdlib.h>
+#include <string.h>
+
 #include <string>
 
 #include <stout/error.hpp>
@@ -34,8 +37,9 @@ namespace os {
 inline Try<std::string> mktemp(const std::string& path = "/tmp/XXXXXX")
 {
   char* temp = new char[path.size() + 1];
-  int fd = ::mkstemp(::strcpy(temp, path.c_str()));
+  ::memcpy(temp, path.c_str(), path.size() + 1);
 
+  int fd = ::mkstemp(temp);
   if (fd < 0) {
     delete[] temp;
     return ErrnoError();

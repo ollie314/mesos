@@ -133,7 +133,6 @@ TEST_F(SharedFilesystemIsolatorTest, DISABLED_ROOT_RelativeVolume)
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::MESOS);
-  containerInfo.mutable_mesos()->CopyFrom(ContainerInfo::MesosInfo());
   containerInfo.add_volumes()->CopyFrom(
       CREATE_VOLUME(containerPath, hostPath, Volume::RW));
 
@@ -240,7 +239,6 @@ TEST_F(SharedFilesystemIsolatorTest, DISABLED_ROOT_AbsoluteVolume)
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::MESOS);
-  containerInfo.mutable_mesos()->CopyFrom(ContainerInfo::MesosInfo());
   containerInfo.add_volumes()->CopyFrom(
       CREATE_VOLUME(containerPath, hostPath, Volume::RW));
 
@@ -341,12 +339,13 @@ TEST_F(NamespacesPidIsolatorTest, ROOT_PidNamespace)
   ASSERT_TRUE(launch.get());
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer->wait(containerId);
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 
   // Check that the command was run in a different pid namespace.
   Try<ino_t> testPidNamespace = ns::getns(::getpid(), "pid");
@@ -358,12 +357,13 @@ TEST_F(NamespacesPidIsolatorTest, ROOT_PidNamespace)
   EXPECT_NE(stringify(testPidNamespace.get()),
             strings::trim(containerPidNamespace.get()));
 
-  // Check that 'sh' is the container's 'init' process.
-  // This verifies that /proc has been correctly mounted for the container.
+  // Check that the word 'mesos' is the part of the name for the
+  // container's 'init' process. This verifies that /proc has been
+  // correctly mounted for the container.
   Try<string> init = os::read(path::join(directory, "init"));
   ASSERT_SOME(init);
 
-  EXPECT_EQ("sh", strings::trim(init.get()));
+  EXPECT_TRUE(strings::contains(init.get(), "mesos"));
 }
 #endif // __linux__
 

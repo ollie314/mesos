@@ -25,6 +25,12 @@ Deprecations:
 
   * [MESOS-5955] - Health check binary "mesos-health-check" is removed.
 
+Additional API Changes:
+  * [MESOS-6220] - HTTP handler failures should result in 500 rather than
+    503 responses. This means that when using the master or agent endpoints,
+    failures will now result in a `500 Internal Server Error` rather than a
+    `503 Service Unavailable`.
+
 
 Release Notes - Mesos - Version 1.0.2
 --------------------------------------------
@@ -34,7 +40,11 @@ All Issues:
 ** Bug
     * [MESOS-6013] - Use readdir instead of readdir_r.
     * [MESOS-6074] - Master check failure if the metrics endpoint is polled soon after it starts.
+    * [MESOS-6075] - Avoid libprocess functions in `mesos-containerizer launch`.
     * [MESOS-6122] - Mesos slave throws systemd errors even when passed a flag to disable systemd.
+    * [MESOS-6104] - Potential FD double close in libevent's implementation of `sendfile`.
+    * [MESOS-6152] - Resource leak in libevent_ssl_socket.cpp.
+    * [MESOS-6235] - Add 'os::spawn', 'argv' variant of 'os::system'.
 
 
 Release Notes - Mesos - Version 1.0.1
@@ -913,6 +923,9 @@ All Issues:
   * [MESOS-5913] - Stale socket FD usage when using libevent + SSL.
   * [MESOS-5927] - Unable to run "scratch" Dockerfiles with Unified Containerizer.
   * [MESOS-5943] - Incremental http parsing of URLs leads to decoder error.
+  * [MESOS-5986] - SSL Socket CHECK can fail after socket receives EOF.
+  * [MESOS-6104] - Potential FD double close in libevent's implementation of `sendfile`.
+  * [MESOS-6152] - Resource leak in libevent_ssl_socket.cpp.
 
 
 Release Notes - Mesos - Version 0.28.2
@@ -1214,6 +1227,9 @@ All Issues:
   * [MESOS-5748] - Potential segfault in `link` when linking to a remote process.
   * [MESOS-5913] - Stale socket FD usage when using libevent + SSL.
   * [MESOS-5943] - Incremental http parsing of URLs leads to decoder error.
+  * [MESOS-5986] - SSL Socket CHECK can fail after socket receives EOF.
+  * [MESOS-6104] - Potential FD double close in libevent's implementation of `sendfile`.
+  * [MESOS-6152] - Resource leak in libevent_ssl_socket.cpp.
 
 Release Notes - Mesos - Version 0.27.3
 --------------------------------------

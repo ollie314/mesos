@@ -14,32 +14,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __MESOS_CONTAINERIZER_UTILS_HPP__
-#define __MESOS_CONTAINERIZER_UTILS_HPP__
+#ifndef __TESTS_MOCK_REGISTRAR_HPP__
+#define __TESTS_MOCK_REGISTRAR_HPP__
 
-#include <mesos/mesos.hpp>
+#include <string>
+
+#include <gmock/gmock.h>
+
+#include <mesos/state/protobuf.hpp>
+
+#include <process/future.hpp>
+#include <process/owned.hpp>
+
+#include <stout/none.hpp>
+#include <stout/option.hpp>
+
+#include "master/flags.hpp"
+#include "master/registrar.hpp"
 
 namespace mesos {
 namespace internal {
-namespace slave {
+namespace tests {
 
-static ContainerID getRootContainerId(const ContainerID& containerId)
+class MockRegistrar : public mesos::internal::master::Registrar
 {
-  ContainerID rootContainerId = containerId;
-  while (rootContainerId.has_parent()) {
-    // NOTE: Looks like protobuf does not handle copying well when
-    // nesting message is involved, because the source and the target
-    // point to the same object. Therefore, we create a temporary
-    // variable and use an extra copy here.
-    ContainerID id = rootContainerId.parent();
-    rootContainerId = id;
-  }
+public:
+  MockRegistrar(const master::Flags& flags,
+                mesos::state::protobuf::State* state,
+                const Option<std::string>& authenticationRealm = None());
 
-  return rootContainerId;
-}
+  virtual ~MockRegistrar();
 
-} // namespace slave {
+  MOCK_METHOD1(
+      apply,
+      process::Future<bool>(process::Owned<master::Operation> operation));
+
+  process::Future<bool> unmocked_apply(
+      process::Owned<master::Operation> operation);
+};
+
+} // namespace tests {
 } // namespace internal {
 } // namespace mesos {
 
-#endif // __MESOS_CONTAINERIZER_UTILS_HPP__
+#endif // __TESTS_MOCK_REGISTRAR_HPP__

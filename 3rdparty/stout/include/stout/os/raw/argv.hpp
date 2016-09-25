@@ -13,6 +13,8 @@
 #ifndef __STOUT_OS_RAW_ARGV_HPP__
 #define __STOUT_OS_RAW_ARGV_HPP__
 
+#include <string.h>
+
 #include <string>
 #include <vector>
 
@@ -40,9 +42,7 @@ public:
     std::vector<char*> _argv;
     foreach (const std::string& arg, iterable) {
       char* _arg = new char[arg.size() + 1];
-
-      // NOTE: strcpy will fill the terminating `\0' character.
-      strcpy(_arg, arg.c_str());
+      ::memcpy(_arg, arg.c_str(), arg.size() + 1);
       _argv.emplace_back(_arg);
     }
 

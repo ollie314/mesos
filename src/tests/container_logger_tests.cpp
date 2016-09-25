@@ -140,6 +140,7 @@ TEST_F(ContainerLoggerTest, MesosContainerizerRecover)
 {
   // Prepare a MesosContainerizer with a mocked container logger.
   slave::Flags flags = CreateSlaveFlags();
+  flags.launcher = "posix";
 
   Try<Launcher*> launcher = PosixLauncher::create(flags);
   ASSERT_SOME(launcher);
@@ -167,8 +168,6 @@ TEST_F(ContainerLoggerTest, MesosContainerizerRecover)
 
   ExecutorInfo executorInfo;
   executorInfo.mutable_container()->set_type(ContainerInfo::MESOS);
-  executorInfo.mutable_container()->mutable_mesos()->CopyFrom(
-      ContainerInfo::MesosInfo());
 
   ExecutorState executorState;
   executorState.id = executorId;

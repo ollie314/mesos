@@ -88,6 +88,7 @@
 #include "slave/containerizer/fetcher.hpp"
 
 #include "tests/cluster.hpp"
+#include "tests/mock_registrar.hpp"
 
 using mesos::master::contender::StandaloneMasterContender;
 using mesos::master::contender::ZooKeeperMasterContender;
@@ -191,10 +192,8 @@ Try<process::Owned<Master>> Master::start(
   }
 
   // Check for some invalid flag combinations.
-  if (flags.registry == "in_memory" && flags.registry_strict) {
-    return Error(
-        "Cannot use '--registry_strict' when using in-memory storage based"
-        " registry");
+  if (flags.registry_strict) {
+    return Error("Support for '--registry_strict' has been removed");
   }
 
   if (flags.registry == "replicated_log" && flags.work_dir.isNone()) {
@@ -243,7 +242,7 @@ Try<process::Owned<Master>> Master::start(
 
   // Instantiate some other master dependencies.
   master->state.reset(new mesos::state::protobuf::State(master->storage.get()));
-  master->registrar.reset(new master::Registrar(
+  master->registrar.reset(new MockRegistrar(
       flags, master->state.get(), master::READONLY_HTTP_AUTHENTICATION_REALM));
 
   if (slaveRemovalLimiter.isNone() && flags.agent_removal_rate_limit.isSome()) {
@@ -552,7 +551,7 @@ Slave::~Slave()
     AWAIT_READY(containers);
 
     foreach (const ContainerID& containerId, containers.get()) {
-      process::Future<ContainerTermination> wait =
+      process::Future<Option<ContainerTermination>> wait =
         containerizer->wait(containerId);
 
       containerizer->destroy(containerId);

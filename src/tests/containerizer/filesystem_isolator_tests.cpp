@@ -202,7 +202,6 @@ protected:
   {
     ContainerInfo info;
     info.set_type(ContainerInfo::MESOS);
-    info.mutable_mesos()->CopyFrom(ContainerInfo::MesosInfo());
 
     if (imageName.isSome()) {
       Image* image = info.mutable_mesos()->mutable_image();
@@ -289,12 +288,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ChangeRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 
@@ -808,12 +810,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_Metrics)
   containerizer.get()->destroy(containerId);
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Executor was killed.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(9, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(9, wait->get().status());
 }
 
 
@@ -859,12 +864,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromSandbox)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 
   EXPECT_SOME_EQ("abc\n", os::read(path::join(directory, "tmp", "file")));
 }
@@ -912,12 +920,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromHost)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 
@@ -963,12 +974,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_FileVolumeFromHost)
 
   AWAIT_READY_FOR(launch, Seconds(60));
 
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 
@@ -1014,12 +1028,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_VolumeFromHostSandboxMountPoint)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 
@@ -1065,12 +1082,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_FileVolumeFromHostSandboxMountPoint)
 
   AWAIT_READY_FOR(launch, Seconds(60));
 
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 
@@ -1131,12 +1151,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_PersistentVolumeWithRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 
   EXPECT_SOME_EQ("abc\n", os::read(path::join(volume, "file")));
 }
@@ -1203,12 +1226,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_PersistentVolumeWithoutRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 
   EXPECT_SOME_EQ("abc\n", os::read(path::join(volume, "file")));
 }
@@ -1256,12 +1282,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ImageInVolumeWithoutRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 
@@ -1309,14 +1338,16 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_ImageInVolumeWithRootFilesystem)
   AWAIT_READY_FOR(launch, Seconds(240));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
 
   // Because destroy rootfs spents a lot of time, we use 30s as timeout here.
   AWAIT_READY_FOR(wait, Seconds(30));
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 
@@ -1423,19 +1454,25 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_MultipleContainers)
   containerizer.get()->destroy(containerId1);
 
   // Wait on the containers.
-  Future<ContainerTermination> wait1 = containerizer.get()->wait(containerId1);
-  Future<ContainerTermination> wait2 = containerizer.get()->wait(containerId2);
+  Future<Option<ContainerTermination>> wait1 =
+    containerizer.get()->wait(containerId1);
+
+  Future<Option<ContainerTermination>> wait2 =
+    containerizer.get()->wait(containerId2);
 
   AWAIT_READY_FOR(wait1, Seconds(60));
+  ASSERT_SOME(wait1.get());
+
   AWAIT_READY_FOR(wait2, Seconds(60));
+  ASSERT_SOME(wait2.get());
 
   // Executor 1 was forcefully killed.
-  EXPECT_TRUE(wait1.get().has_status());
-  EXPECT_EQ(9, wait1.get().status());
+  EXPECT_TRUE(wait1->get().has_status());
+  EXPECT_EQ(9, wait1->get().status());
 
   // Executor 2 exited normally.
-  EXPECT_TRUE(wait2.get().has_status());
-  EXPECT_EQ(0, wait2.get().status());
+  EXPECT_TRUE(wait2->get().has_status());
+  EXPECT_EQ(0, wait2->get().status());
 }
 
 
@@ -1494,12 +1531,15 @@ TEST_F(LinuxFilesystemIsolatorTest, ROOT_SandboxEnvironmentVariable)
   AWAIT_READY_FOR(launch, Seconds(60));
 
   // Wait on the container.
-  Future<ContainerTermination> wait = containerizer.get()->wait(containerId);
+  Future<Option<ContainerTermination>> wait =
+    containerizer.get()->wait(containerId);
+
   AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
 
   // Check the executor exited correctly.
-  EXPECT_TRUE(wait.get().has_status());
-  EXPECT_EQ(0, wait.get().status());
+  EXPECT_TRUE(wait->get().has_status());
+  EXPECT_EQ(0, wait->get().status());
 }
 
 

@@ -287,10 +287,12 @@ public:
       const ContainerID& containerId,
       const process::Future<bool>& future);
 
-  void executorTerminated(
+  // Made 'virtual' for Slave mocking.
+  virtual void executorTerminated(
       const FrameworkID& frameworkId,
       const ExecutorID& executorId,
-      const process::Future<mesos::slave::ContainerTermination>& termination);
+      const process::Future<Option<
+          mesos::slave::ContainerTermination>>& termination);
 
   // NOTE: Pulled these to public to make it visible for testing.
   // TODO(vinod): Make tests friends to this class instead.
@@ -608,6 +610,21 @@ private:
         const process::Owned<ObjectApprover>& taskApprover,
         const process::Owned<ObjectApprover>& executorsApprover) const;
 
+    process::Future<process::http::Response> launchNestedContainer(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> waitNestedContainer(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> killNestedContainer(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
     Slave* slave;
 
     // Used to rate limit the statistics endpoint.
@@ -650,7 +667,8 @@ private:
 
   void sendExecutorTerminatedStatusUpdate(
       const TaskID& taskId,
-      const Future<mesos::slave::ContainerTermination>& termination,
+      const process::Future<Option<
+          mesos::slave::ContainerTermination>>& termination,
       const FrameworkID& frameworkId,
       const Executor* executor);
 
@@ -667,6 +685,10 @@ private:
 
   // Resources that are checkpointed by the slave.
   Resources checkpointedResources;
+
+  // The current total resources of the agent, i.e.,
+  // `info.resources()` with checkpointed resources applied.
+  Resources totalResources;
 
   Option<process::UPID> master;
 

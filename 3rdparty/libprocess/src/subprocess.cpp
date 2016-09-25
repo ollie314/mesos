@@ -49,9 +49,127 @@ using InputFileDescriptors = Subprocess::IO::InputFileDescriptors;
 using OutputFileDescriptors = Subprocess::IO::OutputFileDescriptors;
 
 
-Subprocess::Hook::Hook(
-    const lambda::function<Try<Nothing>(pid_t)>& _parent_callback)
-  : parent_callback(_parent_callback) {}
+Subprocess::ParentHook::ParentHook(
+    const lambda::function<Try<Nothing>(pid_t)>& _parent_setup)
+  : parent_setup(_parent_setup) {}
+
+
+Subprocess::ChildHook::ChildHook(
+    const lambda::function<Try<Nothing>()>& _child_setup)
+  : child_setup(_child_setup) {}
+
+
+Subprocess::ChildHook Subprocess::ChildHook::CHDIR(
+    const std::string& working_directory)
+{
+  return Subprocess::ChildHook([working_directory]() -> Try<Nothing> {
+    if (::chdir(working_directory.c_str()) == -1) {
+      return Error("Could not chdir");
+    }
+
+    return Nothing();
+  });
+}
+
+
+Subprocess::ChildHook Subprocess::ChildHook::SETSID()
+{
+  return Subprocess::ChildHook([]() -> Try<Nothing> {
+    // TODO(josephw): By default, child processes on Windows do not
+    // terminate when the parent terminates. We need to implement
+    // `JobObject` support to change this default.
+#ifndef __WINDOWS__
+    // Put child into its own process session to prevent slave suicide
+    // on child process SIGKILL/SIGTERM.
+    if (::setsid() == -1) {
+      return Error("Could not setsid");
+    }
+#endif // __WINDOWS__
+
+    return Nothing();
+  });
+}
+
+
+#ifdef __linux__
+inline void signalHandler(int signal)
+{
+  // Send SIGKILL to every process in the process group of the
+  // calling process.
+  kill(0, SIGKILL);
+  abort();
+}
+#endif // __linux__
+
+
+Subprocess::ChildHook Subprocess::ChildHook::SUPERVISOR()
+{
+  return Subprocess::ChildHook([]() -> Try<Nothing> {
+#ifdef __linux__
+    // Send SIGTERM to the current process if the parent (i.e., the
+    // slave) exits.
+    // NOTE:: This function should always succeed because we are passing
+    // in a valid signal.
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+
+    // Put the current process into a separate process group so that
+    // we can kill it and all its children easily.
+    if (setpgid(0, 0) != 0) {
+      return Error("Could not start supervisor process.");
+    }
+
+    // Install a SIGTERM handler which will kill the current process
+    // group. Since we already setup the death signal above, the
+    // signal handler will be triggered when the parent (e.g., the
+    // slave) exits.
+    if (os::signals::install(SIGTERM, &signalHandler) != 0) {
+      return Error("Could not start supervisor process.");
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+      return Error("Could not start supervisor process.");
+    } else if (pid == 0) {
+      // Child. This is the process that is going to exec the
+      // process if zero is returned.
+
+      // We setup death signal for the process as well in case
+      // someone, though unlikely, accidentally kill the parent of
+      // this process (the bookkeeping process).
+      prctl(PR_SET_PDEATHSIG, SIGKILL);
+
+      // NOTE: We don't need to clear the signal handler explicitly
+      // because the subsequent 'exec' will clear them.
+      return Nothing();
+    } else {
+      // Parent. This is the bookkeeping process which will wait for
+      // the child process to finish.
+
+      // Close the files to prevent interference on the communication
+      // between the slave and the child process.
+      ::close(STDIN_FILENO);
+      ::close(STDOUT_FILENO);
+      ::close(STDERR_FILENO);
+
+      // Block until the child process finishes.
+      int status = 0;
+      if (waitpid(pid, &status, 0) == -1) {
+        abort();
+      }
+
+      // Forward the exit status if the child process exits normally.
+      if (WIFEXITED(status)) {
+        _exit(WEXITSTATUS(status));
+      }
+
+      abort();
+      UNREACHABLE();
+    }
+#endif // __linux__
+    return Nothing();
+  });
+}
+
 
 namespace internal {
 
@@ -92,14 +210,12 @@ Try<Subprocess> subprocess(
     const Subprocess::IO& in,
     const Subprocess::IO& out,
     const Subprocess::IO& err,
-    const Setsid set_sid,
     const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<lambda::function<
         pid_t(const lambda::function<int()>&)>>& _clone,
-    const vector<Subprocess::Hook>& parent_hooks,
-    const Option<string>& working_directory,
-    const Watchdog watchdog)
+    const vector<Subprocess::ParentHook>& parent_hooks,
+    const vector<Subprocess::ChildHook>& child_hooks)
 {
   // File descriptors for redirecting stdin/stdout/stderr.
   // These file descriptors are used for different purposes depending
@@ -172,12 +288,10 @@ Try<Subprocess> subprocess(
     Try<pid_t> pid = internal::cloneChild(
         path,
         argv,
-        set_sid,
         environment,
         _clone,
         parent_hooks,
-        working_directory,
-        watchdog,
+        child_hooks,
         stdinfds,
         stdoutfds,
         stderrfds);
@@ -188,6 +302,7 @@ Try<Subprocess> subprocess(
 
     process.data->pid = pid.get();
 #else
+    // TODO(joerg84): Consider using the childHooks and parentHooks here.
     Try<PROCESS_INFORMATION> processInformation = internal::createChildProcess(
         path, argv, environment, stdinfds, stdoutfds, stderrfds);
 

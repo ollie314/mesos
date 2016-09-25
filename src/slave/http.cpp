@@ -66,6 +66,8 @@
 
 #include "version/version.hpp"
 
+using mesos::slave::ContainerTermination;
+
 using process::AUTHENTICATION;
 using process::AUTHORIZATION;
 using process::Clock;
@@ -399,6 +401,15 @@ Future<Response> Slave::Http::api(
 
     case agent::Call::GET_TASKS:
       return getTasks(call, principal, acceptType);
+
+    case agent::Call::LAUNCH_NESTED_CONTAINER:
+      return launchNestedContainer(call, principal, acceptType);
+
+    case agent::Call::WAIT_NESTED_CONTAINER:
+      return waitNestedContainer(call, principal, acceptType);
+
+    case agent::Call::KILL_NESTED_CONTAINER:
+      return killNestedContainer(call, principal, acceptType);
   }
 
   UNREACHABLE();
@@ -938,7 +949,8 @@ Future<Response> Slave::Http::state(
       tasksApprover,
       executorsApprover,
       flagsApprover)
-    .then(defer(slave->self(),
+    .then(defer(
+        slave->self(),
         [this, request](const tuple<Owned<ObjectApprover>,
                                     Owned<ObjectApprover>,
                                     Owned<ObjectApprover>,
@@ -980,7 +992,26 @@ Future<Response> Slave::Http::state(
         writer->field("pid", string(slave->self()));
         writer->field("hostname", slave->info.hostname());
 
-        writer->field("resources", Resources(slave->info.resources()));
+        const Resources& totalResources = slave->totalResources;
+
+        writer->field("resources", totalResources);
+        writer->field("reserved_resources", totalResources.reservations());
+        writer->field("unreserved_resources", totalResources.unreserved());
+
+        writer->field(
+            "reserved_resources_full",
+            [&totalResources](JSON::ObjectWriter* writer) {
+              foreachpair (const string& role,
+                           const Resources& resources,
+                           totalResources.reservations()) {
+                writer->field(role, [&resources](JSON::ArrayWriter* writer) {
+                  foreach (const Resource& resource, resources) {
+                    writer->element(JSON::Protobuf(resource));
+                  }
+                });
+              }
+            });
+
         writer->field("attributes", Attributes(slave->info.attributes()));
 
         if (slave->master.isSome()) {
@@ -1871,6 +1902,108 @@ Future<Response> Slave::Http::readFile(
 
       return OK(serialize(contentType, evolve(response)),
                 stringify(contentType));
+    });
+}
+
+
+Future<Response> Slave::Http::launchNestedContainer(
+    const mesos::agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::agent::Call::LAUNCH_NESTED_CONTAINER, call.type());
+  CHECK(call.has_launch_nested_container());
+
+  const ContainerID& containerId =
+    call.launch_nested_container().container_id();
+
+  Future<Nothing> launched = slave->containerizer->launch(
+      containerId,
+      call.launch_nested_container().command(),
+      call.launch_nested_container().has_container()
+        ? call.launch_nested_container().container()
+        : Option<ContainerInfo>::none(),
+      call.launch_nested_container().resources());
+
+  // TODO(bmahler): The containerizers currently require that
+  // the caller calls destroy if the launch fails. See MESOS-6214.
+  launched
+    .onFailed(defer(slave->self(), [=](const string& failure) {
+      LOG(WARNING) << "Failed to launch nested container " << containerId
+                   << ": " << failure;
+
+      slave->containerizer->destroy(containerId)
+        .onFailed([=](const string& failure) {
+          LOG(ERROR) << "Failed to destroy neseted container " << containerId
+                     << " after launch failure: " << failure;
+        });
+    }));
+
+  return launched
+    .then([]() -> Response {
+      return OK();
+    });
+}
+
+
+Future<Response> Slave::Http::waitNestedContainer(
+    const mesos::agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::agent::Call::WAIT_NESTED_CONTAINER, call.type());
+  CHECK(call.has_wait_nested_container());
+
+  const ContainerID& containerId =
+    call.wait_nested_container().container_id();
+
+  Future<Option<mesos::slave::ContainerTermination>> wait =
+    slave->containerizer->wait(containerId);
+
+  return wait
+    .then([containerId, contentType](
+        const Option<ContainerTermination>& termination) -> Response {
+      if (termination.isNone()) {
+        return NotFound("Container " + stringify(containerId) +
+                        " cannot be found");
+      }
+
+      mesos::agent::Response response;
+      response.set_type(mesos::agent::Response::WAIT_NESTED_CONTAINER);
+
+      mesos::agent::Response::WaitNestedContainer* waitNestedContainer =
+        response.mutable_wait_nested_container();
+
+      if (termination->has_status()) {
+        waitNestedContainer->set_exit_status(termination->status());
+      }
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    });
+}
+
+
+Future<Response> Slave::Http::killNestedContainer(
+    const mesos::agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  CHECK_EQ(mesos::agent::Call::KILL_NESTED_CONTAINER, call.type());
+  CHECK(call.has_kill_nested_container());
+
+  const ContainerID& containerId =
+    call.kill_nested_container().container_id();
+
+  Future<bool> destroy = slave->containerizer->destroy(containerId);
+
+  return destroy
+    .then([containerId](bool found) -> Response {
+      if (!found) {
+        return NotFound("Container '" + stringify(containerId) + "'"
+                        " cannot be found (or is already killed)");
+      }
+      return OK();
     });
 }
 

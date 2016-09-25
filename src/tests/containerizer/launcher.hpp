@@ -68,7 +68,7 @@ public:
           const flags::FlagsBase* flags,
           const Option<std::map<std::string, std::string>>& env,
           const Option<int>& namespaces,
-          std::vector<process::Subprocess::Hook> parentHooks));
+          std::vector<process::Subprocess::ParentHook> parentHooks));
 
   MOCK_METHOD1(
       destroy,
@@ -77,10 +77,6 @@ public:
   MOCK_METHOD1(
       status,
       process::Future<ContainerStatus>(const ContainerID& containerId));
-
-  MOCK_METHOD1(
-      getExitStatusCheckpointPath,
-      std::string(const ContainerID& containerId));
 
   process::Owned<slave::Launcher> real;
 };

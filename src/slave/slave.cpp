@@ -526,6 +526,10 @@ void Slave::initialize()
         HookManager::slaveResourcesDecorator(info));
   }
 
+  // Initialize `totalResources` with `info.resources`, checkpointed
+  // resources will be applied later during recovery.
+  totalResources = resources.get();
+
   LOG(INFO) << "Agent resources: " << info.resources();
 
   info.mutable_attributes()->CopyFrom(attributes);
@@ -2736,6 +2740,21 @@ void Slave::checkpointResources(const vector<Resource>& _checkpointedResources)
     return;
   }
 
+  // This is a sanity check to verify that the new checkpointed
+  // resources are compatible with the agent resources specified
+  // through the '--resources' command line flag. The resources
+  // should be guaranteed compatible by the master.
+  Try<Resources> _totalResources = applyCheckpointedResources(
+      info.resources(),
+      newCheckpointedResources);
+
+  CHECK_SOME(_totalResources)
+    << "Failed to apply checkpointed resources "
+    << newCheckpointedResources << " to agent's resources "
+    << info.resources();
+
+  totalResources = _totalResources.get();
+
   // Store the target checkpoint resources. We commit the checkpoint
   // only after all operations are successful. If any of the operations
   // fail, the agent exits and the update to checkpointed resources
@@ -4446,7 +4465,7 @@ void Slave::executorLaunched(
 void Slave::executorTerminated(
     const FrameworkID& frameworkId,
     const ExecutorID& executorId,
-    const Future<ContainerTermination>& termination)
+    const Future<Option<ContainerTermination>>& termination)
 {
   int status;
   // A termination failure indicates the containerizer could not destroy a
@@ -4462,14 +4481,20 @@ void Slave::executorTerminated(
                    : "discarded");
     // Set a special status for failure.
     status = -1;
-  } else if (!termination.get().has_status()) {
+  } else if (termination->isNone()) {
+    LOG(ERROR) << "Termination of executor '" << executorId
+               << "' of framework " << frameworkId
+               << " failed: unknown container";
+    // Set a special status for failure.
+    status = -1;
+  } else if (!termination->get().has_status()) {
     LOG(INFO) << "Executor '" << executorId
               << "' of framework " << frameworkId
               << " has terminated with unknown status";
     // Set a special status for None.
     status = -1;
   } else {
-    status = termination.get().status();
+    status = termination->get().status();
     LOG(INFO) << "Executor '" << executorId
               << "' of framework " << frameworkId << " "
               << WSTRINGIFY(status);
@@ -5051,19 +5076,24 @@ Future<Nothing> Slave::recover(const Result<state::State>& state)
     }
 
     // This is to verify that the checkpointed resources are
-    // compatible with the slave resources specified through the
-    // '--resources' command line flag.
-    Try<Resources> totalResources = applyCheckpointedResources(
+    // compatible with the agent resources specified through the
+    // '--resources' command line flag. The compatibility has been
+    // verified by the old agent but the flag may have changed during
+    // agent restart in an incompatible way and the operator may need
+    // to either fix the flag or the checkpointed resources.
+    Try<Resources> _totalResources = applyCheckpointedResources(
         info.resources(), checkpointedResources);
 
-    if (totalResources.isError()) {
+    if (_totalResources.isError()) {
       return Failure(
           "Checkpointed resources " +
           stringify(checkpointedResources) +
           " are incompatible with agent resources " +
           stringify(info.resources()) + ": " +
-          totalResources.error());
+          _totalResources.error());
     }
+
+    totalResources = _totalResources.get();
   }
 
   if (slaveState.isSome() && slaveState.get().info.isSome()) {
@@ -5613,16 +5643,7 @@ Future<ResourceUsage> Slave::usage()
     }
   }
 
-  Try<Resources> totalResources = applyCheckpointedResources(
-      info.resources(),
-      checkpointedResources);
-
-  CHECK_SOME(totalResources)
-    << "Failed to apply checkpointed resources "
-    << checkpointedResources << " to agent's resources "
-    << info.resources();
-
-  usage->mutable_total()->CopyFrom(totalResources.get());
+  usage->mutable_total()->CopyFrom(totalResources);
 
   return await(futures).then(
       [usage](const list<Future<ResourceStatistics>>& futures) {
@@ -5840,7 +5861,7 @@ Future<bool> Slave::authorizeSandboxAccess(
 
 void Slave::sendExecutorTerminatedStatusUpdate(
     const TaskID& taskId,
-    const Future<ContainerTermination>& termination,
+    const Future<Option<ContainerTermination>>& termination,
     const FrameworkID& frameworkId,
     const Executor* executor)
 {
@@ -5851,8 +5872,9 @@ void Slave::sendExecutorTerminatedStatusUpdate(
   string message;
 
   // Determine the task state for the status update.
-  if (termination.isReady() && termination->has_state()) {
-    state = termination->state();
+  if (termination.isReady() &&
+      termination->isSome() && termination->get().has_state()) {
+    state = termination->get().state();
   } else if (executor->pendingTermination.isSome() &&
              executor->pendingTermination->has_state()) {
     state = executor->pendingTermination->state();
@@ -5862,8 +5884,9 @@ void Slave::sendExecutorTerminatedStatusUpdate(
 
   // Determine the task reason for the status update.
   // TODO(jieyu): Handle multiple reasons (MESOS-2657).
-  if (termination.isReady() && termination->reasons().size() > 0) {
-    reason = termination->reasons(0);
+  if (termination.isReady() &&
+      termination->isSome() && termination->get().reasons().size() > 0) {
+    reason = termination->get().reasons(0);
   } else if (executor->pendingTermination.isSome() &&
              executor->pendingTermination->reasons().size() > 0) {
     reason = executor->pendingTermination->reasons(0);
@@ -5880,9 +5903,13 @@ void Slave::sendExecutorTerminatedStatusUpdate(
   }
 
   if (!termination.isReady()) {
-    messages.push_back("Abnormal executor termination");
-  } else if (termination->has_message()) {
-    messages.push_back(termination->message());
+    messages.push_back(
+        "Abnormal executor termination: " +
+        (termination.isFailed() ? termination.failure() : "discarded future"));
+  } else if (termination->isNone()) {
+    messages.push_back("Abnormal executor termination: unknown container");
+  } else if (termination->get().has_message()) {
+    messages.push_back(termination->get().message());
   }
 
   if (messages.empty()) {

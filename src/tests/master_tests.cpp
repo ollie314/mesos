@@ -535,9 +535,6 @@ TEST_F(MasterTest, KillUnknownTaskSlaveInTransition)
   EXPECT_CALL(exec, shutdown(_))
     .Times(AtMost(1));
 
-  Future<Nothing> _reregisterSlave =
-    DROP_DISPATCH(_, &Master::_reregisterSlave);
-
   // Stop master and slave.
   master->reset();
   slave.get()->terminate();
@@ -550,6 +547,14 @@ TEST_F(MasterTest, KillUnknownTaskSlaveInTransition)
   // Restart master.
   master = StartMaster();
   ASSERT_SOME(master);
+
+  // Intercept the first registrar operation that is attempted; this
+  // should be the registry operation that reregisters the slave.
+  Future<Owned<master::Operation>> reregister;
+  Promise<bool> promise; // Never satisfied.
+  EXPECT_CALL(*master.get()->registrar.get(), apply(_))
+    .WillOnce(DoAll(FutureArg<0>(&reregister),
+                    Return(promise.future())));
 
   frameworkId = Future<FrameworkID>();
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -567,7 +572,10 @@ TEST_F(MasterTest, KillUnknownTaskSlaveInTransition)
   ASSERT_SOME(slave);
 
   // Wait for the slave to start reregistration.
-  AWAIT_READY(_reregisterSlave);
+  AWAIT_READY(reregister);
+  EXPECT_NE(
+      nullptr,
+      dynamic_cast<master::MarkSlaveReachable*>(reregister.get().get()));
 
   // As Master::killTask isn't doing anything, we shouldn't get a status update.
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -596,6 +604,123 @@ TEST_F(MasterTest, KillUnknownTaskSlaveInTransition)
 
   driver.stop();
   driver.join();
+}
+
+
+// This test checks that the HTTP endpoints return the expected
+// information for agents that the master is in the process of marking
+// unreachable, but that have not yet been so marked (because the
+// registry update hasn't completed yet).
+TEST_F(MasterTest, EndpointsForHalfRemovedSlave)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Set these expectations up before we spawn the slave so that we
+  // don't miss the first PING.
+  Future<process::Message> ping = FUTURE_MESSAGE(
+      Eq(PingSlaveMessage().GetTypeName()), _, _);
+
+  // Drop all the PONGs to simulate slave partition.
+  DROP_PROTOBUFS(PongSlaveMessage(), _, _);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  Clock::pause();
+
+  // Now advance through the PINGs.
+  size_t pings = 0;
+  while (true) {
+    AWAIT_READY(ping);
+    pings++;
+    if (pings == masterFlags.max_agent_ping_timeouts) {
+      break;
+    }
+    ping = FUTURE_MESSAGE(Eq(PingSlaveMessage().GetTypeName()), _, _);
+    Clock::advance(masterFlags.agent_ping_timeout);
+  }
+
+  // Intercept the first registrar operation that is attempted; this
+  // should be the operation that marks the slave as unreachable.
+  Future<Owned<master::Operation>> unreachable;
+  Promise<bool> promise;
+  EXPECT_CALL(*master.get()->registrar.get(), apply(_))
+    .WillOnce(DoAll(FutureArg<0>(&unreachable),
+                    Return(promise.future())));
+
+  Clock::advance(masterFlags.agent_ping_timeout);
+
+  slave.get()->terminate();
+  slave->reset();
+
+  // Wait for the master to attempt to update the registry, but don't
+  // allow the registry update to succeed yet.
+  AWAIT_READY(unreachable);
+  EXPECT_NE(
+      nullptr,
+      dynamic_cast<master::MarkSlaveUnreachable*>(unreachable.get().get()));
+
+  // Settle the clock for the sake of paranoia.
+  Clock::settle();
+
+  // Metrics should not be updated yet.
+  JSON::Object stats1 = Metrics();
+  EXPECT_EQ(1, stats1.values["master/slave_unreachable_scheduled"]);
+  EXPECT_EQ(1, stats1.values["master/slave_unreachable_completed"]);
+  EXPECT_EQ(0, stats1.values["master/slave_removals"]);
+  EXPECT_EQ(0, stats1.values["master/slave_removals/reason_unhealthy"]);
+  EXPECT_EQ(0, stats1.values["master/slave_removals/reason_unregistered"]);
+
+  // HTTP endpoints (e.g., /state) should not reflect the removal of
+  // the slave yet.
+  Future<Response> response1 = process::http::get(
+      master.get()->pid,
+      "state",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response1);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response1);
+
+  Try<JSON::Object> parse1 = JSON::parse<JSON::Object>(response1.get().body);
+  Result<JSON::Array> array1 = parse1.get().find<JSON::Array>("slaves");
+  ASSERT_SOME(array1);
+  EXPECT_EQ(1u, array1.get().values.size());
+
+  // Allow the registry operation to return success. Note that we
+  // don't actually update the registry here, since the test doesn't
+  // require it.
+  promise.set(true);
+
+  Clock::settle();
+
+  // Metrics should be updated.
+  JSON::Object stats2 = Metrics();
+  EXPECT_EQ(1, stats2.values["master/slave_unreachable_scheduled"]);
+  EXPECT_EQ(1, stats2.values["master/slave_unreachable_completed"]);
+  EXPECT_EQ(1, stats2.values["master/slave_removals"]);
+  EXPECT_EQ(1, stats2.values["master/slave_removals/reason_unhealthy"]);
+  EXPECT_EQ(0, stats2.values["master/slave_removals/reason_unregistered"]);
+
+  // HTTP endpoints should be updated.
+  Future<Response> response2 = process::http::get(
+      master.get()->pid,
+      "state",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response2);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response2);
+
+  Try<JSON::Object> parse2 = JSON::parse<JSON::Object>(response2.get().body);
+  Result<JSON::Array> array2 = parse2.get().find<JSON::Array>("slaves");
+  ASSERT_SOME(array2);
+  EXPECT_EQ(0u, array2.get().values.size());
+
+  Clock::resume();
 }
 
 
@@ -1761,10 +1886,10 @@ TEST_F(MasterTest, SlavesEndpointTwoSlaves)
 
 
 // This test ensures that when a slave is recovered from the registry
-// but does not re-register with the master, it is removed from the
-// registry and the framework is informed that the slave is lost, and
-// the slave is refused re-registration.
-TEST_F(MasterTest, RecoveredSlaveDoesNotReregister)
+// but does not re-register with the master, it is marked unreachable
+// in the registry, the framework is informed that the slave is lost,
+// and the slave is allowed to re-register.
+TEST_F(MasterTest, RecoveredSlaveCanReregister)
 {
   // Step 1: Start a master.
   master::Flags masterFlags = CreateMasterFlags();
@@ -1821,101 +1946,27 @@ TEST_F(MasterTest, RecoveredSlaveDoesNotReregister)
   EXPECT_EQ(1, stats.values["master/recovery_slave_removals"]);
   EXPECT_EQ(1, stats.values["master/slave_removals"]);
   EXPECT_EQ(1, stats.values["master/slave_removals/reason_unhealthy"]);
+  EXPECT_EQ(0, stats.values["master/slave_removals/reason_unregistered"]);
   EXPECT_EQ(1, stats.values["master/slave_unreachable_completed"]);
   EXPECT_EQ(1, stats.values["master/slave_unreachable_scheduled"]);
 
   Clock::resume();
 
-  // Step 7: Ensure the slave cannot re-register!
-  Future<ShutdownMessage> shutdownMessage =
-    FUTURE_PROTOBUF(ShutdownMessage(), master.get()->pid, _);
-
-  detector = master.get()->createDetector();
-  slave = StartSlave(detector.get(), slaveFlags);
-  ASSERT_SOME(slave);
-
-  AWAIT_READY(shutdownMessage);
-
-  driver.stop();
-  driver.join();
-}
-
-
-// This test ensures that a non-strict registry is write-only by
-// inducing a slave removal during recovery. After which, we expect
-// that the framework is *not* informed, and we expect that the
-// slave can re-register successfully.
-TEST_F(MasterTest, NonStrictRegistryWriteOnly)
-{
-  // Step 1: Start a master.
-  master::Flags masterFlags = CreateMasterFlags();
-  masterFlags.registry_strict = false;
-
-  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
-  ASSERT_SOME(master);
-
-  // Step 2: Start a slave.
-  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
-    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
-
-  // Reuse slaveFlags so both StartSlave() use the same work_dir.
-  slave::Flags slaveFlags = this->CreateSlaveFlags();
-
-  Owned<MasterDetector> detector = master.get()->createDetector();
-  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
-  ASSERT_SOME(slave);
-
-  AWAIT_READY(slaveRegisteredMessage);
-
-  // Step 3: Stop the slave while the master is down.
-  master->reset();
-  slave.get()->terminate();
-  slave->reset();
-
-  // Step 4: Restart the master.
-  master = StartMaster(masterFlags);
-  ASSERT_SOME(master);
-
-  // Step 5: Start a scheduler.
-  MockScheduler sched;
-  MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
-
-  Future<Nothing> registered;
-  EXPECT_CALL(sched, registered(&driver, _, _))
-    .WillOnce(FutureSatisfy(&registered));
-
-  EXPECT_CALL(sched, resourceOffers(&driver, _))
-    .WillRepeatedly(Return()); // Ignore offers.
-
-  driver.start();
-
-  AWAIT_READY(registered);
-
-  // Step 6: Advance the clock and make sure the slave is not
-  // removed!
-  Future<Nothing> slaveLost;
-  EXPECT_CALL(sched, slaveLost(&driver, _))
-    .WillRepeatedly(FutureSatisfy(&slaveLost));
-
-  Clock::pause();
-  Clock::advance(masterFlags.agent_reregister_timeout);
-  Clock::settle();
-
-  ASSERT_TRUE(slaveLost.isPending());
-
-  Clock::resume();
-
-  // Step 7: Now expect the slave to be able to re-register,
-  // according to the non-strict semantics.
+  // Step 7: Ensure the slave can re-register.
   Future<SlaveReregisteredMessage> slaveReregisteredMessage =
     FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  // Expect a resource offer from the re-registered slave.
+  Future<Nothing> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureSatisfy(&offers));
 
   detector = master.get()->createDetector();
   slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveReregisteredMessage);
+  AWAIT_READY(offers);
 
   driver.stop();
   driver.join();

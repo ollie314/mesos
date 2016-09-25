@@ -52,9 +52,6 @@ namespace mesos {
 namespace internal {
 namespace slave {
 
-constexpr char LINUX_LAUNCHER_NAME[] = "linux";
-
-
 static ContainerID container(const string& cgroup)
 {
   string basename = Path(cgroup).basename();
@@ -274,7 +271,7 @@ Try<pid_t> LinuxLauncher::fork(
     const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<int>& namespaces,
-    vector<Subprocess::Hook> parentHooks)
+    vector<Subprocess::ParentHook> parentHooks)
 {
   int cloneFlags = namespaces.isSome() ? namespaces.get() : 0;
   cloneFlags |= SIGCHLD; // Specify SIGCHLD as child termination signal.
@@ -288,11 +285,12 @@ Try<pid_t> LinuxLauncher::fork(
   // If we are on systemd, then extend the life of the child. As with the
   // freezer, any grandchildren will also be contained in the slice.
   if (systemdHierarchy.isSome()) {
-    parentHooks.emplace_back(Subprocess::Hook(&systemd::mesos::extendLifetime));
+    parentHooks.emplace_back(Subprocess::ParentHook(
+        &systemd::mesos::extendLifetime));
   }
 
   // Create parent Hook for moving child into freezer cgroup.
-  parentHooks.emplace_back(Subprocess::Hook(lambda::bind(
+  parentHooks.emplace_back(Subprocess::ParentHook(lambda::bind(
       &assignFreezerHierarchy,
       lambda::_1,
       freezerHierarchy,
@@ -304,11 +302,11 @@ Try<pid_t> LinuxLauncher::fork(
       in,
       out,
       err,
-      SETSID,
       flags,
       environment,
       lambda::bind(&os::clone, lambda::_1, cloneFlags),
-      parentHooks);
+      parentHooks,
+      {Subprocess::ChildHook::SETSID()});
 
   if (child.isError()) {
     return Error("Failed to clone child process: " + child.error());
@@ -361,18 +359,6 @@ Future<ContainerStatus> LinuxLauncher::status(const ContainerID& containerId)
   status.set_executor_pid(pids[containerId]);
 
   return status;
-}
-
-
-string LinuxLauncher::getExitStatusCheckpointPath(
-    const ContainerID& containerId)
-{
-  return path::join(
-      flags.runtime_dir,
-      "launcher",
-      LINUX_LAUNCHER_NAME,
-      buildPathFromHierarchy(containerId, "containers"),
-      "exit_status");
 }
 
 

@@ -56,6 +56,7 @@
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
+#include <stout/linkedhashmap.hpp>
 #include <stout/multihashmap.hpp>
 #include <stout/option.hpp>
 #include <stout/recordio.hpp>
@@ -522,9 +523,7 @@ public:
       const MachineID& machineId,
       const Option<Unavailability>& unavailability);
 
-  void shutdownSlave(
-      const SlaveID& slaveId,
-      const std::string& message);
+  void markUnreachable(const SlaveID& slaveId);
 
   void authenticate(
       const process::UPID& from,
@@ -556,22 +555,6 @@ public:
   // Continuation of recover().
   // Made public for testing purposes.
   process::Future<Nothing> _recover(const Registry& registry);
-
-  // Continuation of reregisterSlave().
-  // Made public for testing purposes.
-  // TODO(vinod): Instead of doing this create and use a
-  // MockRegistrar.
-  // TODO(dhamon): Consider FRIEND_TEST macro from gtest.
-  void _reregisterSlave(
-      const SlaveInfo& slaveInfo,
-      const process::UPID& pid,
-      const std::vector<Resource>& checkpointedResources,
-      const std::vector<ExecutorInfo>& executorInfos,
-      const std::vector<Task>& tasks,
-      const std::vector<FrameworkInfo>& frameworks,
-      const std::vector<Archive::Framework>& completedFrameworks,
-      const std::string& version,
-      const process::Future<bool>& readmit);
 
   MasterInfo info() const
   {
@@ -621,6 +604,17 @@ protected:
       const std::vector<Resource>& checkpointedResources,
       const std::string& version,
       const process::Future<bool>& admit);
+
+  void _reregisterSlave(
+      const SlaveInfo& slaveInfo,
+      const process::UPID& pid,
+      const std::vector<Resource>& checkpointedResources,
+      const std::vector<ExecutorInfo>& executorInfos,
+      const std::vector<Task>& tasks,
+      const std::vector<FrameworkInfo>& frameworks,
+      const std::vector<Archive::Framework>& completedFrameworks,
+      const std::string& version,
+      const process::Future<bool>& readmit);
 
   void __reregisterSlave(
       Slave* slave,
@@ -686,9 +680,20 @@ protected:
       const std::vector<Archive::Framework>& completedFrameworks =
         std::vector<Archive::Framework>());
 
-  // Remove the slave from the registrar. Called when the slave
+  void _markUnreachable(
+      Slave* slave,
+      TimeInfo unreachableTime,
+      const process::Future<bool>& registrarResult);
+
+  // Mark a slave as unreachable in the registry. Called when the slave
   // does not re-register in time after a master failover.
-  Nothing removeSlave(const Registry::Slave& slave);
+  Nothing markUnreachableAfterFailover(const Registry::Slave& slave);
+
+  void _markUnreachableAfterFailover(
+      const SlaveInfo& slaveInfo,
+      const process::Future<bool>& registrarResult);
+
+  void sendSlaveLost(const SlaveInfo& slaveInfo);
 
   // Remove the slave from the registrar and from the master's state.
   //
@@ -699,10 +704,9 @@ protected:
       Option<process::metrics::Counter> reason = None());
 
   void _removeSlave(
-      const SlaveInfo& slaveInfo,
-      const std::vector<StatusUpdate>& updates,
-      const process::Future<bool>& removed,
-      const std::string& message,
+      Slave* slave,
+      const process::Future<bool>& registrarResult,
+      const std::string& removalCause,
       Option<process::metrics::Counter> reason = None());
 
   // Validates that the framework is authenticated, if required.
@@ -910,11 +914,11 @@ private:
       const scheduler::Call::Accept& accept);
 
   void _accept(
-    const FrameworkID& frameworkId,
-    const SlaveID& slaveId,
-    const Resources& offeredResources,
-    const scheduler::Call::Accept& accept,
-    const process::Future<std::list<process::Future<bool>>>& authorizations);
+      const FrameworkID& frameworkId,
+      const SlaveID& slaveId,
+      const Resources& offeredResources,
+      const scheduler::Call::Accept& accept,
+      const process::Future<std::list<process::Future<bool>>>& authorizations);
 
   void acceptInverseOffers(
       Framework* framework,
@@ -960,6 +964,14 @@ private:
   {
     return leader.isSome() && leader.get() == info_;
   }
+
+  void scheduleRegistryGc();
+
+  void doRegistryGc();
+
+  void _doRegistryGc(
+      const hashset<SlaveID>& toRemove,
+      const process::Future<bool>& registrarResult);
 
   process::Future<bool> authorizeLogAccess(
       const Option<std::string>& principal);
@@ -1592,6 +1604,10 @@ private:
   // master is elected as a leader.
   Option<process::Future<Nothing>> recovered;
 
+  // If this is the leading master, we periodically check whether we
+  // should GC some information from the registry.
+  Option<process::Timer> registryGcTimer;
+
   struct Slaves
   {
     Slaves() : removed(MAX_REMOVED_SLAVES) {}
@@ -1684,14 +1700,22 @@ private:
     // from the registry.
     hashset<SlaveID> removing;
 
-    // We track removed slaves to preserve the consistency
-    // semantics of the pre-registrar code when a non-strict registrar
-    // is being used. That is, if we remove a slave, we must make
-    // an effort to prevent it from (re-)registering, sending updates,
-    // etc. We keep a cache here to prevent this from growing in an
-    // unbounded manner.
+    // Slaves that are in the process of being marked unreachable.
+    hashset<SlaveID> markingUnreachable;
+
+    // This collection includes agents that have gracefully shutdown,
+    // as well as those that have been marked unreachable. We keep a
+    // cache here to prevent this from growing in an unbounded manner.
     // TODO(bmahler): Ideally we could use a cache with set semantics.
     Cache<SlaveID, Nothing> removed;
+
+    // Slaves that have been marked unreachable. We recover this from
+    // the registry, so it includes slaves marked as unreachable by
+    // other instances of the master. Note that we use a linkedhashmap
+    // to ensure the order of elements here matches the order in the
+    // registry's unreachable list, which matches the order in which
+    // agents are marked unreachable.
+    LinkedHashMap<SlaveID, TimeInfo> unreachable;
 
     // This rate limiter is used to limit the removal of slaves failing
     // health checks.
@@ -1905,22 +1929,15 @@ public:
   }
 
 protected:
-  virtual Try<bool> perform(
-      Registry* registry,
-      hashset<SlaveID>* slaveIDs,
-      bool strict)
+  virtual Try<bool> perform(Registry* registry, hashset<SlaveID>* slaveIDs)
   {
-    // Check and see if this slave is currently admitted.
+    // Check if this slave is currently admitted. This should only
+    // happen if there is a slaveID collision, but that is extremely
+    // unlikely in practice: slaveIDs are prefixed with the master ID,
+    // which is a randomly generated UUID.
     if (slaveIDs->contains(info.id())) {
-      if (strict) {
-        return Error("Agent already admitted");
-      } else {
-        return false; // No mutation.
-      }
+      return Error("Agent already admitted");
     }
-
-    // TODO(neilc): Check if the slave appears in the list of
-    // `unreachable` slaves in the registry?
 
     Registry::Slave* slave = registry->mutable_slaves()->add_slaves();
     slave->mutable_info()->CopyFrom(info);
@@ -1938,15 +1955,13 @@ private:
 class MarkSlaveUnreachable : public Operation
 {
 public:
-  explicit MarkSlaveUnreachable(const SlaveInfo& _info) : info(_info) {
+  MarkSlaveUnreachable(const SlaveInfo& _info, TimeInfo _unreachableTime)
+    : info(_info), unreachableTime(_unreachableTime) {
     CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
   }
 
 protected:
-  virtual Try<bool> perform(
-      Registry* registry,
-      hashset<SlaveID>* slaveIDs,
-      bool strict)
+  virtual Try<bool> perform(Registry* registry, hashset<SlaveID>* slaveIDs)
   {
     // As currently implemented, this should not be possible: the
     // master will only mark slaves unreachable that are currently
@@ -1966,7 +1981,7 @@ protected:
           registry->mutable_unreachable()->add_slaves();
 
         unreachable->mutable_id()->CopyFrom(info.id());
-        unreachable->mutable_timestamp()->CopyFrom(protobuf::getCurrentTime());
+        unreachable->mutable_timestamp()->CopyFrom(unreachableTime);
 
         return true; // Mutation.
       }
@@ -1978,6 +1993,7 @@ protected:
 
 private:
   const SlaveInfo info;
+  const TimeInfo unreachableTime;
 };
 
 
@@ -1995,10 +2011,7 @@ public:
   }
 
 protected:
-  virtual Try<bool> perform(
-      Registry* registry,
-      hashset<SlaveID>* slaveIDs,
-      bool strict)
+  virtual Try<bool> perform(Registry* registry, hashset<SlaveID>* slaveIDs)
   {
     // A slave might try to reregister that appears in the list of
     // admitted slaves. This can occur when the master fails over:
@@ -2044,37 +2057,45 @@ private:
 };
 
 
-// Implementation of slave readmission Registrar operation.
-class ReadmitSlave : public Operation
+class PruneUnreachable : public Operation
 {
 public:
-  explicit ReadmitSlave(const SlaveInfo& _info) : info(_info)
-  {
-    CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
-  }
+  explicit PruneUnreachable(const hashset<SlaveID>& _toRemove)
+    : toRemove(_toRemove) {}
 
 protected:
-  virtual Try<bool> perform(
-      Registry* registry,
-      hashset<SlaveID>* slaveIDs,
-      bool strict)
+  virtual Try<bool> perform(Registry* registry, hashset<SlaveID>* /*slaveIDs*/)
   {
-    if (slaveIDs->contains(info.id())) {
-      return false; // No mutation.
+    // Attempt to remove the SlaveIDs in `toRemove` from the
+    // unreachable list. Some SlaveIDs in `toRemove` might not appear
+    // in the registry; this is possible if there was a concurrent
+    // registry operation.
+    //
+    // TODO(neilc): This has quadratic worst-case behavior, because
+    // `DeleteSubrange` for a `repeated` object takes linear time.
+    bool mutate = false;
+    int i = 0;
+    while (i < registry->unreachable().slaves().size()) {
+      const Registry::UnreachableSlave& slave =
+        registry->unreachable().slaves(i);
+
+      if (toRemove.contains(slave.id())) {
+        Registry::UnreachableSlaves* unreachable =
+          registry->mutable_unreachable();
+
+        unreachable->mutable_slaves()->DeleteSubrange(i, i+1);
+        mutate = true;
+        continue;
+      }
+
+      i++;
     }
 
-    if (strict) {
-      return Error("Agent not yet admitted");
-    } else {
-      Registry::Slave* slave = registry->mutable_slaves()->add_slaves();
-      slave->mutable_info()->CopyFrom(info);
-      slaveIDs->insert(info.id());
-      return true; // Mutation.
-    }
+    return mutate;
   }
 
 private:
-  const SlaveInfo info;
+  const hashset<SlaveID> toRemove;
 };
 
 
@@ -2088,10 +2109,7 @@ public:
   }
 
 protected:
-  virtual Try<bool> perform(
-      Registry* registry,
-      hashset<SlaveID>* slaveIDs,
-      bool strict)
+  virtual Try<bool> perform(Registry* registry, hashset<SlaveID>* slaveIDs)
   {
     for (int i = 0; i < registry->slaves().slaves().size(); i++) {
       const Registry::Slave& slave = registry->slaves().slaves(i);
@@ -2102,11 +2120,9 @@ protected:
       }
     }
 
-    if (strict) {
-      return Error("Agent not yet admitted");
-    } else {
-      return false; // No mutation.
-    }
+    // Should not happen: the master will only try to remove agents
+    // that are currently admitted.
+    return Error("Agent not yet admitted");
   }
 
 private:

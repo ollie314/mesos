@@ -21,7 +21,7 @@
 #include <process/process.hpp>
 #include <process/reap.hpp>
 
-#include <stout/path.hpp>
+#include <stout/unreachable.hpp>
 
 #include <stout/os/killtree.hpp>
 
@@ -46,35 +46,9 @@ namespace mesos {
 namespace internal {
 namespace slave {
 
-constexpr char POSIX_LAUNCHER_NAME[] = "posix";
-
-
-string Launcher::buildPathFromHierarchy(
-    const ContainerID& _containerId,
-    const string& prefix)
-{
-  // Build the path in reverse order
-  // by following the parent hierarchy.
-  ContainerID containerId = _containerId;
-
-  string path = path::join(prefix, containerId.value());
-
-  while (containerId.has_parent()) {
-    containerId = containerId.parent();
-
-    path = path::join(
-        prefix,
-        containerId.value(),
-        path);
-  }
-
-  return path;
-}
-
-
 Try<Launcher*> PosixLauncher::create(const Flags& flags)
 {
-  return new PosixLauncher(flags);
+  return new PosixLauncher();
 }
 
 
@@ -114,7 +88,7 @@ Try<pid_t> PosixLauncher::fork(
     const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<int>& namespaces,
-    vector<process::Subprocess::Hook> parentHooks)
+    vector<process::Subprocess::ParentHook> parentHooks)
 {
   if (namespaces.isSome() && namespaces.get() != 0) {
     return Error("Posix launcher does not support namespaces");
@@ -129,7 +103,8 @@ Try<pid_t> PosixLauncher::fork(
   // grandchildren's lives will also be extended.
 #ifdef __linux__
   if (systemd::enabled()) {
-    parentHooks.emplace_back(Subprocess::Hook(&systemd::mesos::extendLifetime));
+    parentHooks.emplace_back(Subprocess::ParentHook(
+        &systemd::mesos::extendLifetime));
   }
 #endif // __linux__
 
@@ -139,11 +114,11 @@ Try<pid_t> PosixLauncher::fork(
       in,
       out,
       err,
-      SETSID,
       flags,
       environment,
       None(),
-      parentHooks);
+      parentHooks,
+      {Subprocess::ChildHook::SETSID()});
 
   if (child.isError()) {
     return Error("Failed to fork a child process: " + child.error());
@@ -207,21 +182,9 @@ Future<ContainerStatus> PosixLauncher::status(const ContainerID& containerId)
 }
 
 
-string PosixLauncher::getExitStatusCheckpointPath(
-    const ContainerID& containerId)
-{
-  return path::join(
-      flags.runtime_dir,
-      "launcher",
-      POSIX_LAUNCHER_NAME,
-      buildPathFromHierarchy(containerId, "containers"),
-      "exit_status");
-}
-
-
 Try<Launcher*> WindowsLauncher::create(const Flags& flags)
 {
-  return new WindowsLauncher(flags);
+  return new WindowsLauncher();
 }
 
 } // namespace slave {

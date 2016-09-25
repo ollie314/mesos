@@ -827,6 +827,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/launch.cpp					\
   slave/containerizer/mesos/launcher.cpp				\
   slave/containerizer/mesos/mount.cpp					\
+  slave/containerizer/mesos/paths.cpp					\
   slave/containerizer/mesos/isolators/filesystem/posix.cpp		\
   slave/containerizer/mesos/isolators/docker/volume/driver.cpp		\
   slave/containerizer/mesos/isolators/docker/volume/paths.cpp		\
@@ -951,6 +952,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/launch.hpp					\
   slave/containerizer/mesos/launcher.hpp				\
   slave/containerizer/mesos/mount.hpp					\
+  slave/containerizer/mesos/paths.hpp					\
   slave/containerizer/mesos/utils.hpp					\
   slave/containerizer/mesos/isolators/posix.hpp				\
   slave/containerizer/mesos/isolators/filesystem/posix.hpp		\
@@ -991,6 +993,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   tests/mesos.hpp							\
   tests/mock_docker.hpp							\
   tests/mock_slave.hpp							\
+  tests/mock_registrar.hpp						\
   tests/module.hpp							\
   tests/script.hpp							\
   tests/utils.hpp							\
@@ -1001,6 +1004,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   tests/containerizer/isolator.hpp					\
   tests/containerizer/launcher.hpp					\
   tests/containerizer/memory_test_helper.hpp				\
+  tests/containerizer/mock_containerizer.hpp				\
   tests/containerizer/rootfs.hpp					\
   tests/containerizer/setns_test_helper.hpp				\
   tests/containerizer/store.hpp						\
@@ -2107,6 +2111,7 @@ mesos_tests_SOURCES =						\
   tests/metrics_tests.cpp					\
   tests/mock_docker.cpp						\
   tests/mock_slave.cpp						\
+  tests/mock_registrar.cpp					\
   tests/module.cpp						\
   tests/module_tests.cpp					\
   tests/oversubscription_tests.cpp				\
@@ -2130,6 +2135,7 @@ mesos_tests_SOURCES =						\
   tests/script.cpp						\
   tests/slave_authorization_tests.cpp				\
   tests/slave_recovery_tests.cpp				\
+  tests/slave_validation_tests.cpp				\
   tests/slave_tests.cpp						\
   tests/sorter_tests.cpp					\
   tests/state_tests.cpp						\

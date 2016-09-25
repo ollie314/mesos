@@ -55,7 +55,6 @@ using process::delay;
 using process::Clock;
 using process::Failure;
 using process::Future;
-using process::NO_SETSID;
 using process::Owned;
 using process::Promise;
 using process::Subprocess;
@@ -79,6 +78,8 @@ static const string DEFAULT_DOMAIN = "127.0.0.1";
 
 
 #ifdef __linux__
+// TODO(alexr): Instead of defining this ad-hoc clone function, provide a
+// general solution for entring namespace in child processes, see MESOS-6184.
 pid_t cloneWithSetns(
     const lambda::function<int()>& func,
     Option<pid_t> taskPid,
@@ -311,7 +312,6 @@ Future<Nothing> HealthCheckerProcess::_commandHealthCheck()
         Subprocess::PATH("/dev/null"),
         Subprocess::FD(STDERR_FILENO),
         Subprocess::FD(STDERR_FILENO),
-        NO_SETSID,
         environment,
         clone);
   } else {
@@ -330,7 +330,6 @@ Future<Nothing> HealthCheckerProcess::_commandHealthCheck()
         Subprocess::PATH("/dev/null"),
         Subprocess::FD(STDERR_FILENO),
         Subprocess::FD(STDERR_FILENO),
-        NO_SETSID,
         nullptr,
         environment,
         clone);
@@ -404,7 +403,6 @@ Future<Nothing> HealthCheckerProcess::_httpHealthCheck()
       Subprocess::PATH("/dev/null"),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
-      NO_SETSID,
       nullptr,
       None(),
       clone);
@@ -516,7 +514,6 @@ Future<Nothing> HealthCheckerProcess::_tcpHealthCheck()
       Subprocess::PATH("/dev/null"),
       Subprocess::PIPE(),
       Subprocess::PIPE(),
-      NO_SETSID,
       nullptr,
       None(),
       clone);

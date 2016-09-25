@@ -100,10 +100,10 @@ public:
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
-  virtual process::Future<mesos::slave::ContainerTermination> wait(
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual void destroy(const ContainerID& containerId);
+  virtual process::Future<bool> destroy(const ContainerID& containerId);
 
   virtual process::Future<hashset<ContainerID>> containers();
 
@@ -150,10 +150,10 @@ public:
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
-  virtual process::Future<mesos::slave::ContainerTermination> wait(
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual void destroy(
+  virtual process::Future<bool> destroy(
       const ContainerID& containerId,
       bool killed = true); // process is either killed or reaped.
 

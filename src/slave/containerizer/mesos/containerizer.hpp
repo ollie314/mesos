@@ -101,10 +101,11 @@ public:
   virtual process::Future<ContainerStatus> status(
       const ContainerID& containerId);
 
-  virtual process::Future<mesos::slave::ContainerTermination> wait(
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
-  virtual void destroy(const ContainerID& containerId);
+  virtual process::Future<bool> destroy(
+      const ContainerID& containerId);
 
   virtual process::Future<hashset<ContainerID>> containers();
 
@@ -165,14 +166,15 @@ public:
   virtual process::Future<ContainerStatus> status(
       const ContainerID& containerId);
 
-  virtual process::Future<mesos::slave::ContainerTermination> wait(
+  virtual process::Future<Option<mesos::slave::ContainerTermination>> wait(
       const ContainerID& containerId);
 
   virtual process::Future<bool> exec(
       const ContainerID& containerId,
       int pipeWrite);
 
-  virtual void destroy(const ContainerID& containerId);
+  virtual process::Future<bool> destroy(
+      const ContainerID& containerId);
 
   virtual process::Future<hashset<ContainerID>> containers();
 
@@ -251,6 +253,11 @@ private:
       const ContainerID& containerId,
       const process::Future<mesos::slave::ContainerLimitation>& future);
 
+  // Helper for reaping the 'init' process of a container.
+  process::Future<Option<int>> reap(
+      const ContainerID& containerId,
+      pid_t pid);
+
   // Call back for when the executor exits. This will trigger container
   // destroy.
   void reaped(const ContainerID& containerId);
@@ -283,7 +290,7 @@ private:
     Container() : sequence("mesos-container-status-updates") {}
 
     // Promise for futures returned from wait().
-    process::Promise<mesos::slave::ContainerTermination> promise;
+    process::Promise<mesos::slave::ContainerTermination> termination;
 
     // We keep track of the future exit status for the container if it
     // has been launched. If the container has not been launched yet,

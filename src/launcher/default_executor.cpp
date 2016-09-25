@@ -65,7 +65,8 @@ public:
       launched(false),
       frameworkInfo(None()),
       frameworkId(_frameworkId),
-      executorId(_executorId) {}
+      executorId(_executorId),
+      taskGroup(None()) {}
 
   virtual ~DefaultExecutor() = default;
 
@@ -110,7 +111,7 @@ public:
       }
 
       case Event::KILL: {
-        // TODO(anand): Implement this.
+        killTask(event.kill().task_id());
         break;
       }
 
@@ -206,22 +207,36 @@ protected:
     }
 
     launched = true;
+    taskGroup = _taskGroup;
 
-    foreach (const TaskInfo& task, _taskGroup.tasks()) {
+    foreach (const TaskInfo& task, taskGroup->tasks()) {
       tasks[task.task_id()] = task;
     }
 
     // Send a TASK_RUNNING status update followed immediately by a
     // TASK_FINISHED update.
     //
-    // TODO(anand): Eventually, we need to invoke the `LAUNCH_CONTAINER`
+    // TODO(anand): Eventually, we need to invoke the `LAUNCH_NESTED_CONTAINER`
     // call via the Agent API.
-    foreach (const TaskInfo& task, _taskGroup.tasks()) {
+    foreach (const TaskInfo& task, taskGroup->tasks()) {
       update(task.task_id(), TASK_RUNNING);
     }
+  }
 
-    foreach (const TaskInfo& task, _taskGroup.tasks()) {
-      update(task.task_id(), TASK_FINISHED);
+  void killTask(const TaskID& taskId)
+  {
+    CHECK_EQ(SUBSCRIBED, state);
+
+    cout << "Received kill for task '" << taskId << "'" << endl;
+
+    // Send TASK_KILLED updates for all tasks in the group.
+    //
+    // TODO(vinod): We need to send `KILL_NESTED_CONTAINER` call to the Agent
+    // API for each of the tasks and wait for `WAIT_NESTED_CONTAINER` responses.
+
+    CHECK_SOME(taskGroup); // Should not get a `KILL` before `LAUNCH_GROUP`.
+    foreach (const TaskInfo& task, taskGroup->tasks()) {
+      update(task.task_id(), TASK_KILLED);
     }
 
     // TODO(qianzhang): Remove this hack since the executor now receives
@@ -251,6 +266,9 @@ private:
       status.set_message(message.get());
     }
 
+    // TODO(vinod): Implement health checks.
+    status.set_healthy(true);
+
     Call call;
     call.set_type(Call::UPDATE);
 
@@ -277,6 +295,7 @@ private:
   const FrameworkID frameworkId;
   const ExecutorID executorId;
   Owned<Mesos> mesos;
+  Option<TaskGroupInfo> taskGroup;
   LinkedHashMap<UUID, Call::Update> updates; // Unacknowledged updates.
   LinkedHashMap<TaskID, TaskInfo> tasks; // Unacknowledged tasks.
 };

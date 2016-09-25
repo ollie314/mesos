@@ -14,6 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef __WINDOWS__
+#include <sys/wait.h>
+#endif // __WINDOWS__
+
 #include <set>
 
 #include <mesos/module/isolator.hpp>
@@ -112,6 +116,7 @@
 #include "slave/containerizer/mesos/constants.hpp"
 #include "slave/containerizer/mesos/containerizer.hpp"
 #include "slave/containerizer/mesos/launch.hpp"
+#include "slave/containerizer/mesos/paths.hpp"
 #include "slave/containerizer/mesos/provisioner/provisioner.hpp"
 
 using process::collect;
@@ -235,9 +240,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
       return Error("Unknown or unsupported launcher: " + flags_.launcher);
     }
 #elif __WINDOWS__
-    // NOTE: Because the most basic launcher historically has been "posix", we
-    // accept this flag on Windows, but map it to the `WindowsLauncher`.
-    if (flags_.launcher != "posix" && flags_.launcher != "windows") {
+    if (flags_.launcher != "windows") {
       return Error("Unsupported launcher: " + flags_.launcher);
     }
 
@@ -538,7 +541,7 @@ Future<ContainerStatus> MesosContainerizer::status(
 }
 
 
-Future<ContainerTermination> MesosContainerizer::wait(
+Future<Option<ContainerTermination>> MesosContainerizer::wait(
     const ContainerID& containerId)
 {
   return dispatch(process.get(),
@@ -547,11 +550,11 @@ Future<ContainerTermination> MesosContainerizer::wait(
 }
 
 
-void MesosContainerizer::destroy(const ContainerID& containerId)
+Future<bool> MesosContainerizer::destroy(const ContainerID& containerId)
 {
-  dispatch(process.get(),
-           &MesosContainerizerProcess::destroy,
-           containerId);
+  return dispatch(process.get(),
+                  &MesosContainerizerProcess::destroy,
+                  containerId);
 }
 
 
@@ -708,9 +711,8 @@ Future<Nothing> MesosContainerizerProcess::__recover(
 
     Owned<Container> container(new Container());
 
-    Future<Option<int>> status = process::reap(run.pid());
-    status.onAny(defer(self(), &Self::reaped, containerId));
-    container->status = status;
+    container->status = reap(containerId, run.pid());
+    container->status->onAny(defer(self(), &Self::reaped, containerId));
 
     // We only checkpoint the containerizer pid after the container
     // successfully launched, therefore we can assume checkpointed
@@ -885,6 +887,24 @@ Future<bool> MesosContainerizerProcess::launch(
     const SlaveID& slaveId,
     bool checkpoint)
 {
+  // Before we launch the container, we first create the container
+  // runtime directory to hold internal checkpoint information about
+  // the container.
+  //
+  // NOTE: This is different than the checkpoint information requested
+  // by the agent via the `checkpoint` parameter. The containerizer
+  // itself uses the runtime directory created here to checkpoint
+  // state for internal use.
+  const string runtimePath =
+    containerizer::paths::getRuntimePath(flags.runtime_dir, containerId);
+
+  Try<Nothing> mkdir = os::mkdir(runtimePath);
+  if (mkdir.isError()) {
+    return Failure(
+        "Failed to make the containerizer runtime directory"
+        " '" + runtimePath + "': " + mkdir.error());
+  }
+
   Owned<Container> container(new Container());
   container->state = PROVISIONING;
   container->config = containerConfig;
@@ -938,7 +958,7 @@ Future<Nothing> MesosContainerizerProcess::prepare(
     return Failure("Container destroyed during provisioning");
   }
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   // Make sure containerizer is not in DESTROYING state, to avoid
   // a possible race that containerizer is destroying the container
@@ -1004,7 +1024,7 @@ Future<Nothing> MesosContainerizerProcess::fetch(
     return Failure("Container destroyed during isolating");
   }
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   if (container->state == DESTROYING) {
     return Failure("Container is being destroyed during isolating");
@@ -1047,7 +1067,7 @@ Future<bool> MesosContainerizerProcess::_launch(
     return Failure("Container destroyed during preparing");
   }
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   if (container->state == DESTROYING) {
     return Failure("Container is being destroyed during preparing");
@@ -1176,11 +1196,11 @@ Future<bool> MesosContainerizerProcess::_launch(
       return Failure("Container destroyed during preparing");
     }
 
-    if (containers_[containerId]->state == DESTROYING) {
+    if (containers_.at(containerId)->state == DESTROYING) {
       return Failure("Container is being destroyed during preparing");
     }
 
-    const Owned<Container>& container = containers_[containerId];
+    const Owned<Container>& container = containers_.at(containerId);
 
     // Use a pipe to block the child until it's been isolated.
     // The `pipes` array is captured later in a lambda.
@@ -1244,6 +1264,18 @@ Future<bool> MesosContainerizerProcess::_launch(
 #endif // __WINDOWS
     launchFlags.pre_exec_commands = preExecCommands;
 
+#ifndef __WINDOWS__
+    // Set the `runtime_directory` launcher flag so that the launch
+    // helper knows where to checkpoint the status of the container
+    // once it exits.
+    const string runtimePath =
+      containerizer::paths::getRuntimePath(flags.runtime_dir, containerId);
+
+    CHECK(os::exists(runtimePath));
+
+    launchFlags.runtime_directory = runtimePath;
+#endif // __WINDOWS__
+
     VLOG(1) << "Launching '" << MESOS_CONTAINERIZER << "' with flags '"
             << launchFlags << "'";
 
@@ -1270,7 +1302,7 @@ Future<bool> MesosContainerizerProcess::_launch(
     }
     pid_t pid = forked.get();
 
-    // Checkpoint the executor's pid if requested.
+    // Checkpoint the forked pid if requested by the agent.
     if (checkpoint) {
       const string& path = slave::paths::getForkedPidPath(
           slave::paths::getMetaRootDir(flags.work_dir),
@@ -1279,26 +1311,48 @@ Future<bool> MesosContainerizerProcess::_launch(
           container->config.executor_info().executor_id(),
           containerId);
 
-      LOG(INFO) << "Checkpointing executor's forked pid " << pid
+      LOG(INFO) << "Checkpointing container's forked pid " << pid
                 << " to '" << path <<  "'";
 
       Try<Nothing> checkpointed =
         slave::state::checkpoint(path, stringify(pid));
 
       if (checkpointed.isError()) {
-        LOG(ERROR) << "Failed to checkpoint executor's forked pid to '"
+        LOG(ERROR) << "Failed to checkpoint container's forked pid to '"
                    << path << "': " << checkpointed.error();
 
-        return Failure("Could not checkpoint executor's pid");
+        return Failure("Could not checkpoint container's pid");
       }
     }
 
-    // Monitor the executor's pid. We keep the future because we'll
-    // refer to it again during container destroy.
-    Future<Option<int>> status = process::reap(pid);
-    status.onAny(defer(self(), &Self::reaped, containerId));
+    // Checkpoint the forked pid to the container runtime directory.
+    //
+    // NOTE: This checkpoint MUST happen after checkpointing the `pid`
+    // to the meta directory above. This ensures that there will never
+    // be a pid checkpointed to the container runtime directory until
+    // after it has been checkpointed in the agent's meta directory.
+    // By maintaining this invariant we know that the only way a `pid`
+    // could ever exist in the runtime directory and NOT in the agent
+    // meta directory is if the meta directory was wiped clean for
+    // some reason. As such, we know if we run into this situation
+    // that it is safe to treat the relevant containers as orphans and
+    // destroy them.
+    const string pidPath = path::join(
+        containerizer::paths::getRuntimePath(flags.runtime_dir, containerId),
+        containerizer::paths::PID_FILE);
 
-    container->status = status;
+    Try<Nothing> checkpointed =
+      slave::state::checkpoint(pidPath, stringify(pid));
+
+    if (checkpointed.isError()) {
+      return Failure("Failed to checkpoint the container pid to"
+                     " '" + pidPath + "': " + checkpointed.error());
+    }
+
+    // Monitor the forked process's pid. We keep the future because
+    // we'll refer to it again during container destroy.
+    container->status = reap(containerId, pid);
+    container->status->onAny(defer(self(), &Self::reaped, containerId));
 
     return isolate(containerId, pid)
       .then(defer(self(),
@@ -1322,13 +1376,13 @@ Future<bool> MesosContainerizerProcess::isolate(
     return Failure("Container destroyed during preparing");
   }
 
-  if (containers_[containerId]->state == DESTROYING) {
+  if (containers_.at(containerId)->state == DESTROYING) {
     return Failure("Container is being destroyed during preparing");
   }
 
-  CHECK_EQ(containers_[containerId]->state, PREPARING);
+  CHECK_EQ(containers_.at(containerId)->state, PREPARING);
 
-  containers_[containerId]->state = ISOLATING;
+  containers_.at(containerId)->state = ISOLATING;
 
   // Set up callbacks for isolator limitations.
   foreach (const Owned<Isolator>& isolator, isolators) {
@@ -1348,7 +1402,7 @@ Future<bool> MesosContainerizerProcess::isolate(
   // Wait for all isolators to complete.
   Future<list<Nothing>> future = collect(futures);
 
-  containers_[containerId]->isolation = future;
+  containers_.at(containerId)->isolation = future;
 
   return future.then([]() { return true; });
 }
@@ -1364,11 +1418,11 @@ Future<bool> MesosContainerizerProcess::exec(
     return Failure("Container destroyed during fetching");
   }
 
-  if (containers_[containerId]->state == DESTROYING) {
+  if (containers_.at(containerId)->state == DESTROYING) {
     return Failure("Container is being destroyed during fetching");
   }
 
-  CHECK_EQ(containers_[containerId]->state, FETCHING);
+  CHECK_EQ(containers_.at(containerId)->state, FETCHING);
 
   // Now that we've contained the child we can signal it to continue
   // by writing to the pipe.
@@ -1382,7 +1436,7 @@ Future<bool> MesosContainerizerProcess::exec(
                    os::strerror(errno));
   }
 
-  containers_[containerId]->state = RUNNING;
+  containers_.at(containerId)->state = RUNNING;
 
   return true;
 }
@@ -1398,19 +1452,19 @@ Future<Nothing> MesosContainerizerProcess::launch(
 }
 
 
-Future<ContainerTermination> MesosContainerizerProcess::wait(
+Future<Option<ContainerTermination>> MesosContainerizerProcess::wait(
     const ContainerID& containerId)
 {
   CHECK(!containerId.has_parent());
 
   if (!containers_.contains(containerId)) {
-    // See the comments in destroy() for race conditions which lead
-    // to "unknown containers".
-    return Failure("Unknown container (could have already been destroyed): " +
-                   stringify(containerId));
+    // See the comments in destroy() for race conditions
+    // which lead to "unknown containers".
+    return None();
   }
 
-  return containers_[containerId]->promise.future();
+  return containers_.at(containerId)->termination.future()
+    .then(Option<ContainerTermination>::some);
 }
 
 
@@ -1429,7 +1483,7 @@ Future<Nothing> MesosContainerizerProcess::update(
     return Nothing();
   }
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   if (container->state == DESTROYING) {
     LOG(WARNING) << "Ignoring update for currently being destroyed "
@@ -1517,7 +1571,7 @@ Future<ResourceStatistics> MesosContainerizerProcess::usage(
     .then(lambda::bind(
           _usage,
           containerId,
-          containers_[containerId]->resources,
+          containers_.at(containerId)->resources,
           lambda::_1));
 }
 
@@ -1567,7 +1621,7 @@ Future<ContainerStatus> MesosContainerizerProcess::status(
   // MESOS-4671 for more details.
   VLOG(2) << "Serializing status request for container " << containerId;
 
-  return containers_[containerId]->sequence.add<ContainerStatus>(
+  return containers_.at(containerId)->sequence.add<ContainerStatus>(
       [=]() -> Future<ContainerStatus> {
         return await(futures)
           .then(lambda::bind(_status, containerId, lambda::_1));
@@ -1575,7 +1629,7 @@ Future<ContainerStatus> MesosContainerizerProcess::status(
 }
 
 
-void MesosContainerizerProcess::destroy(
+Future<bool> MesosContainerizerProcess::destroy(
     const ContainerID& containerId)
 {
   CHECK(!containerId.has_parent());
@@ -1593,15 +1647,20 @@ void MesosContainerizerProcess::destroy(
     //
     // The guard here and `if (container->state == DESTROYING)` below
     // make sure redundant destroys short-circuit.
-    VLOG(1) << "Ignoring destroy of unknown container " << containerId;
-    return;
+
+    // TODO(bmahler): Currently the agent does not log destroy
+    // failures or unknown containers, so we log it here for now.
+    // Move this logging into the callers.
+    LOG(WARNING) << "Attempted to destroy unknown container " << containerId;
+
+    return false;
   }
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   if (container->state == DESTROYING) {
-    VLOG(1) << "Destroy has already been initiated for " << containerId;
-    return;
+    return container->termination.future()
+      .then([]() { return true; });
   }
 
   LOG(INFO) << "Destroying container " << containerId;
@@ -1621,7 +1680,8 @@ void MesosContainerizerProcess::destroy(
           containerId,
           list<Future<Nothing>>()));
 
-    return;
+    return container->termination.future()
+      .then([]() { return true; });
   }
 
   if (container->state == PREPARING) {
@@ -1646,7 +1706,8 @@ void MesosContainerizerProcess::destroy(
             : None())
       .onAny(defer(self(), &Self::___destroy, containerId));
 
-    return;
+    return container->termination.future()
+      .then([]() { return true; });
   }
 
   if (container->state == ISOLATING) {
@@ -1660,7 +1721,8 @@ void MesosContainerizerProcess::destroy(
     container->isolation
       .onAny(defer(self(), &Self::_destroy, containerId));
 
-    return;
+    return container->termination.future()
+      .then([]() { return true; });
   }
 
   // Either RUNNING or FETCHING at this point.
@@ -1670,6 +1732,9 @@ void MesosContainerizerProcess::destroy(
 
   container->state = DESTROYING;
   _destroy(containerId);
+
+  return container->termination.future()
+    .then([]() { return true; });
 }
 
 
@@ -1690,7 +1755,7 @@ void MesosContainerizerProcess::__destroy(
 {
   CHECK(containers_.contains(containerId));
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   // Something has gone wrong and the launcher wasn't able to kill all
   // the processes in the container. We cannot clean up the isolators
@@ -1699,7 +1764,7 @@ void MesosContainerizerProcess::__destroy(
   // TODO(idownes): This is a pretty bad state to be in but we should
   // consider cleaning up here.
   if (!future.isReady()) {
-    container->promise.fail(
+    container->termination.fail(
         "Failed to kill all processes in the container: " +
         (future.isFailed() ? future.failure() : "discarded future"));
 
@@ -1738,7 +1803,7 @@ void MesosContainerizerProcess::____destroy(
   CHECK_READY(cleanups);
   CHECK(containers_.contains(containerId));
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   // Check cleanup succeeded for all isolators. If not, we'll fail the
   // container termination and remove the container from the map.
@@ -1753,7 +1818,7 @@ void MesosContainerizerProcess::____destroy(
   }
 
   if (!errors.empty()) {
-    container->promise.fail(
+    container->termination.fail(
         "Failed to clean up an isolator when destroying container: " +
         strings::join("; ", errors));
 
@@ -1774,10 +1839,10 @@ void MesosContainerizerProcess::_____destroy(
 {
   CHECK(containers_.contains(containerId));
 
-  const Owned<Container>& container = containers_[containerId];
+  const Owned<Container>& container = containers_.at(containerId);
 
   if (!destroy.isReady()) {
-    container->promise.fail(
+    container->termination.fail(
         "Failed to destroy the provisioned rootfs when destroying container: " +
         (destroy.isFailed() ? destroy.failure() : "discarded future"));
 
@@ -1816,9 +1881,70 @@ void MesosContainerizerProcess::_____destroy(
     termination.set_message(strings::join("; ", messages));
   }
 
-  container->promise.set(termination);
+  // Remove the runtime path for the container. Note that it is likely
+  // that the runtime path does not exist (e.g., legacy container). We
+  // should ignore the removal if that's the case.
+  const string runtimePath =
+    containerizer::paths::getRuntimePath(flags.runtime_dir, containerId);
 
+  if (os::exists(runtimePath)) {
+    Try<Nothing> rmdir = os::rmdir(runtimePath);
+    if (rmdir.isError()) {
+      LOG(WARNING) << "Failed to remove the runtime directory"
+                   << " for container " << containerId
+                   << ": " << rmdir.error();
+    }
+  }
+
+  container->termination.set(termination);
   containers_.erase(containerId);
+}
+
+
+Future<Option<int>> MesosContainerizerProcess::reap(
+    const ContainerID& containerId,
+    pid_t pid)
+{
+#ifdef __WINDOWS__
+  // We currently don't checkpoint the wait status on windows so
+  // just return the reaped status directly.
+  return process::reap(pid);
+#else
+  return process::reap(pid)
+    .then(defer(self(), [=](const Option<int>& status) -> Future<Option<int>> {
+      // Determine if we just reaped a legacy container or a
+      // non-legacy container. We do this by checking for the
+      // existence of the container runtime directory (which only
+      // exists for new (i.e. non-legacy) containers). If it is a
+      // legacy container, we simply forward the reaped exit status
+      // back to the caller.
+      const string runtimePath =
+        containerizer::paths::getRuntimePath(flags.runtime_dir, containerId);
+
+      if (!os::exists(runtimePath)) {
+        return status;
+      }
+
+      // If we are a non-legacy container, attempt to reap the
+      // container status from the checkpointed status file.
+      Result<int> containerStatus =
+        containerizer::paths::getContainerStatus(
+            flags.runtime_dir,
+            containerId);
+
+      if (containerStatus.isError()) {
+        return Failure("Failed to get container status: " +
+                       containerStatus.error());
+      } else if (containerStatus.isSome()) {
+        return containerStatus.get();
+      }
+
+      // If there isn't a container status file or it is empty, then the
+      // init process must have been interrupted by a SIGKILL before
+      // it had a chance to write the file. Return as such.
+      return W_EXITCODE(0, SIGKILL);
+    }));
+#endif // __WINDOWS__
 }
 
 
@@ -1840,7 +1966,7 @@ void MesosContainerizerProcess::limited(
     const Future<ContainerLimitation>& future)
 {
   if (!containers_.contains(containerId) ||
-      containers_[containerId]->state == DESTROYING) {
+      containers_.at(containerId)->state == DESTROYING) {
     return;
   }
 
@@ -1849,7 +1975,7 @@ void MesosContainerizerProcess::limited(
               << " resource " << future.get().resources()
               << " and will be terminated";
 
-    containers_[containerId]->limitations.push_back(future.get());
+    containers_.at(containerId)->limitations.push_back(future.get());
   } else {
     // TODO(idownes): A discarded future will not be an error when
     // isolators discard their promises after cleanup.

@@ -34,20 +34,6 @@
 
 namespace process {
 
-// Flag describing whether a new process should generate a new sid.
-enum Setsid
-{
-  SETSID,
-  NO_SETSID,
-};
-
-// Flag describing whether a new process should be monitored by a seperate
-// watch process and be killed in case the parent process dies.
-enum Watchdog {
-  MONITOR,
-  NO_MONITOR,
-};
-
 /**
  * Represents a fork() exec()ed subprocess. Access is provided to the
  * input / output of the process, as well as the exit status. The
@@ -60,7 +46,8 @@ class Subprocess
 {
 public:
   // Forward declarations.
-  struct Hook;
+  struct ParentHook;
+  class ChildHook;
 
   /**
    * Describes how the I/O is redirected for stdin/stdout/stderr.
@@ -82,7 +69,7 @@ public:
      * descriptor if one is present.
      *
      * NOTE: We initialize `read` to -1 so that we do not close an
-     * arbitrary file descriptor,in case we encounter an error
+     * arbitrary file descriptor, in case we encounter an error
      * while starting a subprocess (closing -1 is always a no-op).
      */
     struct InputFileDescriptors
@@ -97,12 +84,12 @@ public:
     };
 
     /**
-     * For output file descriptors a child write to the `write` file
+     * For output file descriptors a child writes to the `write` file
      * descriptor and a parent may read from the `read` file
      * descriptor if one is present.
      *
      * NOTE: We initialize `write` to -1 so that we do not close an
-     * arbitrary file descriptor,in case we encounter an error
+     * arbitrary file descriptor, in case we encounter an error
      * while starting a subprocess (closing -1 is always a no-op).
      */
     struct OutputFileDescriptors
@@ -145,14 +132,12 @@ public:
         const Subprocess::IO& in,
         const Subprocess::IO& out,
         const Subprocess::IO& err,
-        const Setsid set_sid,
         const flags::FlagsBase* flags,
         const Option<std::map<std::string, std::string>>& environment,
         const Option<lambda::function<
             pid_t(const lambda::function<int()>&)>>& clone,
-        const std::vector<Subprocess::Hook>& parent_hooks,
-        const Option<std::string>& working_directory,
-        const Watchdog watchdog);
+        const std::vector<Subprocess::ParentHook>& parent_hooks,
+        const std::vector<Subprocess::ChildHook>& child_hooks);
 
     IO(const lambda::function<Try<InputFileDescriptors>()>& _input,
        const lambda::function<Try<OutputFileDescriptors>()>& _output)
@@ -173,27 +158,63 @@ public:
   /**
    * A hook can be passed to a `subprocess` call. It provides a way to
    * inject dynamic implementation behavior between the clone and exec
-   * calls in the implementation of `subprocess`.
+   * calls in the parent process.
    */
-  struct Hook
+  struct ParentHook
   {
-    /**
-     * Returns an empty list of hooks.
-     */
-    static std::vector<Hook> None() { return std::vector<Hook>(); }
-
-    Hook(const lambda::function<Try<Nothing>(pid_t)>& _parent_callback);
+    ParentHook(const lambda::function<Try<Nothing>(pid_t)>& _parent_setup);
 
     /**
-     * The callback that must be sepcified for execution after the
-     * child has been cloned, but before it start executing the new
+     * The callback that must be specified for execution after the
+     * child has been cloned, but before it starts executing the new
      * process. This provides access to the child pid after its
      * initialization to add tracking or modify execution state of
      * the child before it executes the new process.
      */
-    const lambda::function<Try<Nothing>(pid_t)> parent_callback;
+    const lambda::function<Try<Nothing>(pid_t)> parent_setup;
 
     friend class Subprocess;
+  };
+
+  /**
+   * A `ChildHook` can be passed to a `subprocess` call. It provides a way to
+   * inject predefined behavior between the clone and exec calls in the
+   * child process.
+   * As such `ChildHooks` have to fulfill certain criteria (especially
+   * being async safe) the class does not offer a public constructor.
+   * Instead instances can be created via factory methods.
+   * NOTE: Returning an error from a childHook causes the child process to
+   * abort.
+   */
+  class ChildHook
+  {
+  public:
+    /**
+     * `ChildHook` for changing the working directory.
+     */
+    static ChildHook CHDIR(const std::string& working_directory);
+
+    /**
+     * `ChildHook` for generating a new session id.
+     */
+    static ChildHook SETSID();
+
+    /**
+     * `ChildHook` for starting a Supervisor process monitoring
+     *  and killing the child process if the parent process terminates.
+     *
+     * NOTE: The supervisor process sets the process group id in order for it
+     * and its child processes to be killed together. We should not (re)set the
+     * sid after this.
+     */
+    static ChildHook SUPERVISOR();
+
+    Try<Nothing> operator()() const { return child_setup(); }
+
+  private:
+    ChildHook(const lambda::function<Try<Nothing>()>& _child_setup);
+
+    const lambda::function<Try<Nothing>()> child_setup;
   };
 
   // Some syntactic sugar to create an IO::PIPE redirector.
@@ -269,14 +290,12 @@ private:
       const Subprocess::IO& in,
       const Subprocess::IO& out,
       const Subprocess::IO& err,
-      const Setsid setsid,
       const flags::FlagsBase* flags,
       const Option<std::map<std::string, std::string>>& environment,
       const Option<lambda::function<
           pid_t(const lambda::function<int()>&)>>& clone,
-      const std::vector<Subprocess::Hook>& parent_hooks,
-      const Option<std::string>& working_directory,
-      const Watchdog watchdog);
+      const std::vector<Subprocess::ParentHook>& parent_hooks,
+      const std::vector<Subprocess::ChildHook>& child_hooks);
 
   struct Data
   {
@@ -331,8 +350,6 @@ private:
  * @param in Redirection specification for stdin.
  * @param out Redirection specification for stdout.
  * @param err Redirection specification for stderr.
- * @param set_sid Indicator whether the process should be placed in
- *     a new session after the 'parent_hooks' have been executed.
  * @param flags Flags to be stringified and appended to 'argv'.
  * @param environment Environment variables to use for the new
  *     subprocess or if None (the default) then the new subprocess
@@ -341,10 +358,8 @@ private:
  *     subprocess.
  * @param parent_hooks Hooks that will be executed in the parent
  *     before the child execs.
- * @param working_directory Directory in which the process should
- *     chdir before exec after the 'parent_hooks' have been executed.
- * @param watchdog Indicator whether the new process should be monitored
- *     and killed if the parent process terminates.
+ * @param child_hooks Hooks that will be executed in the child
+ *     before the child execs but after parent_hooks have executed.
  * @return The subprocess or an error if one occurred.
  */
 // TODO(jmlvanre): Consider removing default argument for
@@ -355,15 +370,12 @@ Try<Subprocess> subprocess(
     const Subprocess::IO& in = Subprocess::FD(STDIN_FILENO),
     const Subprocess::IO& out = Subprocess::FD(STDOUT_FILENO),
     const Subprocess::IO& err = Subprocess::FD(STDERR_FILENO),
-    const Setsid set_sid = NO_SETSID,
     const flags::FlagsBase* flags = nullptr,
     const Option<std::map<std::string, std::string>>& environment = None(),
     const Option<lambda::function<
         pid_t(const lambda::function<int()>&)>>& clone = None(),
-    const std::vector<Subprocess::Hook>& parent_hooks =
-      Subprocess::Hook::None(),
-    const Option<std::string>& working_directory = None(),
-    const Watchdog watchdog = NO_MONITOR);
+    const std::vector<Subprocess::ParentHook>& parent_hooks = {},
+    const std::vector<Subprocess::ChildHook>& child_hooks = {});
 
 
 /**
@@ -377,8 +389,6 @@ Try<Subprocess> subprocess(
  * @param in Redirection specification for stdin.
  * @param out Redirection specification for stdout.
  * @param err Redirection specification for stderr.
- * @param set_sid Indicator whether the process should be placed in
- *     a new session after the 'parent_hooks' have been executed.
  * @param environment Environment variables to use for the new
  *     subprocess or if None (the default) then the new subprocess
  *     will inherit the environment of the current process.
@@ -386,10 +396,8 @@ Try<Subprocess> subprocess(
  *     subprocess.
  * @param parent_hooks Hooks that will be executed in the parent
  *     before the child execs.
- * @param working_directory Directory in which the process should
- *     chdir before exec after the 'parent_hooks' have been executed.
- * @param watchdog Indicator whether the new process should be monitored
- *     and killed if the parent process terminates.
+ * @param child_hooks Hooks that will be executed in the child
+ *     before the child execs but after parent_hooks have executed.
  * @return The subprocess or an error if one occurred.
  */
 // TODO(jmlvanre): Consider removing default argument for
@@ -399,14 +407,11 @@ inline Try<Subprocess> subprocess(
     const Subprocess::IO& in = Subprocess::FD(STDIN_FILENO),
     const Subprocess::IO& out = Subprocess::FD(STDOUT_FILENO),
     const Subprocess::IO& err = Subprocess::FD(STDERR_FILENO),
-    const Setsid set_sid = NO_SETSID,
     const Option<std::map<std::string, std::string>>& environment = None(),
     const Option<lambda::function<
         pid_t(const lambda::function<int()>&)>>& clone = None(),
-    const std::vector<Subprocess::Hook>& parent_hooks =
-      Subprocess::Hook::None(),
-    const Option<std::string>& working_directory = None(),
-    const Watchdog watchdog = NO_MONITOR)
+    const std::vector<Subprocess::ParentHook>& parent_hooks = {},
+    const std::vector<Subprocess::ChildHook>& child_hooks = {})
 {
   std::vector<std::string> argv = {os::Shell::arg0, os::Shell::arg1, command};
 
@@ -416,13 +421,11 @@ inline Try<Subprocess> subprocess(
       in,
       out,
       err,
-      set_sid,
       nullptr,
       environment,
       clone,
       parent_hooks,
-      working_directory,
-      watchdog);
+      child_hooks);
 }
 
 } // namespace process {

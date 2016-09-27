@@ -80,7 +80,9 @@ public:
         Subprocess::FD(STDERR_FILENO),
         &launchFlags,
         None(),
-        lambda::bind(&os::clone, lambda::_1, CLONE_NEWNS | SIGCHLD));
+        [](const lambda::function<int()>& child) {
+          return os::clone(child, CLONE_NEWNS | SIGCHLD);
+        });
 
     close(launchFlags.pipe_read.get());
     close(launchFlags.pipe_write.get());
@@ -114,12 +116,7 @@ TEST_F(MesosContainerizerLaunchTest, ROOT_ChangeRootfs)
     Clock::settle();
   }
 
-  AWAIT_ASSERT_READY(s.get().status());
-  ASSERT_SOME(s.get().status().get());
-
-  int status = s.get().status().get().get();
-  ASSERT_TRUE(WIFEXITED(status));
-  ASSERT_EQ(0, WEXITSTATUS(status));
+  AWAIT_ASSERT_WEXITSTATUS_EQ(0, s.get().status());
 
   // Check the rootfs has a different root by comparing the inodes.
   Try<ino_t> self = os::stat::inode("/");

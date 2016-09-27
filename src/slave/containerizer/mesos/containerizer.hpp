@@ -49,6 +49,7 @@ namespace slave {
 // Forward declaration.
 class MesosContainerizerProcess;
 
+
 class MesosContainerizer : public Containerizer
 {
 public:
@@ -85,11 +86,13 @@ public:
       const std::map<std::string, std::string>& environment,
       bool checkpoint);
 
-  virtual process::Future<Nothing> launch(
+  virtual process::Future<bool> launch(
       const ContainerID& containerId,
       const CommandInfo& commandInfo,
       const Option<ContainerInfo>& containerInfo,
-      const Resources& resources);
+      const std::string& directory,
+      const Option<std::string>& user,
+      const SlaveID& slaveId);
 
   virtual process::Future<Nothing> update(
       const ContainerID& containerId,
@@ -150,11 +153,13 @@ public:
       const std::map<std::string, std::string>& environment,
       bool checkpoint);
 
-  virtual process::Future<Nothing> launch(
+  virtual process::Future<bool> launch(
       const ContainerID& containerId,
       const CommandInfo& commandInfo,
       const Option<ContainerInfo>& containerInfo,
-      const Resources& resources);
+      const std::string& directory,
+      const Option<std::string>& user,
+      const SlaveID& slaveId);
 
   virtual process::Future<Nothing> update(
       const ContainerID& containerId,
@@ -178,12 +183,17 @@ public:
 
   virtual process::Future<hashset<ContainerID>> containers();
 
-  // Made public for testing.
-  void ___recover(
-      const ContainerID& containerId,
-      const process::Future<std::list<process::Future<Nothing>>>& future);
-
 private:
+  enum State
+  {
+    PROVISIONING,
+    PREPARING,
+    ISOLATING,
+    FETCHING,
+    RUNNING,
+    DESTROYING
+  };
+
   process::Future<Nothing> _recover(
       const std::list<mesos::slave::ContainerState>& recoverable,
       const hashset<ContainerID>& orphans);
@@ -225,25 +235,31 @@ private:
       const ContainerID& containerId,
       pid_t _pid);
 
-  // Continues 'destroy()' once isolators has completed.
-  void _destroy(const ContainerID& containerId);
+  // Continues 'destroy()' once nested containers are handled.
+  process::Future<bool> _destroy(
+      const ContainerID& containerId,
+      const State& previousState);
 
-  // Continues '_destroy()' once all processes have been killed by the launcher.
-  void __destroy(
+  // Continues '_destroy()' once isolators has completed.
+  void __destroy(const ContainerID& containerId);
+
+  // Continues '__destroy()' once all processes have been killed
+  // by the launcher.
+  void ___destroy(
       const ContainerID& containerId,
       const process::Future<Nothing>& future);
 
-  // Continues '__destroy()' once we get the exit status of the executor.
-  void ___destroy(const ContainerID& containerId);
+  // Continues '___destroy()' once we get the exit status of the container.
+  void ____destroy(const ContainerID& containerId);
 
-  // Continues '___destroy()' once all isolators have completed
+  // Continues '____destroy()' once all isolators have completed
   // cleanup.
-  void ____destroy(
+  void _____destroy(
       const ContainerID& containerId,
       const process::Future<std::list<process::Future<Nothing>>>& cleanups);
 
-  // Continues '____destroy()' once provisioner have completed destroy.
-  void _____destroy(
+  // Continues '_____destroy()' once provisioner have completed destroy.
+  void ______destroy(
       const ContainerID& containerId,
       const process::Future<bool>& destroy);
 
@@ -275,22 +291,22 @@ private:
   const process::Shared<Provisioner> provisioner;
   const std::vector<process::Owned<mesos::slave::Isolator>> isolators;
 
-  enum State
-  {
-    PROVISIONING,
-    PREPARING,
-    ISOLATING,
-    FETCHING,
-    RUNNING,
-    DESTROYING
-  };
-
   struct Container
   {
     Container() : sequence("mesos-container-status-updates") {}
 
     // Promise for futures returned from wait().
     process::Promise<mesos::slave::ContainerTermination> termination;
+
+    // NOTE: this represents 'PID 1', i.e., the "init" of the
+    // container that we created (it may be for an executor, or any
+    // arbitrary process that has been launched in the event of nested
+    // containers).
+    Option<pid_t> pid;
+
+    // Sandbox directory for the container. It is optional here because
+    // we don't keep track of sandbox directory for orphan containers.
+    Option<std::string> directory;
 
     // We keep track of the future exit status for the container if it
     // has been launched. If the container has not been launched yet,
@@ -336,8 +352,8 @@ private:
     // maintain the order of `status` requests for a given container.
     process::Sequence sequence;
 
-    // Containers nested under this container.
-    hashmap<ContainerID, process::Owned<Container>> containers;
+    // Child containers nested under this container.
+    hashset<ContainerID> children;
   };
 
   hashmap<ContainerID, process::Owned<Container>> containers_;

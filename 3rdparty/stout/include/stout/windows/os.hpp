@@ -34,6 +34,7 @@
 #include <stout/windows.hpp>
 
 #include <stout/os/os.hpp>
+#include <stout/os/process.hpp>
 #include <stout/os/read.hpp>
 
 #include <stout/os/raw/environment.hpp>
@@ -151,8 +152,12 @@ inline Try<std::set<pid_t>> pids(Option<pid_t> group, Option<pid_t> session)
     // TODO(alexnaparu): Set a limit to the memory that can be used.
     processes.resize(max_items);
     size_in_bytes = processes.size() * sizeof(pid_t);
-    BOOL result = ::EnumProcesses(processes.data(), size_in_bytes,
-                                  &bytes_returned);
+    CHECK_LE(size_in_bytes, MAXDWORD);
+
+    BOOL result = ::EnumProcesses(
+        processes.data(),
+        static_cast<DWORD>(size_in_bytes),
+        &bytes_returned);
 
     if (!result) {
       return WindowsError("os::pids: Call to `EnumProcesses` failed");

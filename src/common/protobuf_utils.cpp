@@ -172,11 +172,17 @@ StatusUpdate createStatusUpdate(
     update.mutable_executor_id()->MergeFrom(status.executor_id());
   }
 
+  update.mutable_status()->MergeFrom(status);
+
   if (slaveId.isSome()) {
     update.mutable_slave_id()->MergeFrom(slaveId.get());
-  }
 
-  update.mutable_status()->MergeFrom(status);
+    // We also populate `TaskStatus.slave_id` if the executor
+    // did not set it.
+    if (!status.has_slave_id()) {
+      update.mutable_status()->mutable_slave_id()->MergeFrom(slaveId.get());
+    }
+  }
 
   if (!status.has_timestamp()) {
     update.set_timestamp(process::Clock::now().secs());
@@ -373,16 +379,21 @@ ContainerLimitation createContainerLimitation(
 
 
 ContainerState createContainerState(
-    const ExecutorInfo& executorInfo,
+    const Option<ExecutorInfo>& executorInfo,
     const ContainerID& container_id,
     pid_t pid,
     const string& directory)
 {
   ContainerState state;
-  state.mutable_executor_info()->CopyFrom(executorInfo);
+
+  if (executorInfo.isSome()) {
+    state.mutable_executor_info()->CopyFrom(executorInfo.get());
+  }
+
   state.mutable_container_id()->CopyFrom(container_id);
   state.set_pid(pid);
   state.set_directory(directory);
+
   return state;
 }
 

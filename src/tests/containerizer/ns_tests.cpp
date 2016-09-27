@@ -31,6 +31,7 @@
 
 #include <process/gtest.hpp>
 #include <process/latch.hpp>
+#include <process/reap.hpp>
 #include <process/subprocess.hpp>
 
 #include "linux/ns.hpp"
@@ -89,18 +90,15 @@ TEST(NsTest, ROOT_setns)
       Subprocess::FD(STDERR_FILENO),
       nullptr,
       None(),
-      lambda::bind(&os::clone, lambda::_1, flags | SIGCHLD));
+      [=](const lambda::function<int()>& child) {
+        return os::clone(child, flags | SIGCHLD);
+      });
 
   // Continue in parent.
   ASSERT_SOME(s);
 
   // The child should exit 0.
-  Future<Option<int>> status = s.get().status();
-  AWAIT_READY(status);
-
-  ASSERT_SOME(status.get());
-  EXPECT_TRUE(WIFEXITED(status.get().get()));
-  EXPECT_EQ(0, status.get().get());
+  AWAIT_EXPECT_WEXITSTATUS_EQ(0, s.get().status());
 }
 
 
@@ -176,24 +174,7 @@ TEST(NsTest, ROOT_getns)
   ASSERT_NE(-1, ::kill(pid, SIGKILL));
 
   // Wait for the child process.
-  int status;
-  EXPECT_NE(-1, ::waitpid((pid_t) -1, &status, 0));
-  ASSERT_TRUE(WIFSIGNALED(status));
-  EXPECT_EQ(SIGKILL, WTERMSIG(status));
-}
-
-
-static int childDestroy()
-{
-  // Fork a bunch of children.
-  ::fork();
-  ::fork();
-  ::fork();
-
-  // Parent and all children sleep.
-  while (true) { sleep(1); }
-
-  ABORT("Error, child should be killed before reaching here");
+  AWAIT_EXPECT_WTERMSIG_EQ(SIGKILL, reap(pid));
 }
 
 
@@ -210,11 +191,27 @@ TEST(NsTest, ROOT_destroy)
   Try<int> nstype = ns::nstype("pid");
   ASSERT_SOME(nstype);
 
-  pid_t pid = os::clone(childDestroy, SIGCHLD | nstype.get());
+  pid_t pid = os::clone([]() {
+    // Fork a bunch of children.
+    ::fork();
+    ::fork();
+    ::fork();
+
+    // Parent and all children sleep.
+    while (true) { sleep(1); }
+
+    ABORT("Error, child should be killed before reaching here");
+
+    return -1;
+  },
+  SIGCHLD | nstype.get());
 
   ASSERT_NE(-1, pid);
 
-  Future<Option<int>> status = process::reap(pid);
+  // NOTE: need to call `reap` here because the `ns::pid::destroy`
+  // also calls `reap` and so we won't get the right status if we call
+  // `reap` after calling `ns::pid::destroy`.
+  Future<Option<int>> status = reap(pid);
 
   // Ensure the child is in a different pid namespace.
   Try<ino_t> childNs = ns::getns(pid, "pid");
@@ -228,10 +225,7 @@ TEST(NsTest, ROOT_destroy)
   // Kill the child.
   AWAIT_READY(ns::pid::destroy(childNs.get()));
 
-  AWAIT_READY(status);
-  ASSERT_SOME(status.get());
-  ASSERT_TRUE(WIFSIGNALED(status.get().get()));
-  EXPECT_EQ(SIGKILL, WTERMSIG(status.get().get()));
+  AWAIT_EXPECT_WTERMSIG_EQ(SIGKILL, status);
 
   // Finally, verify that no processes are in the child's pid
   // namespace, i.e., destroy() also killed all descendants.
@@ -246,6 +240,65 @@ TEST(NsTest, ROOT_destroy)
       ASSERT_SOME_NE(childNs.get(), otherNs);
     }
   }
+}
+
+
+TEST(NsTest, ROOT_clone)
+{
+  // `ns::clone` does not support user namespaces yet.
+  ASSERT_ERROR(ns::clone(getpid(), CLONE_NEWUSER, []() { return -1; }, 0));
+
+  // Determine the namespaces this kernel supports and test them,
+  // skipping the user namespace for now because it's not fully
+  // supported depending on the filesystem, which we don't check for.
+  int nstypes = 0;
+  foreach (int nstype, ns::nstypes()) {
+    if (nstype != CLONE_NEWUSER) {
+      nstypes |= nstype;
+    }
+  }
+
+  pid_t parent = os::clone([]() {
+    while (true) { sleep(1); }
+    ABORT("Error, process should be killed before reaching here");
+    return -1;
+  },
+  SIGCHLD | nstypes);
+
+  ASSERT_NE(-1, parent);
+
+  Try<pid_t> child = ns::clone(parent, nstypes, []() {
+    while (true) { sleep(1); }
+    ABORT("Error, process should be killed before reaching here");
+    return -1;
+  },
+  SIGCHLD);
+
+  ASSERT_SOME(child);
+
+  foreach (const string& ns, ns::namespaces()) {
+    // See comment above as to why we're skipping the namespace.
+    if (ns == "user") {
+      continue;
+    }
+
+    Try<ino_t> inode = ns::getns(parent, ns);
+    ASSERT_SOME(inode);
+    EXPECT_SOME_NE(inode.get(), ns::getns(getpid(), ns));
+    EXPECT_SOME_EQ(inode.get(), ns::getns(child.get(), ns));
+  }
+
+  // Now kill the parent which should cause the child to exit since
+  // it's in the same PID namespace.
+  ASSERT_NE(-1, kill(parent, SIGKILL));
+  AWAIT_EXPECT_WTERMSIG_EQ(SIGKILL, reap(parent));
+
+  // We can reap the child but we don't expect any status because it's
+  // not a direct descendent because `ns::clone` does a fork before
+  // clone.
+  Future<Option<int>> status = reap(child.get());
+  AWAIT_READY(status);
+  EXPECT_NONE(status.get());
 }
 
 } // namespace tests {

@@ -113,6 +113,8 @@
 #include "slave/containerizer/mesos/isolators/volume/image.hpp"
 #endif
 
+#include "slave/containerizer/mesos/isolators/volume/sandbox_path.hpp"
+
 #include "slave/containerizer/mesos/constants.hpp"
 #include "slave/containerizer/mesos/containerizer.hpp"
 #include "slave/containerizer/mesos/launch.hpp"
@@ -309,6 +311,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     // "posix/disk" is deprecated in favor of the name "disk/du".
     {"posix/disk", &PosixDiskIsolatorProcess::create},
     {"disk/du", &PosixDiskIsolatorProcess::create},
+    {"volume/sandbox_path", &VolumeSandboxPathIsolatorProcess::create},
 
 #if ENABLE_XFS_DISK_ISOLATOR
     {"disk/xfs", &XfsDiskIsolatorProcess::create},
@@ -316,6 +319,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
 #else
     {"windows/cpu", &WindowsCpuIsolatorProcess::create},
 #endif // __WINDOWS__
+
 #ifdef __linux__
     {"cgroups/cpu", &CgroupsIsolatorProcess::create},
     {"cgroups/devices", &CgroupsIsolatorProcess::create},
@@ -726,7 +730,7 @@ Future<Nothing> MesosContainerizerProcess::recover(
 
     Owned<Container> container(new Container());
     container->state = RUNNING;
-    container->pid = pid.isSome() ? pid.get() : Option<int>();
+    container->pid = pid.isSome() ? pid.get() : Option<pid_t>();
     container->directory = directory;
 
     // Invoke 'reap' on each 'Container'. However, It's possible

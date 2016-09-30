@@ -3590,7 +3590,7 @@ void Slave::reregisterExecutorTimeout()
   }
 
   // Signal the end of recovery.
-  recovered.set(Nothing());
+  recoveryInfo.recovered.set(Nothing());
 }
 
 
@@ -5171,6 +5171,10 @@ Future<Nothing> Slave::_recoverContainerizer(
 
 Future<Nothing> Slave::_recover()
 {
+  // Alow HTTP based executors to subscribe after the
+  // containerizer recovery is complete.
+  recoveryInfo.reconnect = true;
+
   foreachvalue (Framework* framework, frameworks) {
     foreachvalue (Executor* executor, framework->executors) {
       // Set up callback for executor termination.
@@ -5230,7 +5234,7 @@ Future<Nothing> Slave::_recover()
     // We set 'recovered' flag inside reregisterExecutorTimeout(),
     // so that when the slave re-registers with master it can
     // correctly inform the master about the launched tasks.
-    return recovered.future();
+    return recoveryInfo.recovered.future();
   }
 
   return Nothing();
@@ -5331,7 +5335,7 @@ void Slave::__recover(const Future<Nothing>& future)
     // doesn't happen within a timeout.
   }
 
-  recovered.set(Nothing()); // Signal recovery.
+  recoveryInfo.recovered.set(Nothing()); // Signal recovery.
 }
 
 

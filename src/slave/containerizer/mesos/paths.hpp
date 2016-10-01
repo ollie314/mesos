@@ -17,9 +17,17 @@
 #ifndef __MESOS_CONTAINERIZER_PATHS_HPP__
 #define __MESOS_CONTAINERIZER_PATHS_HPP__
 
+#include <sys/types.h>
+
 #include <string>
+#include <vector>
+
+#include <stout/result.hpp>
+#include <stout/try.hpp>
 
 #include <mesos/mesos.hpp>
+
+#include <mesos/slave/containerizer.hpp>
 
 namespace mesos {
 namespace internal {
@@ -29,20 +37,30 @@ namespace paths {
 
 constexpr char PID_FILE[] = "pid";
 constexpr char STATUS_FILE[] = "status";
+constexpr char TERMINATION_FILE[] = "termination";
 constexpr char CONTAINER_DIRECTORY[] = "containers";
 
+
+enum Mode
+{
+  PREFIX,
+  SUFFIX,
+  JOIN,
+};
 
 // Returns a path representation of a ContainerID that can be used for
 // creating cgroups or writing to the filesystem. A ContainerID can
 // represent a nested container (i.e, it has a parent ContainerID) and
 // the path representation includes all of the parents as directories
-// in the path. The `prefix` parameter is prepended to each
-// ContainerID as we build the path. For example, given two
-// containers, one with ID 'a9dd' and one nested within 'a9dd' with ID
-// '4e3a' and a prefix of 'foo' we'd get: 'foo/a9dd/foo/4e3a').
+// in the path. Depending on the 'mode', the result can be the
+// following for a nested container 'xxx.yyy':
+//   1) mode == PREFIX: '<separator>/xxx/<separator>/yyy'
+//   2) mode == SUFFIX: 'xxx/<separator>/yyy/<separator>'
+//   3) mode == JOIN:   'xxx/<separator>/yyy'
 std::string buildPath(
     const ContainerID& containerId,
-    const std::string& prefix = "");
+    const std::string& separator,
+    const Mode& mode);
 
 
 // The containerizer uses the runtime directory (flag 'runtime_dir')
@@ -71,6 +89,12 @@ Result<pid_t> getContainerPid(
 
 // The helper method to read the status file.
 Result<int> getContainerStatus(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to read the container termination state.
+Result<mesos::slave::ContainerTermination> getContainerTermination(
     const std::string& runtimeDir,
     const ContainerID& containerId);
 

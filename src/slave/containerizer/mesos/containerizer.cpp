@@ -42,6 +42,7 @@
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 #include <stout/strings.hpp>
+#include <stout/unreachable.hpp>
 
 #include "common/protobuf_utils.hpp"
 
@@ -700,6 +701,19 @@ Future<Nothing> MesosContainerizerProcess::recover(
   // calling `launcher->recover`.
   foreach (const ContainerID& containerId, containerIds.get()) {
     if (alive.contains(containerId)) {
+      continue;
+    }
+
+    // Nested containers may have already been destroyed, but we leave
+    // their runtime directories around for the lifetime of their
+    // top-level container. If they have already been destroyed, we
+    // checkpoint their termination state, so the existence of this
+    // checkpointed information means we can safely ignore them here.
+    const string terminationPath = path::join(
+        containerizer::paths::getRuntimePath(flags.runtime_dir, containerId),
+        containerizer::paths::TERMINATION_FILE);
+
+    if (os::exists(terminationPath)) {
       continue;
     }
 
@@ -1683,8 +1697,28 @@ Future<Option<ContainerTermination>> MesosContainerizerProcess::wait(
     const ContainerID& containerId)
 {
   if (!containers_.contains(containerId)) {
-    // See the comments in destroy() for race conditions
-    // which lead to "unknown containers".
+    // If a container does not exist in our `container_` hashmap, it
+    // may be a nested container with checkpointed termination
+    // state. Attempt to return as such.
+    if (containerId.has_parent()) {
+      Result<ContainerTermination> termination =
+        containerizer::paths::getContainerTermination(
+            flags.runtime_dir,
+            containerId);
+
+      if (termination.isError()) {
+        return Failure("Failed to get container termination state:"
+                       " " + termination.error());
+      }
+
+      if (termination.isSome()) {
+        return termination.get();
+      }
+    }
+
+    // For all other cases return `None()`. See the comments in
+    // `destroy()` for race conditions which lead to "unknown
+    // containers".
     return None();
   }
 
@@ -1894,7 +1928,8 @@ Future<bool> MesosContainerizerProcess::destroy(
       .then([]() { return true; });
   }
 
-  LOG(INFO) << "Destroying container " << containerId;
+  LOG(INFO) << "Destroying container " << containerId << " in "
+            << container->state << " state";
 
   // NOTE: We save the preivous state so that '_destroy' can properly
   // cleanup based on the previous state of the container.
@@ -1904,24 +1939,48 @@ Future<bool> MesosContainerizerProcess::destroy(
 
   list<Future<bool>> destroys;
   foreach (const ContainerID& child, container->children) {
-    LOG(INFO) << "Destroying nested container " << child;
     destroys.push_back(destroy(child));
   }
 
-  return collect(destroys)
-    .then(defer(self(), &Self::_destroy, containerId, previousState));
+  await(destroys)
+    .then(defer(self(), [=](const list<Future<bool>>& futures) {
+      _destroy(containerId, previousState, futures);
+      return Nothing();
+    }));
+
+  return container->termination.future()
+    .then([]() { return true; });
 }
 
 
-Future<bool> MesosContainerizerProcess::_destroy(
+void MesosContainerizerProcess::_destroy(
     const ContainerID& containerId,
-    const State& previousState)
+    const State& previousState,
+    const list<Future<bool>>& destroys)
 {
   CHECK(containers_.contains(containerId));
 
   const Owned<Container>& container = containers_[containerId];
 
   CHECK_EQ(container->state, DESTROYING);
+
+  vector<string> errors;
+  foreach (const Future<bool>& future, destroys) {
+    if (!future.isReady()) {
+      errors.push_back(future.isFailed()
+        ? future.failure()
+        : "discarded");
+    }
+  }
+
+  if (!errors.empty()) {
+    container->termination.fail(
+        "Failed to destroy nested containers: " +
+        strings::join("; ", errors));
+
+    ++metrics.container_destroy_errors;
+    return;
+  }
 
   if (previousState == PROVISIONING) {
     VLOG(1) << "Waiting for the provisioner to complete provisioning "
@@ -1936,8 +1995,7 @@ Future<bool> MesosContainerizerProcess::_destroy(
           containerId,
           list<Future<Nothing>>()));
 
-    return container->termination.future()
-      .then([]() { return true; });
+    return;
   }
 
   if (previousState == PREPARING) {
@@ -1960,8 +2018,7 @@ Future<bool> MesosContainerizerProcess::_destroy(
             : None())
       .onAny(defer(self(), &Self::____destroy, containerId));
 
-    return container->termination.future()
-      .then([]() { return true; });
+    return;
   }
 
   if (previousState == ISOLATING) {
@@ -1973,8 +2030,7 @@ Future<bool> MesosContainerizerProcess::_destroy(
     container->isolation
       .onAny(defer(self(), &Self::__destroy, containerId));
 
-    return container->termination.future()
-      .then([]() { return true; });
+    return;
   }
 
   // Either RUNNING or FETCHING at this point.
@@ -1983,9 +2039,6 @@ Future<bool> MesosContainerizerProcess::_destroy(
   }
 
   __destroy(containerId);
-
-  return container->termination.future()
-    .then([]() { return true; });
 }
 
 
@@ -2018,8 +2071,6 @@ void MesosContainerizerProcess::___destroy(
     container->termination.fail(
         "Failed to kill all processes in the container: " +
         (future.isFailed() ? future.failure() : "discarded future"));
-
-    containers_.erase(containerId);
 
     ++metrics.container_destroy_errors;
     return;
@@ -2057,9 +2108,8 @@ void MesosContainerizerProcess::_____destroy(
   const Owned<Container>& container = containers_.at(containerId);
 
   // Check cleanup succeeded for all isolators. If not, we'll fail the
-  // container termination and remove the container from the map.
+  // container termination.
   vector<string> errors;
-
   foreach (const Future<Nothing>& cleanup, cleanups.get()) {
     if (!cleanup.isReady()) {
       errors.push_back(cleanup.isFailed()
@@ -2072,8 +2122,6 @@ void MesosContainerizerProcess::_____destroy(
     container->termination.fail(
         "Failed to clean up an isolator when destroying container: " +
         strings::join("; ", errors));
-
-    containers_.erase(containerId);
 
     ++metrics.container_destroy_errors;
     return;
@@ -2096,8 +2144,6 @@ void MesosContainerizerProcess::______destroy(
     container->termination.fail(
         "Failed to destroy the provisioned rootfs when destroying container: " +
         (destroy.isFailed() ? destroy.failure() : "discarded future"));
-
-    containers_.erase(containerId);
 
     ++metrics.container_destroy_errors;
     return;
@@ -2132,13 +2178,46 @@ void MesosContainerizerProcess::______destroy(
     termination.set_message(strings::join("; ", messages));
   }
 
-  // Remove the runtime path for the container. Note that it is likely
-  // that the runtime path does not exist (e.g., legacy container). We
-  // should ignore the removal if that's the case.
+  // Now that we are done destroying the container we need to cleanup
+  // it's runtime directory. There are two cases to consider:
+  //
+  // (1) We are a nested container:
+  //     In this case we should defer deletion of the runtime directory
+  //     until the top-level container is destroyed. Instead, we
+  //     checkpoint a file with the termination state indicating that
+  //     the container has already been destroyed. This allows
+  //     subsequent calls to `wait()` to succeed with the proper
+  //     termination state until the top-level container is destroyed.
+  //     It also prevents subsequent `destroy()` calls from attempting
+  //     to cleanup the container a second time.
+  //
+  // (2) We are a top-level container:
+  //     We should simply remove the runtime directory. Since we build
+  //     the runtime directories of nested containers hierarchically,
+  //     removing the top-level runtime directory will automatically
+  //     cleanup all nested container runtime directories as well.
+  //
+  // NOTE: The runtime directory will not exist for legacy containers,
+  // so we need to make sure it actually exists before attempting to
+  // remove it.
   const string runtimePath =
     containerizer::paths::getRuntimePath(flags.runtime_dir, containerId);
 
-  if (os::exists(runtimePath)) {
+  if (containerId.has_parent()) {
+    const string terminationPath =
+      path::join(runtimePath, containerizer::paths::TERMINATION_FILE);
+
+    LOG(INFO) << "Checkpointing termination state to nested container's"
+              << " runtime directory '" << terminationPath <<  "'";
+
+    Try<Nothing> checkpointed =
+      slave::state::checkpoint(terminationPath, termination);
+
+    if (checkpointed.isError()) {
+      LOG(ERROR) << "Failed to checkpoint nested container's termination state"
+                 << " to '" << terminationPath << "': " << checkpointed.error();
+    }
+  } else if (os::exists(runtimePath)) {
     Try<Nothing> rmdir = os::rmdir(runtimePath);
     if (rmdir.isError()) {
       LOG(WARNING) << "Failed to remove the runtime directory"
@@ -2148,6 +2227,12 @@ void MesosContainerizerProcess::______destroy(
   }
 
   container->termination.set(termination);
+
+  if (containerId.has_parent()) {
+    CHECK(containers_.contains(containerId.parent()));
+    CHECK(containers_[containerId.parent()]->children.contains(containerId));
+    containers_[containerId.parent()]->children.erase(containerId);
+  }
 
   containers_.erase(containerId);
 }
@@ -2296,6 +2381,29 @@ Future<list<Future<Nothing>>> MesosContainerizerProcess::cleanupIsolators(
 
   return f;
 }
+
+
+std::ostream& operator<<(
+    std::ostream& stream,
+    const MesosContainerizerProcess::State& state)
+{
+  switch (state) {
+    case MesosContainerizerProcess::PROVISIONING:
+      return stream << "PROVISIONING";
+    case MesosContainerizerProcess::PREPARING:
+      return stream << "PREPARING";
+    case MesosContainerizerProcess::ISOLATING:
+      return stream << "ISOLATING";
+    case MesosContainerizerProcess::FETCHING:
+      return stream << "FETCHING";
+    case MesosContainerizerProcess::RUNNING:
+      return stream << "RUNNING";
+    case MesosContainerizerProcess::DESTROYING:
+      return stream << "DESTROYING";
+    default:
+      UNREACHABLE();
+  }
+};
 
 } // namespace slave {
 } // namespace internal {

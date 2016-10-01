@@ -192,6 +192,8 @@ private:
     DESTROYING
   };
 
+  friend std::ostream& operator<<(std::ostream& stream, const State& state);
+
   process::Future<Nothing> _recover(
       const std::list<mesos::slave::ContainerState>& recoverable,
       const hashset<ContainerID>& orphans);
@@ -234,9 +236,10 @@ private:
       pid_t _pid);
 
   // Continues 'destroy()' once nested containers are handled.
-  process::Future<bool> _destroy(
+  void _destroy(
       const ContainerID& containerId,
-      const State& previousState);
+      const State& previousState,
+      const std::list<process::Future<bool>>& destroys);
 
   // Continues '_destroy()' once isolators has completed.
   void __destroy(const ContainerID& containerId);
@@ -364,6 +367,11 @@ private:
     process::metrics::Counter container_destroy_errors;
   } metrics;
 };
+
+
+std::ostream& operator<<(
+    std::ostream& stream,
+    const MesosContainerizerProcess::State& state);
 
 } // namespace slave {
 } // namespace internal {

@@ -17,8 +17,11 @@
 #include <stout/lambda.hpp>
 #include <stout/os.hpp>
 #include <stout/path.hpp>
+#include <stout/protobuf.hpp>
 
 #include "slave/containerizer/mesos/paths.hpp"
+
+using mesos::slave::ContainerTermination;
 
 using std::list;
 using std::string;
@@ -32,15 +35,25 @@ namespace paths {
 
 string buildPath(
     const ContainerID& containerId,
-    const string& prefix)
+    const string& separator,
+    const Mode& mode)
 {
   if (!containerId.has_parent()) {
-    return path::join(prefix, containerId.value());
+    switch (mode) {
+      case PREFIX:  return path::join(separator, containerId.value());
+      case SUFFIX:  return path::join(containerId.value(), separator);
+      case JOIN:    return containerId.value();
+      default:      UNREACHABLE();
+    }
   } else {
-    return path::join(
-        buildPath(containerId.parent(), prefix),
-        prefix,
-        containerId.value());
+    const string path = buildPath(containerId.parent(), separator, mode);
+
+    switch (mode) {
+      case PREFIX:  return path::join(path, separator, containerId.value());
+      case SUFFIX:  return path::join(path, containerId.value(), separator);
+      case JOIN:    return path::join(path, separator, containerId.value());
+      default:      UNREACHABLE();
+    }
   }
 }
 
@@ -51,7 +64,7 @@ string getRuntimePath(
 {
   return path::join(
       runtimeDir,
-      buildPath(containerId, CONTAINER_DIRECTORY));
+      buildPath(containerId, CONTAINER_DIRECTORY, PREFIX));
 }
 
 
@@ -118,6 +131,34 @@ Result<int> getContainerStatus(
   }
 
   return None();
+}
+
+
+Result<ContainerTermination> getContainerTermination(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  const string path = path::join(
+      getRuntimePath(runtimeDir, containerId),
+      TERMINATION_FILE);
+
+  if (!os::exists(path)) {
+    // This is possible because we don't atomically create the
+    // directory and write the 'TERMINATION' file and thus we might
+    // terminate/restart after we've created the directory but
+    // before we've written the file.
+    return None();
+  }
+
+  const Result<ContainerTermination>& termination =
+    ::protobuf::read<ContainerTermination>(path);
+
+  if (termination.isError()) {
+    return Error("Failed to read termination state of container:"
+                 " " + termination.error());
+  }
+
+  return termination;
 }
 
 

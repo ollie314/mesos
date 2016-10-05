@@ -17,7 +17,6 @@
 #include <mesos/executor.hpp>
 #include <mesos/scheduler.hpp>
 
-#include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
@@ -55,7 +54,6 @@ using mesos::master::detector::MasterDetector;
 using mesos::slave::ContainerLogger;
 using mesos::slave::ContainerTermination;
 
-using process::Clock;
 using process::Future;
 using process::Owned;
 using process::PID;
@@ -235,21 +233,8 @@ TEST_F(HealthCheckTest, HealthyTask)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/cpu,posix/mem";
-
-  Fetcher fetcher;
-
-  Try<MesosContainerizer*> _containerizer =
-    MesosContainerizer::create(flags, false, &fetcher);
-
-  CHECK_SOME(_containerizer);
-  Owned<MesosContainerizer> containerizer(_containerizer.get());
-
   Owned<MasterDetector> detector = master.get()->createDetector();
-
-  Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), containerizer.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -388,7 +373,6 @@ TEST_F(HealthCheckTest, ROOT_HealthyTaskWithContainerImage)
   flags.docker_store_dir = path::join(os::getcwd(), "store");
 
   Owned<MasterDetector> detector = master.get()->createDetector();
-
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
   ASSERT_SOME(slave);
 
@@ -522,7 +506,6 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthyTask)
       docker);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
-
   Try<Owned<cluster::Slave>> slave =
     StartSlave(detector.get(), &containerizer, flags);
   ASSERT_SOME(slave);
@@ -610,21 +593,8 @@ TEST_F(HealthCheckTest, HealthyTaskNonShell)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/cpu,posix/mem";
-
-  Fetcher fetcher;
-
-  Try<MesosContainerizer*> _containerizer =
-    MesosContainerizer::create(flags, false, &fetcher);
-
-  CHECK_SOME(_containerizer);
-  Owned<MesosContainerizer> containerizer(_containerizer.get());
-
   Owned<MasterDetector> detector = master.get()->createDetector();
-
-  Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), containerizer.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -679,21 +649,8 @@ TEST_F(HealthCheckTest, HealthStatusChange)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/cpu,posix/mem";
-
-  Fetcher fetcher;
-
-  Try<MesosContainerizer*> _containerizer =
-    MesosContainerizer::create(flags, false, &fetcher);
-
-  CHECK_SOME(_containerizer);
-  Owned<MesosContainerizer> containerizer(_containerizer.get());
-
   Owned<MasterDetector> detector = master.get()->createDetector();
-
-  Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), containerizer.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -713,7 +670,7 @@ TEST_F(HealthCheckTest, HealthStatusChange)
   EXPECT_NE(0u, offers.get().size());
 
   // Create a temporary file.
-  Try<string> temporaryPath = os::mktemp();
+  Try<string> temporaryPath = os::mktemp(path::join(os::getcwd(), "XXXXXX"));
   ASSERT_SOME(temporaryPath);
   string tmpPath = temporaryPath.get();
 
@@ -727,30 +684,32 @@ TEST_F(HealthCheckTest, HealthStatusChange)
   //   - Attempt to remove the nonexistent temporary file.
   //   - Create the temporary file.
   //   - Exit with a non-zero status.
-  string alt = "rm " + tmpPath + " || (touch " + tmpPath + " && exit 1)";
+  const string healthCheckCmd =
+    "rm " + tmpPath + " || (touch " + tmpPath + " && exit 1)";
 
   vector<TaskInfo> tasks = populateTasks(
-      "sleep 120", alt, offers.get()[0], 0, 3);
+      "sleep 120", healthCheckCmd, offers.get()[0], 0, 3);
 
   Future<TaskStatus> statusRunning;
-  Future<TaskStatus> statusHealth1;
-  Future<TaskStatus> statusHealth2;
-  Future<TaskStatus> statusHealth3;
+  Future<TaskStatus> statusHealthy;
+  Future<TaskStatus> statusUnhealthy;
+  Future<TaskStatus> statusHealthyAgain;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
-    .WillOnce(FutureArg<1>(&statusHealth1))
-    .WillOnce(FutureArg<1>(&statusHealth2))
-    .WillOnce(FutureArg<1>(&statusHealth3));
+    .WillOnce(FutureArg<1>(&statusHealthy))
+    .WillOnce(FutureArg<1>(&statusUnhealthy))
+    .WillOnce(FutureArg<1>(&statusHealthyAgain))
+    .WillRepeatedly(Return()); // Ignore subsequent updates.
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
   AWAIT_READY(statusRunning);
   EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
 
-  AWAIT_READY(statusHealth1);
-  EXPECT_EQ(TASK_RUNNING, statusHealth1.get().state());
-  EXPECT_TRUE(statusHealth1.get().healthy());
+  AWAIT_READY(statusHealthy);
+  EXPECT_EQ(TASK_RUNNING, statusHealthy.get().state());
+  EXPECT_TRUE(statusHealthy.get().healthy());
 
   // Verify that task health is exposed in the master's state endpoint.
   {
@@ -788,9 +747,9 @@ TEST_F(HealthCheckTest, HealthStatusChange)
     EXPECT_SOME_TRUE(find);
   }
 
-  AWAIT_READY(statusHealth2);
-  EXPECT_EQ(TASK_RUNNING, statusHealth2.get().state());
-  EXPECT_FALSE(statusHealth2.get().healthy());
+  AWAIT_READY(statusUnhealthy);
+  EXPECT_EQ(TASK_RUNNING, statusUnhealthy.get().state());
+  EXPECT_FALSE(statusUnhealthy.get().healthy());
 
   // Verify that the task health change is reflected in the master's
   // state endpoint.
@@ -830,9 +789,9 @@ TEST_F(HealthCheckTest, HealthStatusChange)
     EXPECT_SOME_FALSE(find);
   }
 
-  AWAIT_READY(statusHealth3);
-  EXPECT_EQ(TASK_RUNNING, statusHealth3.get().state());
-  EXPECT_TRUE(statusHealth3.get().healthy());
+  AWAIT_READY(statusHealthyAgain);
+  EXPECT_EQ(TASK_RUNNING, statusHealthyAgain.get().state());
+  EXPECT_TRUE(statusHealthyAgain.get().healthy());
 
   // Verify through master's state endpoint that the task is back to a
   // healthy state.
@@ -871,8 +830,6 @@ TEST_F(HealthCheckTest, HealthStatusChange)
         "frameworks[0].executors[0].tasks[0].statuses[0].healthy");
     EXPECT_SOME_TRUE(find);
   }
-
-  os::rm(tmpPath); // Clean up the temporary file.
 
   driver.stop();
   driver.join();
@@ -915,7 +872,6 @@ TEST_F(HealthCheckTest, ROOT_DOCKER_DockerHealthStatusChange)
       docker);
 
   Owned<MasterDetector> detector = master.get()->createDetector();
-
   Try<Owned<cluster::Slave>> slave =
     StartSlave(detector.get(), &containerizer, flags);
   ASSERT_SOME(slave);
@@ -1034,21 +990,8 @@ TEST_F(HealthCheckTest, ConsecutiveFailures)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/cpu,posix/mem";
-
-  Fetcher fetcher;
-
-  Try<MesosContainerizer*> _containerizer =
-    MesosContainerizer::create(flags, false, &fetcher);
-
-  CHECK_SOME(_containerizer);
-  Owned<MesosContainerizer> containerizer(_containerizer.get());
-
   Owned<MasterDetector> detector = master.get()->createDetector();
-
-  Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), containerizer.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -1124,21 +1067,8 @@ TEST_F(HealthCheckTest, EnvironmentSetup)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/cpu,posix/mem";
-
-  Fetcher fetcher;
-
-  Try<MesosContainerizer*> _containerizer =
-    MesosContainerizer::create(flags, false, &fetcher);
-
-  CHECK_SOME(_containerizer);
-  Owned<MesosContainerizer> containerizer(_containerizer.get());
-
   Owned<MasterDetector> detector = master.get()->createDetector();
-
-  Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), containerizer.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -1185,27 +1115,14 @@ TEST_F(HealthCheckTest, EnvironmentSetup)
 }
 
 
-// Testing grace period that ignores all failed task failures.
-TEST_F(HealthCheckTest, DISABLED_GracePeriod)
+// Tests that health check failures are ignored during the grace period.
+TEST_F(HealthCheckTest, GracePeriod)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/cpu,posix/mem";
-
-  Fetcher fetcher;
-
-  Try<MesosContainerizer*> _containerizer =
-    MesosContainerizer::create(flags, false, &fetcher);
-
-  CHECK_SOME(_containerizer);
-  Owned<MesosContainerizer> containerizer(_containerizer.get());
-
   Owned<MasterDetector> detector = master.get()->createDetector();
-
-  Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), containerizer.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -1225,33 +1142,29 @@ TEST_F(HealthCheckTest, DISABLED_GracePeriod)
   AWAIT_READY(offers);
   EXPECT_NE(0u, offers.get().size());
 
+  // The health check for this task will always fail, but the grace period of
+  // 9999 seconds should mask the failures.
   vector<TaskInfo> tasks = populateTasks(
-    "sleep 120", "exit 1", offers.get()[0], 6);
+    "sleep 2", "false", offers.get()[0], 9999);
 
   Future<TaskStatus> statusRunning;
-  Future<TaskStatus> statusHealth;
+  Future<TaskStatus> statusFinished;
 
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&statusRunning))
-    .WillOnce(FutureArg<1>(&statusHealth))
+    .WillOnce(FutureArg<1>(&statusFinished))
     .WillRepeatedly(Return());
 
   driver.launchTasks(offers.get()[0].id(), tasks);
 
-  Clock::pause();
-  EXPECT_TRUE(statusHealth.isPending());
+  AWAIT_READY(statusRunning);
+  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+  EXPECT_FALSE(statusRunning.get().has_healthy());
 
   // No task unhealthy update should be called in grace period.
-  Clock::advance(Seconds(5));
-  EXPECT_TRUE(statusHealth.isPending());
-
-  Clock::advance(Seconds(1));
-  Clock::settle();
-  Clock::resume();
-
-  AWAIT_READY(statusHealth);
-  EXPECT_EQ(TASK_RUNNING, statusHealth.get().state());
-  EXPECT_FALSE(statusHealth.get().healthy());
+  AWAIT_READY(statusFinished);
+  EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
+  EXPECT_FALSE(statusFinished.get().has_healthy());
 
   driver.stop();
   driver.join();
@@ -1264,21 +1177,8 @@ TEST_F(HealthCheckTest, CheckCommandTimeout)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = CreateSlaveFlags();
-  flags.isolation = "posix/cpu,posix/mem";
-
-  Fetcher fetcher;
-
-  Try<MesosContainerizer*> _containerizer =
-    MesosContainerizer::create(flags, false, &fetcher);
-
-  CHECK_SOME(_containerizer);
-  Owned<MesosContainerizer> containerizer(_containerizer.get());
-
   Owned<MasterDetector> detector = master.get()->createDetector();
-
-  Try<Owned<cluster::Slave>> slave =
-    StartSlave(detector.get(), containerizer.get());
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -1348,7 +1248,6 @@ TEST_F(HealthCheckTest, DISABLED_HealthyTaskViaHTTPWithoutType)
   flags.isolation = "posix/cpu,posix/mem";
 
   Owned<MasterDetector> detector = master.get()->createDetector();
-
   Try<Owned<cluster::Slave>> agent = StartSlave(detector.get());
   ASSERT_SOME(agent);
 
@@ -1398,6 +1297,87 @@ TEST_F(HealthCheckTest, DISABLED_HealthyTaskViaHTTPWithoutType)
   EXPECT_EQ(TASK_RUNNING, statusHealth.get().state());
   EXPECT_TRUE(statusHealth.get().has_healthy());
   EXPECT_TRUE(statusHealth.get().healthy());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// Tests the transition from healthy to unhealthy within the grace period, to
+// make sure that failures within the grace period aren't ignored if they come
+// after a success.
+TEST_F(HealthCheckTest, HealthyToUnhealthyTransitionWithinGracePeriod)
+{
+  master::Flags masterFlags = CreateMasterFlags();
+  masterFlags.allocation_interval = Milliseconds(50);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> agent = StartSlave(detector.get());
+  ASSERT_SOME(agent);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  // Create a temporary file.
+  const string tmpPath = path::join(os::getcwd(), "healthyToUnhealthy");
+
+  // This command fails every other invocation.
+  // For all runs i in Nat0, the following case i % 2 applies:
+  //
+  // Case 0:
+  //   - Remove the temporary file.
+  //
+  // Case 1:
+  //   - Attempt to remove the nonexistent temporary file.
+  //   - Create the temporary file.
+  //   - Exit with a non-zero status.
+  const string healthCheckCmd =
+    "rm " + tmpPath + " || (touch " + tmpPath + " && exit 1)";
+
+  // Set the grace period to 9999 seconds, so that the healthy -> unhealthy
+  // transition happens during the grace period.
+  vector<TaskInfo> tasks = populateTasks(
+      "sleep 120", healthCheckCmd, offers.get()[0], 9999, 0);
+
+  Future<TaskStatus> statusRunning;
+  Future<TaskStatus> statusHealthy;
+  Future<TaskStatus> statusUnhealthy;
+
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&statusRunning))
+    .WillOnce(FutureArg<1>(&statusHealthy))
+    .WillOnce(FutureArg<1>(&statusUnhealthy))
+    .WillRepeatedly(Return()); // Ignore subsequent updates.
+
+  driver.launchTasks(offers.get()[0].id(), tasks);
+
+  AWAIT_READY(statusRunning);
+  EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
+
+  AWAIT_READY(statusHealthy);
+  EXPECT_EQ(TASK_RUNNING, statusHealthy.get().state());
+  EXPECT_TRUE(statusHealthy.get().has_healthy());
+  EXPECT_TRUE(statusHealthy.get().healthy());
+
+  AWAIT_READY(statusUnhealthy);
+  EXPECT_EQ(TASK_RUNNING, statusUnhealthy.get().state());
+  EXPECT_TRUE(statusUnhealthy.get().has_healthy());
+  EXPECT_FALSE(statusUnhealthy.get().healthy());
 
   driver.stop();
   driver.join();

@@ -1744,10 +1744,10 @@ private:
 
     hashmap<FrameworkID, Framework*> registered;
 
-    // 'Recovered' contains 'FrameworkInfo's for frameworks which
-    // would otherwise be unknown during recovery after master
-    // failover.
+    // `recovered` contains 'FrameworkInfo's for frameworks that have
+    // not yet re-registered after master failover.
     hashmap<FrameworkID, FrameworkInfo> recovered;
+
     boost::circular_buffer<std::shared_ptr<Framework>> completed;
 
     // Principals of frameworks keyed by PID.
@@ -2393,7 +2393,7 @@ struct Framework
     // MESOS-703.
 
     if (source.user() != info.user()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.user to '" << info.user()
+      LOG(WARNING) << "Cannot update FrameworkInfo.user to '" << info.user()
                    << "' for framework " << id() << ". Check MESOS-703";
     }
 
@@ -2406,13 +2406,13 @@ struct Framework
     }
 
     if (source.checkpoint() != info.checkpoint()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.checkpoint to '"
+      LOG(WARNING) << "Cannot update FrameworkInfo.checkpoint to '"
                    << stringify(info.checkpoint()) << "' for framework " << id()
                    << ". Check MESOS-703";
     }
 
     if (source.role() != info.role()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.role to '" << info.role()
+      LOG(WARNING) << "Cannot update FrameworkInfo.role to '" << info.role()
                    << "' for framework " << id() << ". Check MESOS-703";
     }
 
@@ -2423,7 +2423,7 @@ struct Framework
     }
 
     if (source.principal() != info.principal()) {
-      LOG(WARNING) << "Can not update FrameworkInfo.principal to '"
+      LOG(WARNING) << "Cannot update FrameworkInfo.principal to '"
                    << info.principal() << "' for framework " << id()
                    << ". Check MESOS-703";
     }

@@ -148,7 +148,7 @@ TYPED_TEST(SlaveAuthorizerTest, FilterStateEndpoint)
   frameworkInfo.set_user("bar");
 
   // Create an executor with user "bar".
-  ExecutorInfo executor = CREATE_EXECUTOR_INFO("test-executor", "sleep 2");
+  ExecutorInfo executor = createExecutorInfo("test-executor", "sleep 2");
   executor.mutable_command()->set_user("bar");
 
   MockExecutor exec(executor.executor_id());
@@ -280,7 +280,7 @@ TYPED_TEST(SlaveAuthorizerTest, ViewFlags)
   }
 
   {
-    // Second default principal can not see the flags.
+    // Second default principal cannot see the flags.
     mesos::ACL::ViewFlags* acl = acls.add_view_flags();
     acl->mutable_principals()->add_values(DEFAULT_CREDENTIAL_2.principal());
     acl->mutable_flags()->set_type(ACL::Entity::NONE);

@@ -53,16 +53,6 @@
 namespace mesos {
 namespace v1 {
 
-// Forward declarations required for making
-// `convertJSON` a friend of `Resources`.
-class Resources;
-
-namespace internal {
-  Try<Resources> convertJSON(
-      const JSON::Array& resourcesJSON,
-      const std::string& defaultRole);
-}
-
 // NOTE: Resource objects stored in the class are always valid and
 // kept combined if possible. It is the caller's responsibility to
 // validate any Resource object or repeated Resource protobufs before
@@ -107,7 +97,7 @@ private:
     // Check whether this Resource_ object is empty.
     bool isEmpty() const;
 
-    // The `Resource_` arithmetric, comparison operators and `contains()`
+    // The `Resource_` arithmetic, comparison operators and `contains()`
     // method require the wrapped `resource` protobuf to have the same
     // sharedness.
     //
@@ -164,12 +154,11 @@ public:
   /**
    * Parses Resources from an input string.
    *
-   * Parses Resources from text in the form of a JSON array. If that fails,
-   * parses text in the form "name(role):value;name:value;...". Any resource
-   * that doesn't specify a role is assigned to the provided default role. See
-   * the `Resource` protobuf definition for precise JSON formatting.
-   *
-   * Example JSON: [{"name":cpus","type":"SCALAR","scalar":{"value":8}}]
+   * Parses Resources from text in the form of a JSON array or as a simple
+   * string in the form of "name(role):value;name:value;...". i.e., this
+   * method calls `fromJSON()` or `fromSimpleString()` and validates the
+   * resulting `vector<Resource>` before converting it to a `Resources`
+   * object.
    *
    * @param text The input string.
    * @param defaultRole The default role.
@@ -177,6 +166,50 @@ public:
    *     successful, or an Error otherwise.
    */
   static Try<Resources> parse(
+      const std::string& text,
+      const std::string& defaultRole = "*");
+
+  /**
+   * Parses an input JSON array into a vector of Resource objects.
+   *
+   * Parses into a vector of Resource objects from a JSON array. Any
+   * resource that doesn't specify a role is assigned to the provided
+   * default role. See the `Resource` protobuf definition for precise
+   * JSON formatting.
+   *
+   * Example JSON: [{"name":"cpus","type":"SCALAR","scalar":{"value":8}}]
+   *
+   * NOTE: The `Resource` objects in the result vector may not be valid
+   * semantically (i.e., they may not pass `Resources::validate()`). This
+   * is to allow additional handling of the parsing results in some cases.
+   *
+   * @param resourcesJSON The input JSON array.
+   * @param defaultRole The default role.
+   * @return A `Try` which contains the parsed vector of Resource objects
+   *     if parsing was successful, or an Error otherwise.
+   */
+  static Try<std::vector<Resource>> fromJSON(
+      const JSON::Array& resourcesJSON,
+      const std::string& defaultRole = "*");
+
+  /**
+   * Parses an input text string into a vector of Resource objects.
+   *
+   * Parses into a vector of Resource objects from text. Any resource that
+   * doesn't specify a role is assigned to the provided default role.
+   *
+   * Example text: name(role):value;name:value;...
+   *
+   * NOTE: The `Resource` objects in the result vector may not be valid
+   * semantically (i.e., they may not pass `Resources::validate()`). This
+   * is to allow additional handling of the parsing results in some cases.
+   *
+   * @param text The input text string.
+   * @param defaultRole The default role.
+   * @return A `Try` which contains the parsed vector of Resource objects
+   *     if parsing was successful, or an Error otherwise.
+   */
+  static Try<std::vector<Resource>> fromSimpleString(
       const std::string& text,
       const std::string& defaultRole = "*");
 
@@ -470,7 +503,7 @@ public:
   bool operator!=(const Resources& that) const;
 
   // NOTE: If any error occurs (e.g., input Resource is not valid or
-  // the first operand is not a superset of the second oprand while
+  // the first operand is not a superset of the second operand while
   // doing subtraction), the semantics is as though the second operand
   // was actually just an empty resource (as though you didn't do the
   // operation at all).
@@ -486,10 +519,6 @@ public:
 
   friend std::ostream& operator<<(
       std::ostream& stream, const Resource_& resource_);
-
-  friend Try<Resources> internal::convertJSON(
-      const JSON::Array& resourcesJSON,
-      const std::string& defaultRole);
 
 private:
   // Similar to 'contains(const Resource&)' but skips the validity

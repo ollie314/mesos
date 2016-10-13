@@ -627,14 +627,14 @@ TEST(ResourcesTest, ParsingFromJSONError)
 
   EXPECT_ERROR(Resources::parse(jsonString));
 
-  // Empty Resources.
+  // Negative Resources.
   jsonString =
     "["
     "  {"
     "    \"name\": \"panda_power\","
     "    \"type\": \"SCALAR\","
     "    \"scalar\": {"
-    "      \"value\": 0"
+    "      \"value\": -1"
     "    }"
     "  },"
     "  {"
@@ -2785,7 +2785,7 @@ public:
     reservations.totalOperations = 10;
 
     // Test the performance of ranges using a fragmented range of
-    // ports: [1-2,4-5,7-9,...,1000]. Note that the benchmark will
+    // ports: [1-2,4-5,7-8,...,1000]. Note that the benchmark will
     // continuously sum together the same port range, which does
     // not preserve arithmetic invariants (a+a-a != a).
     string ports;
@@ -2891,6 +2891,67 @@ TEST_P(Resources_BENCHMARK_Test, Arithmetic)
        << " on " << abbreviate(stringify(resources), 50) << endl;
 
   ASSERT_TRUE(total.empty()) << total;
+}
+
+
+class Resources_Filter_BENCHMARK_Test : public ::testing::Test {};
+
+
+TEST_F(Resources_Filter_BENCHMARK_Test, Filters)
+{
+  size_t totalOperations = 50000u;
+
+  Resources nonRevocable =
+    Resources::parse("cpus:1;gpus:1;mem:128;disk:256").get();
+
+  Stopwatch watch;
+
+  watch.start();
+  for (size_t i = 0; i < totalOperations; i++) {
+    nonRevocable.nonRevocable();
+  }
+  watch.stop();
+
+  cout << "Took " << watch.elapsed()
+       << " to perform " << totalOperations << " 'r.nonRevocable()' operations"
+       << " on " << stringify(nonRevocable) << endl;
+
+  Resources revocable = createRevocableResource("cpus", "1", "*", true);
+
+  watch.start();
+  for (size_t i = 0; i < totalOperations; i++) {
+    revocable.revocable();
+  }
+  watch.stop();
+
+  cout << "Took " << watch.elapsed()
+       << " to perform " << totalOperations << " 'r.revocable()' operations"
+       << " on " << stringify(revocable) << endl;
+
+  Resources unReserved = nonRevocable;
+
+  watch.start();
+  for (size_t i = 0; i < totalOperations; i++) {
+    unReserved.unreserved();
+  }
+  watch.stop();
+
+  cout << "Took " << watch.elapsed()
+       << " to perform " << totalOperations << " 'r.unreserved()' operations"
+       << " on " << stringify(unReserved) << endl;
+
+  Resources reserved = Resources::parse(
+    "cpus(role):1;gpus(role):1;mem(role):128;disk(role):256").get();
+
+  watch.start();
+  for (size_t i = 0; i < totalOperations; i++) {
+    reserved.reserved("role");
+  }
+  watch.stop();
+
+  cout << "Took " << watch.elapsed()
+       << " to perform " << totalOperations << " 'r.reserved(role)' operations"
+       << " on " << stringify(reserved) << endl;
 }
 
 } // namespace tests {

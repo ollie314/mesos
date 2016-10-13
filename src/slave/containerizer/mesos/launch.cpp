@@ -31,13 +31,16 @@
 #include <stout/path.hpp>
 #include <stout/unreachable.hpp>
 
+#include <mesos/mesos.hpp>
+#include <mesos/type_utils.hpp>
+
+#include "common/parse.hpp"
+
 #ifdef __linux__
 #include "linux/capabilities.hpp"
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
 #endif
-
-#include "mesos/mesos.hpp"
 
 #include "slave/containerizer/mesos/launch.hpp"
 #include "slave/containerizer/mesos/paths.hpp"
@@ -67,6 +70,10 @@ MesosContainerizerLaunch::Flags::Flags()
   add(&command,
       "command",
       "The command to execute.");
+
+  add(&environment,
+      "environment",
+      "The environment variables for the command.");
 
   add(&working_directory,
       "working_directory",
@@ -110,14 +117,14 @@ MesosContainerizerLaunch::Flags::Flags()
       "executing the command.");
 
 #ifdef __linux__
+  add(&capabilities,
+      "capabilities",
+      "Capabilities the command can use.");
+
   add(&unshare_namespace_mnt,
       "unshare_namespace_mnt",
       "Whether to launch the command in a new mount namespace.",
       false);
-
-  add(&capabilities,
-      "capabilities",
-      "Capabilities of the command can use.");
 #endif // __linux__
 }
 
@@ -557,15 +564,6 @@ int MesosContainerizerLaunch::execute()
 
 #ifdef __linux__
   if (flags.capabilities.isSome()) {
-    Try<CapabilityInfo> requestedCapabilities =
-      ::protobuf::parse<CapabilityInfo>(flags.capabilities.get());
-
-    if (requestedCapabilities.isError()) {
-      cerr << "Failed to parse capabilities: "
-           << requestedCapabilities.error() << endl;
-      exitWithStatus(EXIT_FAILURE);
-    }
-
     Try<ProcessCapabilities> capabilities = capabilitiesManager->get();
     if (capabilities.isError()) {
       cerr << "Failed to get capabilities for the current process: "
@@ -586,7 +584,7 @@ int MesosContainerizerLaunch::execute()
     }
 
     // Set up requested capabilities.
-    set<Capability> target = capabilities::convert(requestedCapabilities.get());
+    set<Capability> target = capabilities::convert(flags.capabilities.get());
 
     capabilities->set(capabilities::EFFECTIVE, target);
     capabilities->set(capabilities::PERMITTED, target);
@@ -611,8 +609,21 @@ int MesosContainerizerLaunch::execute()
     }
   }
 
-  // Relay the environment variables.
-  // TODO(jieyu): Consider using a clean environment.
+  // Prepare the executable and the argument list for the child.
+  string executable(command->shell()
+    ? os::Shell::name
+    : command->value().c_str());
+
+  os::raw::Argv argv(command->shell()
+    ? vector<string>({os::Shell::arg0, os::Shell::arg1, command->value()})
+    : vector<string>(command->arguments().begin(), command->arguments().end()));
+
+  // Prepare the environment for the child. If 'environment' is not
+  // specified, inherit the environment of the current process.
+  Option<os::raw::Envp> envp;
+  if (flags.environment.isSome()) {
+    envp = os::raw::Envp(flags.environment.get());
+  }
 
 #ifndef __WINDOWS__
   // If we have `containerStatusFd` set, then we need to fork-exec the
@@ -688,17 +699,10 @@ int MesosContainerizerLaunch::execute()
   }
 #endif // __WINDOWS__
 
-  if (command->shell()) {
-    // Execute the command using shell.
-    os::execlp(os::Shell::name,
-               os::Shell::arg0,
-               os::Shell::arg1,
-               command->value().c_str(),
-               (char*) nullptr);
+  if (envp.isSome()) {
+    os::execvpe(executable.c_str(), argv, envp.get());
   } else {
-    // Use execvp to launch the command.
-    os::execvp(command->value().c_str(),
-               os::raw::Argv(command->arguments()));
+    os::execvp(executable.c_str(), argv);
   }
 
   // If we get here, the execle call failed.

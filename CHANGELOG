@@ -2,18 +2,18 @@ Release Notes - Mesos - Version 1.1.0 (WIP)
 --------------------------------------------
 This release contains the following new features:
 
-  * [MESOS-2533] - Support for HTTP and HTTPS health checks. Executors may now
-    use the updated `HealthCheck` protobuf to implement HTTP(S) health checks.
-    Both default executors (command and docker) leverage `curl` binary for
-    sending HTTP(S) requests and connect to `127.0.0.1`, hence a task must
-    listen on all interfaces. On Linux, For BRIDGE and USER modes, docker
-    executor enters the task's network namespace.
+  * [MESOS-2533] - **Experimental** support for HTTP and HTTPS health checks.
+    Executors may now use the updated `HealthCheck` protobuf to implement
+    HTTP(S) health checks. Both default executors (command and docker) leverage
+    `curl` binary for sending HTTP(S) requests and connect to `127.0.0.1`,
+    hence a task must listen on all interfaces. On Linux, For BRIDGE and USER
+    modes, docker executor enters the task's network namespace.
 
-  * [MESOS-3567] - Support for TCP health checks. Executors may now use the
-    updated `HealthCheck` protobuf to implement TCP health checks. Both default
-    executors (command and docker) connect to `127.0.0.1`, hence a task must
-    listen on all interfaces. On Linux, For BRIDGE and USER modes, docker
-    executor enters the task's network namespace.
+  * [MESOS-3567] - **Experimental** support for TCP health checks. Executors
+    may now use the updated `HealthCheck` protobuf to implement TCP health
+    checks. Both default executors (command and docker) connect to `127.0.0.1`,
+    hence a task must listen on all interfaces. On Linux, For BRIDGE and USER
+    modes, docker executor enters the task's network namespace.
 
 Deprecations:
   * The following metrics are deprecated and will be removed in Mesos 1.4:
@@ -24,6 +24,8 @@ Deprecations:
     and master/slave_unreachable_completed.
 
   * [MESOS-5955] - Health check binary "mesos-health-check" is removed.
+
+  * [MESOS-6371] - Remove the 'recover()' interface in 'ContainerLogger'.
 
 Additional API Changes:
   * [MESOS-6220] - HTTP handler failures should result in 500 rather than
@@ -54,6 +56,7 @@ All Issues:
     * [MESOS-6026] - Tasks mistakenly marked as FAILED due to race b/w sendExecutorTerminatedStatusUpdate() and _statusUpdate().
     * [MESOS-6269] - CNI isolator doesn't activate loopback interface.
     * [MESOS-6274] - Agent should not allow HTTP based executors to subscribe before containerizer recovery is done.
+    * [MESOS-6324] - CNI should not use `ifconfig` in executors `pre_exec_command`.
 
 
 Release Notes - Mesos - Version 1.0.1

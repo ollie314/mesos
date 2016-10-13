@@ -1590,7 +1590,12 @@ void Slave::run(
       frameworkPid = pid;
     }
 
-    framework = new Framework(this, frameworkInfo, frameworkPid);
+    framework = new Framework(
+        this,
+        flags,
+        frameworkInfo,
+        frameworkPid);
+
     frameworks[frameworkId] = framework;
     if (frameworkInfo.checkpoint()) {
       framework->checkpointFramework();
@@ -3080,6 +3085,26 @@ void Slave::subscribe(
         LOG(INFO) << "Creating a marker file for HTTP based executor "
                   << *executor << " at path '" << path << "'";
         CHECK_SOME(os::touch(path));
+      }
+
+      // Here, we kill the executor if it no longer has any task or task group
+      // to run (e.g., framework sent a `killTask()`). This is a workaround for
+      // those executors (e.g., command executor, default executor) that do not
+      // have a proper self terminating logic when they haven't received the
+      // task or task group within a timeout.
+      if (state != RECOVERING &&
+          executor->queuedTasks.empty() &&
+          executor->queuedTaskGroups.empty()) {
+        CHECK(executor->launchedTasks.empty())
+            << " Newly registered executor '" << executor->id
+            << "' has launched tasks";
+
+        LOG(WARNING) << "Shutting down the executor " << *executor
+                     << " because it has no tasks to run";
+
+        _shutdownExecutor(framework, executor);
+
+        return;
       }
 
       // Tell executor it's registered and give it any queued tasks
@@ -5382,7 +5407,9 @@ void Slave::recoverFramework(const FrameworkState& state)
     pid = None();
   }
 
-  Framework* framework = new Framework(this, frameworkInfo, pid);
+  Framework* framework = new Framework(
+      this, flags, frameworkInfo, pid);
+
   frameworks[framework->id()] = framework;
 
   if (recheckpoint) {
@@ -6047,13 +6074,14 @@ double Slave::_resources_revocable_percent(const string& name)
 
 Framework::Framework(
     Slave* _slave,
+    const Flags& slaveFlags,
     const FrameworkInfo& _info,
     const Option<UPID>& _pid)
   : state(RUNNING),
     slave(_slave),
     info(_info),
     pid(_pid),
-    completedExecutors(MAX_COMPLETED_EXECUTORS_PER_FRAMEWORK) {}
+    completedExecutors(slaveFlags.max_completed_executors_per_framework) {}
 
 
 void Framework::checkpointFramework() const

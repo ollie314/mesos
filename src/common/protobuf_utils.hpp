@@ -47,6 +47,12 @@ struct UPID;
 
 namespace mesos {
 namespace internal {
+
+namespace master {
+// Forward declaration (in lieu of an include).
+struct Slave;
+} // namespace master {
+
 namespace protobuf {
 
 bool frameworkHasCapability(
@@ -166,15 +172,31 @@ mesos::maintenance::Schedule createSchedule(
 namespace master {
 namespace event {
 
-// Helper for creating a `TASK_UPDATED` event from a `Task` with the
-// recently transitioned state of the task.
+// Helper for creating a `TASK_UPDATED` event from a `Task`, its
+// latest state according to the agent, and its status corresponding
+// to the last status update acknowledged from the scheduler.
 mesos::master::Event createTaskUpdated(
     const Task& task,
-    const TaskState& state);
+    const TaskState& state,
+    const TaskStatus& status);
 
 
 // Helper for creating a `TASK_ADDED` event from a `Task`.
 mesos::master::Event createTaskAdded(const Task& task);
+
+
+// Helper for creating an `Agent` response.
+mesos::master::Response::GetAgents::Agent createAgentResponse(
+    const mesos::internal::master::Slave& slave);
+
+
+// Helper for creating an `AGENT_ADDED` event from a `Slave`.
+mesos::master::Event createAgentAdded(
+    const mesos::internal::master::Slave& slave);
+
+
+// Helper for creating an `AGENT_REMOVED` event from a `SlaveID`.
+mesos::master::Event createAgentRemoved(const SlaveID& slaveId);
 
 } // namespace event {
 } // namespace master {

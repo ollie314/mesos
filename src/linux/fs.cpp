@@ -86,24 +86,13 @@ Try<bool> supported(const string& fsname)
   return false;
 }
 
-
 Try<MountInfoTable> MountInfoTable::read(
-    const Option<pid_t>& pid,
+    const string& lines,
     bool hierarchicalSort)
 {
   MountInfoTable table;
 
-  const string path = path::join(
-      "/proc",
-      (pid.isSome() ? stringify(pid.get()) : "self"),
-      "mountinfo");
-
-  Try<string> lines = os::read(path);
-  if (lines.isError()) {
-    return Error("Failed to read mountinfo file: " + lines.error());
-  }
-
-  foreach (const string& line, strings::tokenize(lines.get(), "\n")) {
+  foreach (const string& line, strings::tokenize(lines, "\n")) {
     Try<Entry> parse = MountInfoTable::Entry::parse(line);
     if (parse.isError()) {
       return Error("Failed to parse entry '" + line + "': " + parse.error());
@@ -138,14 +127,25 @@ Try<MountInfoTable> MountInfoTable::read(
     vector<MountInfoTable::Entry> sortedEntries;
 
     std::function<void(int)> sortFrom = [&](int parentId) {
-      CHECK(!visitedParents.contains(parentId)) << lines.get();
+      CHECK(!visitedParents.contains(parentId))
+        << "Cycle found in mount table hierarchy at entry"
+        << " '" << stringify(parentId) << "': " << std::endl << lines;
 
       visitedParents.insert(parentId);
 
       foreach (const MountInfoTable::Entry& entry, parentToChildren[parentId]) {
         int newParentId = entry.id;
         sortedEntries.push_back(std::move(entry));
-        sortFrom(newParentId);
+
+        // It is legal to have a `MountInfoTable` entry whose
+        // `entry.id` is the same as its `entry.parent`. This can
+        // happen (for example), if a system boots from the network
+        // and then keeps the original `/` in RAM. To avoid cycles
+        // when walking the mount hierarchy, we only recurse into our
+        // children if this case is not satisfied.
+        if (parentId != newParentId) {
+          sortFrom(newParentId);
+        }
       }
     };
 
@@ -158,6 +158,24 @@ Try<MountInfoTable> MountInfoTable::read(
   }
 
   return table;
+}
+
+
+Try<MountInfoTable> MountInfoTable::read(
+    const Option<pid_t>& pid,
+    bool hierarchicalSort)
+{
+  const string path = path::join(
+      "/proc",
+      (pid.isSome() ? stringify(pid.get()) : "self"),
+      "mountinfo");
+
+  Try<string> lines = os::read(path);
+  if (lines.isError()) {
+    return Error("Failed to read mountinfo file: " + lines.error());
+  }
+
+  return MountInfoTable::read(lines.get(), hierarchicalSort);
 }
 
 

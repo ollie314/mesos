@@ -14,10 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __WINDOWS__
-#include <sys/wait.h>
-#endif // __WINDOWS__
-
 #include <set>
 
 #include <mesos/module/isolator.hpp>
@@ -44,6 +40,8 @@
 #include <stout/strings.hpp>
 #include <stout/unreachable.hpp>
 
+#include <stout/os/wait.hpp>
+
 #include "common/protobuf_utils.hpp"
 
 #include "hook/manager.hpp"
@@ -56,73 +54,48 @@
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/fetcher.hpp"
 
+#include "slave/containerizer/mesos/constants.hpp"
+#include "slave/containerizer/mesos/launch.hpp"
 #include "slave/containerizer/mesos/launcher.hpp"
-#ifdef __linux__
-#include "slave/containerizer/mesos/linux_launcher.hpp"
-#endif // __linux__
+#include "slave/containerizer/mesos/containerizer.hpp"
+#include "slave/containerizer/mesos/paths.hpp"
+#include "slave/containerizer/mesos/utils.hpp"
 
+#include "slave/containerizer/mesos/isolators/filesystem/posix.hpp"
 #include "slave/containerizer/mesos/isolators/posix.hpp"
+#include "slave/containerizer/mesos/isolators/posix/disk.hpp"
+#include "slave/containerizer/mesos/isolators/volume/sandbox_path.hpp"
+
+#include "slave/containerizer/mesos/provisioner/provisioner.hpp"
+
 #ifdef __WINDOWS__
 #include "slave/containerizer/mesos/isolators/windows.hpp"
-#endif // __WINDOWS__
-
-#include "slave/containerizer/mesos/isolators/posix/disk.hpp"
-
-#if ENABLE_XFS_DISK_ISOLATOR
-#include "slave/containerizer/mesos/isolators/xfs/disk.hpp"
-#endif
-
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/appc/runtime.hpp"
-#endif // __linux__
-
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/cgroups/cgroups.hpp"
-#endif // __linux__
-
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/docker/runtime.hpp"
-#endif // __linux__
-
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/docker/volume/isolator.hpp"
-#endif // __linux__
-
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/filesystem/linux.hpp"
-#endif // __linux__
-#include "slave/containerizer/mesos/isolators/filesystem/posix.hpp"
-#ifdef __WINDOWS__
 #include "slave/containerizer/mesos/isolators/filesystem/windows.hpp"
 #endif // __WINDOWS__
+
 #ifdef __linux__
+#include "slave/containerizer/mesos/linux_launcher.hpp"
+
+#include "slave/containerizer/mesos/isolators/appc/runtime.hpp"
+#include "slave/containerizer/mesos/isolators/cgroups/cgroups.hpp"
+#include "slave/containerizer/mesos/isolators/docker/runtime.hpp"
+#include "slave/containerizer/mesos/isolators/docker/volume/isolator.hpp"
+#include "slave/containerizer/mesos/isolators/filesystem/linux.hpp"
 #include "slave/containerizer/mesos/isolators/filesystem/shared.hpp"
-#endif // __linux__
-
 #include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
-
-#ifdef __linux__
+#include "slave/containerizer/mesos/isolators/linux/capabilities.hpp"
 #include "slave/containerizer/mesos/isolators/namespaces/pid.hpp"
 #include "slave/containerizer/mesos/isolators/network/cni/cni.hpp"
-#endif
+#include "slave/containerizer/mesos/isolators/volume/image.hpp"
+#endif // __linux__
 
 #ifdef WITH_NETWORK_ISOLATOR
 #include "slave/containerizer/mesos/isolators/network/port_mapping.hpp"
 #endif
 
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/volume/image.hpp"
+#if ENABLE_XFS_DISK_ISOLATOR
+#include "slave/containerizer/mesos/isolators/xfs/disk.hpp"
 #endif
-
-#include "slave/containerizer/mesos/isolators/volume/sandbox_path.hpp"
-
-#include "slave/containerizer/mesos/constants.hpp"
-#include "slave/containerizer/mesos/containerizer.hpp"
-#include "slave/containerizer/mesos/launch.hpp"
-#include "slave/containerizer/mesos/paths.hpp"
-#include "slave/containerizer/mesos/utils.hpp"
-
-#include "slave/containerizer/mesos/provisioner/provisioner.hpp"
 
 using process::collect;
 using process::dispatch;
@@ -330,6 +303,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     {"appc/runtime", &AppcRuntimeIsolatorProcess::create},
     {"docker/runtime", &DockerRuntimeIsolatorProcess::create},
     {"docker/volume", &DockerVolumeIsolatorProcess::create},
+    {"linux/capabilities", &LinuxCapabilitiesIsolatorProcess::create},
 
     {"volume/image",
       [&provisioner] (const Flags& flags) -> Try<Isolator*> {
@@ -885,20 +859,6 @@ Future<Nothing> MesosContainerizerProcess::__recover(
       isolator->watch(containerId)
         .onAny(defer(self(), &Self::limited, containerId, lambda::_1));
     }
-
-    // TODO(gilbert): Make logger nesting aware.
-    if (!containerId.has_parent()) {
-      // Pass recovered containers to the container logger.
-      // NOTE: The current implementation of the container logger only
-      // outputs a warning and does not have any other consequences.
-      // See `ContainerLogger::recover` for more information.
-      logger->recover(run.executor_info(), run.directory())
-        .onFailed(defer(self(), [run](const string& message) {
-          LOG(WARNING) << "Container logger failed to recover executor '"
-                       << run.executor_info().executor_id() << "': "
-                       << message;
-        }));
-    }
   }
 
   // Maintain the children list in the `Container` struct.
@@ -1213,7 +1173,7 @@ Future<Nothing> MesosContainerizerProcess::fetch(
 
 Future<bool> MesosContainerizerProcess::_launch(
     const ContainerID& containerId,
-    map<string, string> environment,
+    const map<string, string>& _environment,
     const SlaveID& slaveId,
     bool checkpoint)
 {
@@ -1229,6 +1189,11 @@ Future<bool> MesosContainerizerProcess::_launch(
 
   CHECK_EQ(container->state, PREPARING);
 
+  JSON::Object environment;
+  foreachpair (const string& key, const string& value, _environment) {
+    environment.values[key] = value;
+  }
+
   // TODO(jieyu): Consider moving this to 'executorEnvironment' and
   // consolidating with docker containerizer.
   //
@@ -1236,7 +1201,7 @@ Future<bool> MesosContainerizerProcess::_launch(
   // filesystem for itself, we still set 'MESOS_SANDBOX' according to
   // the root filesystem of the task (if specified). Command executor
   // itself does not use this environment variable.
-  environment["MESOS_SANDBOX"] = container->config.has_rootfs()
+  environment.values["MESOS_SANDBOX"] = container->config.has_rootfs()
     ? flags.sandbox_directory
     : container->config.directory();
 
@@ -1252,6 +1217,7 @@ Future<bool> MesosContainerizerProcess::_launch(
   Option<CommandInfo> launchCommand;
   Option<string> workingDirectory;
   JSON::Array preExecCommands;
+  Option<CapabilityInfo> capabilities;
 
   // TODO(jieyu): We should use Option here. If no namespace is
   // required, we should pass None() to 'launcher->fork'.
@@ -1271,21 +1237,28 @@ Future<bool> MesosContainerizerProcess::_launch(
         const string& name = variable.name();
         const string& value = variable.value();
 
-        if (environment.count(name) > 0) {
+        if (environment.values.count(name) > 0) {
           VLOG(1) << "Overwriting environment variable '"
                   << name << "', original: '"
-                  << environment[name] << "', new: '"
+                  << environment.values[name] << "', new: '"
                   << value << "', for container "
                   << containerId;
         }
 
-        environment[name] = value;
+        environment.values[name] = value;
       }
     }
 
     if (launchInfo->has_command()) {
+      // NOTE: 'command' from 'launchInfo' will be merged. It is
+      // isolators' responsibility to make sure that the merged
+      // command is a valid command.
       if (launchCommand.isSome()) {
-        return Failure("At most one command can be returned from isolators");
+        VLOG(1) << "Merging launch commands '" << launchCommand.get()
+                << "' and '" << launchInfo->command()
+                << "' from two different isolators";
+
+        launchCommand->MergeFrom(launchInfo->command());
       } else {
         launchCommand = launchInfo->command();
       }
@@ -1307,14 +1280,26 @@ Future<bool> MesosContainerizerProcess::_launch(
     if (launchInfo->has_namespaces()) {
       namespaces |= launchInfo->namespaces();
     }
+
+    if (launchInfo->has_capabilities()) {
+      if (capabilities.isSome()) {
+        return Failure(
+            "At most one capabilities set can be returned from isolators");
+      } else {
+        capabilities = launchInfo->capabilities();
+      }
+    }
   }
 
+  // Determine the launch command for the container.
   if (launchCommand.isNone()) {
     launchCommand = container->config.command_info();
   }
 
   // For the command executor case, we should add the rootfs flag to
   // the launch command of the command executor.
+  // TODO(jieyu): Remove this once we no longer support the old style
+  // command task (i.e., that uses mesos-execute).
   if (container->config.has_task_info() &&
       container->config.has_rootfs()) {
     CHECK_SOME(launchCommand);
@@ -1322,25 +1307,51 @@ Future<bool> MesosContainerizerProcess::_launch(
         "--rootfs=" + container->config.rootfs());
   }
 
+  // TODO(jieyu): 'uris', 'environment' and 'user' in 'launchCommand'
+  // will be ignored. In fact, the above fields should be moved to
+  // TaskInfo or ExecutorInfo, instead of putting them in CommandInfo.
+  launchCommand->clear_uris();
+  launchCommand->clear_environment();
+  launchCommand->clear_user();
+
   // Include any enviroment variables from CommandInfo.
   foreach (const Environment::Variable& variable,
            container->config.command_info().environment().variables()) {
     const string& name = variable.name();
     const string& value = variable.value();
 
-    if (environment.count(name) > 0) {
+    if (environment.values.count(name) > 0) {
       VLOG(1) << "Overwriting environment variable '"
               << name << "', original: '"
-              << environment[name] << "', new: '"
+              << environment.values[name] << "', new: '"
               << value << "', for container "
               << containerId;
     }
 
-    environment[name] = value;
+    environment.values[name] = value;
+  }
+
+  // Determine the 'ExecutorInfo' for the logger. If launching a
+  // top level executor container, use the 'ExecutorInfo' from
+  // 'ContainerConfig'. If launching a nested container, use the
+  // 'ExecutorInfo' from its top level parent container.
+  ExecutorInfo executorInfo;
+  if (container->config.has_executor_info()) {
+    // The top level executor container case. The 'ExecutorInfo'
+    // will always be set in 'ContainerConfig'.
+    executorInfo = container->config.executor_info();
+  } else {
+    // The nested container case. Use the 'ExecutorInfo' from its root
+    // parent container.
+    CHECK(containerId.has_parent());
+    const ContainerID& rootContainerId = getRootContainerId(containerId);
+    CHECK(containers_.contains(rootContainerId));
+    CHECK(containers_[rootContainerId]->config.has_executor_info());
+    executorInfo = containers_[rootContainerId]->config.executor_info();
   }
 
   return logger->prepare(
-      container->config.executor_info(),
+      executorInfo,
       container->config.directory())
     .then(defer(
         self(),
@@ -1368,6 +1379,7 @@ Future<bool> MesosContainerizerProcess::_launch(
     MesosContainerizerLaunch::Flags launchFlags;
 
     launchFlags.command = JSON::protobuf(launchCommand.get());
+    launchFlags.environment = environment;
 
     if (rootfs.isNone()) {
       // NOTE: If the executor shares the host filesystem, we should
@@ -1386,6 +1398,13 @@ Future<bool> MesosContainerizerProcess::_launch(
         ? workingDirectory
         : flags.sandbox_directory;
     }
+
+#ifdef __linux__
+    // TODO(bbannier): For the case where the user requested
+    // capabilities, but no capabilities isolation was configured for
+    // the agent, the master should reject the task.
+    launchFlags.capabilities = capabilities;
+#endif // __linux__
 
 #ifdef __WINDOWS__
     if (rootfs.isSome()) {
@@ -1448,7 +1467,7 @@ Future<bool> MesosContainerizerProcess::_launch(
         (local ? Subprocess::FD(STDERR_FILENO)
                : Subprocess::IO(subprocessInfo.err)),
         &launchFlags,
-        environment,
+        None(),
         namespaces); // 'namespaces' will be ignored by PosixLauncher.
 
     if (forked.isError()) {

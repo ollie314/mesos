@@ -65,27 +65,34 @@ public:
   //
   // In case of an error returns a JSON formatted string of type
   // `spec::Error` as the error message for the `Try`.
-  static Try<process::Owned<PortMapper>> create(const std::string& cniConfig);
+  static Try<process::Owned<PortMapper>, spec::PluginError> create(
+      const std::string& cniConfig);
 
-  // Executes the CNI plugin specified in 'delegate'. On successful
-  // execution of the 'delegate' plugin will install port-forwarding
-  // rules, if any, that are specified in `NetworkInfo`. On success
-  // will return a JSON string seen in the successful execution of the
-  // 'delegate' plugin. In case of an error will return a JSON string
-  // representation of `spec::Error` as the error message for the
-  // `Try`.
-  Try<std::string> execute();
+  // Executes the CNI plugin specified in 'delegate'. When
+  // `cniCommand` is set to `spec::CNI_CMD_ADD` successful execution
+  // of the 'delegate' plugin will install port-forwarding rules, if
+  // any, that are specified in `NetworkInfo`. On success will return
+  // a JSON string seen in the successful execution of the 'delegate'
+  // plugin. When `cniCommand` is set to `spec::CNI_CMD_DEL`
+  // successful execution of the delegate plugin will return `None`.
+  Try<Option<std::string>, spec::PluginError> execute();
 
   virtual ~PortMapper() {};
 
 protected:
   // Used to invoke the plugin specified in 'delegate'. The possible
-  // values for `command` are ADD or DEL. The `command` is used in
+  // values for `command` are `spec::CNI_CMD_ADD` or
+  // `spec::CNI_CMD_DEL`. The `command` is used in
   // setting the CNI_COMMAND environment variable before invoking the
   // 'delegate' plugin.
   //
+  // When `command` is set to `spec::CNI_CMD_ADD` returns a
+  // `spec::NetworkInfo` on successful execution of the 'delegate'
+  // plugin. When command is set to `spec::CNI_CMD_DEL` returns `None`
+  // on successful execution of the plugin.
+  //
   // NOTE: Defining `delegate` as a virtual method so that we can mock it.
-  virtual Try<spec::NetworkInfo> delegate(const std::string& command);
+  virtual Result<spec::NetworkInfo> delegate(const std::string& command);
 
 private:
   PortMapper(
@@ -97,7 +104,9 @@ private:
       const std::string& _cniPath,          // Paths to search for CNI plugins.
       const mesos::NetworkInfo& _networkInfo,
       const std::string& _delegatePlugin,
-      const JSON::Object& _delegateConfig)
+      const JSON::Object& _delegateConfig,
+      const std::string& _chain,
+      const std::vector<std::string>& _excludeDevices)
     : cniCommand(_cniCommand),
       cniContainerId(_cniContainerId),
       cniNetNs(_cniNetNs),
@@ -106,7 +115,9 @@ private:
       cniPath(_cniPath),
       networkInfo(_networkInfo),
       delegatePlugin(_delegatePlugin),
-      delegateConfig(_delegateConfig) {};
+      delegateConfig(_delegateConfig),
+      chain(_chain),
+      excludeDevices(_excludeDevices){};
 
   const std::string cniCommand;
   const Option<std::string> cniContainerId;
@@ -114,9 +125,23 @@ private:
   const std::string cniIfName;
   const Option<std::string> cniArgs;
   const std::string cniPath;
+
   const mesos::NetworkInfo networkInfo;
+
   const std::string delegatePlugin;
   const JSON::Object delegateConfig;
+
+  // The iptable chain to which the DNAT rules need to be added. We
+  // need a separate chain, so that we can group the DNAT rules
+  // specific to this CNI network under this chain. It makes it easier
+  // for the operator to analyze the ownership of these rules if they
+  // are grouped under a chain that the operator is aware is used by
+  // the CNI plugin.
+  const std::string chain;
+
+  // List of ingress devices that should be excluded from the DNAT
+  // rules.
+  const std::vector<std::string> excludeDevices;
 };
 
 } // namespace cni {

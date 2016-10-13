@@ -979,6 +979,7 @@ struct Framework
 {
   Framework(
       Slave* slave,
+      const Flags& slaveFlags,
       const FrameworkInfo& info,
       const Option<process::UPID>& pid);
 
@@ -1023,8 +1024,8 @@ struct Framework
   // Current running executors.
   hashmap<ExecutorID, Executor*> executors;
 
-  // Up to MAX_COMPLETED_EXECUTORS_PER_FRAMEWORK completed executors.
   boost::circular_buffer<process::Owned<Executor>> completedExecutors;
+
 private:
   Framework(const Framework&);              // No copying.
   Framework& operator=(const Framework&); // No assigning.

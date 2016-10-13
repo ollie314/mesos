@@ -44,6 +44,8 @@
 
 #include "common/protobuf_utils.hpp"
 
+#include "master/master.hpp"
+
 #include "messages/messages.hpp"
 
 using std::string;
@@ -461,21 +463,18 @@ mesos::maintenance::Schedule createSchedule(
 namespace master {
 namespace event {
 
-mesos::master::Event createTaskUpdated(const Task& task, const TaskState& state)
+mesos::master::Event createTaskUpdated(
+    const Task& task,
+    const TaskState& state,
+    const TaskStatus& status)
 {
   mesos::master::Event event;
   event.set_type(mesos::master::Event::TASK_UPDATED);
 
   mesos::master::Event::TaskUpdated* taskUpdated = event.mutable_task_updated();
 
-  taskUpdated->mutable_task_id()->CopyFrom(task.task_id());
   taskUpdated->mutable_framework_id()->CopyFrom(task.framework_id());
-  taskUpdated->mutable_slave_id()->CopyFrom(task.slave_id());
-
-  if (task.has_executor_id()) {
-    taskUpdated->mutable_executor_id()->CopyFrom(task.executor_id());
-  }
-
+  taskUpdated->mutable_status()->CopyFrom(status);
   taskUpdated->set_state(state);
 
   return event;
@@ -488,6 +487,66 @@ mesos::master::Event createTaskAdded(const Task& task)
   event.set_type(mesos::master::Event::TASK_ADDED);
 
   event.mutable_task_added()->mutable_task()->CopyFrom(task);
+
+  return event;
+}
+
+
+mesos::master::Response::GetAgents::Agent createAgentResponse(
+    const mesos::internal::master::Slave& slave)
+{
+  mesos::master::Response::GetAgents::Agent agent;
+
+  agent.mutable_agent_info()->CopyFrom(slave.info);
+
+  agent.set_pid(string(slave.pid));
+  agent.set_active(slave.active);
+  agent.set_version(slave.version);
+
+  agent.mutable_registered_time()->set_nanoseconds(
+      slave.registeredTime.duration().ns());
+
+  if (slave.reregisteredTime.isSome()) {
+    agent.mutable_reregistered_time()->set_nanoseconds(
+        slave.reregisteredTime.get().duration().ns());
+  }
+
+  foreach (const Resource& resource, slave.totalResources) {
+    agent.add_total_resources()->CopyFrom(resource);
+  }
+
+  foreach (const Resource& resource, Resources::sum(slave.usedResources)) {
+    agent.add_allocated_resources()->CopyFrom(resource);
+  }
+
+  foreach (const Resource& resource, slave.offeredResources) {
+    agent.add_offered_resources()->CopyFrom(resource);
+  }
+
+  return agent;
+}
+
+
+mesos::master::Event createAgentAdded(
+    const mesos::internal::master::Slave& slave)
+{
+  mesos::master::Event event;
+  event.set_type(mesos::master::Event::AGENT_ADDED);
+
+  event.mutable_agent_added()->mutable_agent()->CopyFrom(
+      createAgentResponse(slave));
+
+  return event;
+}
+
+
+mesos::master::Event createAgentRemoved(const SlaveID& slaveId)
+{
+  mesos::master::Event event;
+  event.set_type(mesos::master::Event::AGENT_REMOVED);
+
+  event.mutable_agent_removed()->mutable_agent_id()->CopyFrom(
+      slaveId);
 
   return event;
 }

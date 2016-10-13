@@ -3975,6 +3975,12 @@ void Master::_accept(
           const Resources& offered = offer->resources();
           foreach (const Resource& volume, operation.destroy().volumes()) {
             if (offered.contains(volume)) {
+              allocator->recoverResources(
+                  offer->framework_id(),
+                  offer->slave_id(),
+                  offer->resources(),
+                  None());
+
               removeOffer(offer, true);
             }
           }
@@ -5542,7 +5548,19 @@ void Master::updateSlave(
   LOG(INFO) << "Received update of agent " << *slave << " with total"
             << " oversubscribed resources " <<  oversubscribedResources;
 
-  // First, rescind any outstanding offers with revocable resources.
+  // NOTE: We must *first* update the agent's resources before we
+  // recover the resources. If we recovered the resources first,
+  // an allocation could trigger between recovering resources and
+  // updating the agent in the allocator. This would lead us to
+  // re-send out the stale oversubscribed resources!
+
+  slave->totalResources =
+    slave->totalResources.nonRevocable() + oversubscribedResources.revocable();
+
+  // First update the agent's resources in the allocator.
+  allocator->updateSlave(slaveId, oversubscribedResources);
+
+  // Then rescind any outstanding offers with revocable resources.
   // NOTE: Need a copy of offers because the offers are removed inside the loop.
   foreach (Offer* offer, utils::copy(slave->offers)) {
     const Resources& offered = offer->resources();
@@ -5560,12 +5578,6 @@ void Master::updateSlave(
 
   // NOTE: We don't need to rescind inverse offers here as they are unrelated to
   // oversubscription.
-
-  slave->totalResources =
-    slave->totalResources.nonRevocable() + oversubscribedResources.revocable();
-
-  // Now, update the allocator with the new estimate.
-  allocator->updateSlave(slaveId, oversubscribedResources);
 }
 
 
@@ -7341,6 +7353,10 @@ void Master::addSlave(
       unavailability,
       slave->totalResources,
       slave->usedResources);
+
+  if (!subscribers.subscribed.empty()) {
+    subscribers.send(protobuf::master::event::createAgentAdded(*slave));
+  }
 }
 
 
@@ -7507,6 +7523,10 @@ void Master::_removeSlave(
 
   sendSlaveLost(slave->info);
 
+  if (!subscribers.subscribed.empty()) {
+    subscribers.send(protobuf::master::event::createAgentRemoved(slave->id));
+  }
+
   delete slave;
 }
 
@@ -7527,6 +7547,10 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     latestState = update.latest_state();
   }
 
+  // Indicated whether we should send a notification to all subscribers if the
+  // task transitioned to a new state.
+  bool sendSubscribersUpdate = false;
+
   // Set 'terminated' to true if this is the first time the task
   // transitioned to terminal state. Also set the latest state.
   bool terminated;
@@ -7537,12 +7561,8 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     // If the task has already transitioned to a terminal state,
     // do not update its state.
     if (!protobuf::isTerminalState(task->state())) {
-      // Send a notification to all subscribers if the task transitioned
-      // to a new state.
-      if (!subscribers.subscribed.empty() &&
-          latestState.get() != task->state()) {
-        subscribers.send(protobuf::master::event::createTaskUpdated(
-            *task, latestState.get()));
+      if (latestState.get() != task->state()) {
+        sendSubscribersUpdate = true;
       }
 
       task->set_state(latestState.get());
@@ -7555,11 +7575,8 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     // its state. Note that we are being defensive here because this should not
     // happen unless there is a bug in the master code.
     if (!protobuf::isTerminalState(task->state())) {
-      // Send a notification to all subscribers if the task transitioned
-      // to a new state.
-      if (!subscribers.subscribed.empty() && task->state() != status.state()) {
-        subscribers.send(protobuf::master::event::createTaskUpdated(
-            *task, status.state()));
+      if (task->state() != status.state()) {
+        sendSubscribersUpdate = true;
       }
 
       task->set_state(status.state());
@@ -7580,6 +7597,11 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
   // killed by OOM killer after 400 tasks have finished.
   // MESOS-1746.
   task->mutable_statuses(task->statuses_size() - 1)->clear_data();
+
+  if (sendSubscribersUpdate && !subscribers.subscribed.empty()) {
+    subscribers.send(protobuf::master::event::createTaskUpdated(
+        *task, task->state(), status));
+  }
 
   LOG(INFO) << "Updating the state of task " << task->task_id()
             << " of framework " << task->framework_id()

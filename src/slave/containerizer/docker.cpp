@@ -466,23 +466,15 @@ Try<Nothing> DockerContainerizerProcess::updatePersistentVolumes(
     // more details please refer to MESOS-3483.
   }
 
-  // Set the ownership of the persistent volume to match that of the
-  // sandbox directory.
-  //
-  // NOTE: Currently, persistent volumes in Mesos are exclusive,
-  // meaning that if a persistent volume is used by one task or
-  // executor, it cannot be concurrently used by other task or
-  // executor. But if we allow multiple executors to use same
-  // persistent volume at the same time in the future, the ownership
-  // of the persistent volume may conflict here.
-  //
-  // TODO(haosdent): Consider letting the frameworks specify the
-  // user/group of the persistent volumes.
+  // Get user and group info for this task based on the sandbox directory.
   struct stat s;
   if (::stat(directory.c_str(), &s) < 0) {
     return Error("Failed to get ownership for '" + directory + "': " +
                  os::strerror(errno));
   }
+
+  const uid_t uid = s.st_uid;
+  const gid_t gid = s.st_gid;
 
   // Mount all new persistent volumes added.
   foreach (const Resource& resource, updated.persistentVolumes()) {
@@ -506,22 +498,36 @@ Try<Nothing> DockerContainerizerProcess::updatePersistentVolumes(
       continue;
     }
 
-    const string target = path::join(directory, containerPath);
+    bool isVolumeInUse = false;
 
-    LOG(INFO) << "Changing the ownership of the persistent volume at '"
-              << source << "' with uid " << s.st_uid
-              << " and gid " << s.st_gid;
+    foreachvalue (const Container* container, containers_) {
+      if (container->resources.contains(resource)) {
+        isVolumeInUse = true;
+        break;
+      }
+    }
 
-    Try<Nothing> chown = os::chown(s.st_uid, s.st_gid, source, false);
-    if (chown.isError()) {
-      return Error(
-          "Failed to change the ownership of the persistent volume at '" +
-          source + "' with uid " + stringify(s.st_uid) +
-          " and gid " + stringify(s.st_gid) + ": " + chown.error());
+    // Set the ownership of the persistent volume to match that of the sandbox
+    // directory if the volume is not already in use. If the volume is
+    // currently in use by other containers, tasks in this container may fail
+    // to read from or write to the persistent volume due to incompatible
+    // ownership and file system permissions.
+    if (!isVolumeInUse) {
+      LOG(INFO) << "Changing the ownership of the persistent volume at '"
+                << source << "' with uid " << uid << " and gid " << gid;
+
+      Try<Nothing> chown = os::chown(uid, gid, source, false);
+      if (chown.isError()) {
+        return Error(
+            "Failed to change the ownership of the persistent volume at '" +
+            source + "' with uid " + stringify(uid) +
+            " and gid " + stringify(gid) + ": " + chown.error());
+      }
     }
 
     // TODO(tnachen): We should check if the target already exists
     // when we support updating persistent mounts.
+    const string target = path::join(directory, containerPath);
 
     Try<Nothing> mkdir = os::mkdir(target);
     if (mkdir.isError()) {
@@ -533,11 +539,24 @@ Try<Nothing> DockerContainerizerProcess::updatePersistentVolumes(
               << "' for persistent volume " << resource
               << " of container " << containerId;
 
+    // Bind mount the persistent volume to the container.
     Try<Nothing> mount = fs::mount(source, target, None(), MS_BIND, nullptr);
     if (mount.isError()) {
       return Error(
           "Failed to mount persistent volume from '" +
           source + "' to '" + target + "': " + mount.error());
+    }
+
+    // If the mount needs to be read-only, do a remount.
+    if (resource.disk().volume().mode() == Volume::RO) {
+      mount = fs::mount(
+          None(), target, None(), MS_BIND | MS_RDONLY | MS_REMOUNT, nullptr);
+
+      if (mount.isError()) {
+        return Error(
+            "Failed to remount persistent volume as read-only from '" +
+            source + "' to '" + target + "': " + mount.error());
+      }
     }
   }
 #else
@@ -1705,13 +1724,13 @@ Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
 #ifndef __linux__
   return Error("Does not support cgroups on non-linux platform");
 #else
-  const Result<string> cpuHierarchy = cgroups::hierarchy("cpuacct");
+  const Result<string> cpuacctHierarchy = cgroups::hierarchy("cpuacct");
   const Result<string> memHierarchy = cgroups::hierarchy("memory");
 
-  if (cpuHierarchy.isError()) {
+  if (cpuacctHierarchy.isError()) {
     return Error(
-        "Failed to determine the cgroup 'cpu' subsystem hierarchy: " +
-        cpuHierarchy.error());
+        "Failed to determine the cgroup 'cpuacct' subsystem hierarchy: " +
+        cpuacctHierarchy.error());
   }
 
   if (memHierarchy.isError()) {
@@ -1720,13 +1739,13 @@ Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
         memHierarchy.error());
   }
 
-  const Result<string> cpuCgroup = cgroups::cpuacct::cgroup(pid);
-  if (cpuCgroup.isError()) {
+  const Result<string> cpuacctCgroup = cgroups::cpuacct::cgroup(pid);
+  if (cpuacctCgroup.isError()) {
     return Error(
-        "Failed to determine cgroup for the 'cpu' subsystem: " +
-        cpuCgroup.error());
-  } else if (cpuCgroup.isNone()) {
-    return Error("Unable to find 'cpu' cgroup subsystem");
+        "Failed to determine cgroup for the 'cpuacct' subsystem: " +
+        cpuacctCgroup.error());
+  } else if (cpuacctCgroup.isNone()) {
+    return Error("Unable to find 'cpuacct' cgroup subsystem");
   }
 
   const Result<string> memCgroup = cgroups::memory::cgroup(pid);
@@ -1739,7 +1758,7 @@ Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
   }
 
   const Try<cgroups::cpuacct::Stats> cpuAcctStat =
-    cgroups::cpuacct::stat(cpuHierarchy.get(), cpuCgroup.get());
+    cgroups::cpuacct::stat(cpuacctHierarchy.get(), cpuacctCgroup.get());
 
   if (cpuAcctStat.isError()) {
     return Error("Failed to get cpu.stat: " + cpuAcctStat.error());
@@ -1763,6 +1782,49 @@ Try<ResourceStatistics> DockerContainerizerProcess::cgroupsStatistics(
   result.set_cpus_system_time_secs(cpuAcctStat.get().system.secs());
   result.set_cpus_user_time_secs(cpuAcctStat.get().user.secs());
   result.set_mem_rss_bytes(memStats.get().at("rss"));
+
+  // Add the cpu.stat information only if CFS is enabled.
+  if (flags.cgroups_enable_cfs) {
+    const Result<string> cpuHierarchy = cgroups::hierarchy("cpu");
+
+    if (cpuHierarchy.isError()) {
+      return Error(
+          "Failed to determine the cgroup 'cpu' subsystem hierarchy: " +
+          cpuHierarchy.error());
+    }
+
+    const Result<string> cpuCgroup = cgroups::cpu::cgroup(pid);
+    if (cpuCgroup.isError()) {
+      return Error(
+          "Failed to determine cgroup for the 'cpu' subsystem: " +
+          cpuCgroup.error());
+    } else if (cpuCgroup.isNone()) {
+      return Error("Unable to find 'cpu' cgroup subsystem");
+    }
+
+    const Try<hashmap<string, uint64_t>> stat =
+      cgroups::stat(cpuHierarchy.get(), cpuCgroup.get(), "cpu.stat");
+
+    if (stat.isError()) {
+      return Error("Failed to read cpu.stat: " + stat.error());
+    }
+
+    Option<uint64_t> nr_periods = stat.get().get("nr_periods");
+    if (nr_periods.isSome()) {
+      result.set_cpus_nr_periods(nr_periods.get());
+    }
+
+    Option<uint64_t> nr_throttled = stat.get().get("nr_throttled");
+    if (nr_throttled.isSome()) {
+      result.set_cpus_nr_throttled(nr_throttled.get());
+    }
+
+    Option<uint64_t> throttled_time = stat.get().get("throttled_time");
+    if (throttled_time.isSome()) {
+      result.set_cpus_throttled_time_secs(
+          Nanoseconds(throttled_time.get()).secs());
+    }
+  }
 
   return result;
 #endif // __linux__

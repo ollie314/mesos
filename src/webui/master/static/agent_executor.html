@@ -44,6 +44,8 @@
         </dd>
         <dt>Master:</dt>
         <dd>{{state.master_hostname}}</dd>
+        <dt>Agent:</dt>
+        <dd>{{state.hostname}}</dd>
       </dl>
 
       <dl class="inline clearfix">
@@ -147,7 +149,7 @@
           <td>{{task.resources.disk * (1024 * 1024) | dataSize}}</td>
           <td>
             <a href="{{'#/agents/' + agent_id + '/browse?path=' +
-                       encodeURIComponent(executor.directory)}}">
+                       encodeURIComponent(task.directory)}}">
               Sandbox
             </a>
           </td>
@@ -180,7 +182,7 @@
           <td>{{completed_task.resources.disk * (1024 * 1024) | dataSize}}</td>
           <td>
             <a href="{{'#/agents/' + agent_id + '/browse?path=' +
-                       encodeURIComponent(executor.directory)}}">
+                       encodeURIComponent(completed_task.directory)}}">
               Sandbox
             </a>
           </td>

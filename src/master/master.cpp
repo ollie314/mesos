@@ -1829,8 +1829,12 @@ void Master::recoveredSlavesTimeout(const Registry& registry)
   // Remove the slaves in a rate limited manner, similar to how the
   // SlaveObserver removes slaves.
   foreach (const Registry::Slave& slave, registry.slaves().slaves()) {
-    // The slave is removed from 'recovered' when it re-registers.
-    if (!slaves.recovered.contains(slave.info().id())) {
+    // The slave is removed from `recovered` when it completes the
+    // re-registration process. If the slave is in `reregistering`, it
+    // has started but not yet finished re-registering. In either
+    // case, we don't want to try to remove it.
+    if (!slaves.recovered.contains(slave.info().id()) ||
+        slaves.reregistering.contains(slave.info().id())) {
       continue;
     }
 
@@ -1859,11 +1863,22 @@ void Master::recoveredSlavesTimeout(const Registry& registry)
 
 Nothing Master::markUnreachableAfterFailover(const Registry::Slave& slave)
 {
-  // The slave is removed from 'recovered' when it re-registers.
+  // The slave might have reregistered while we were waiting to
+  // acquire the rate limit.
   if (!slaves.recovered.contains(slave.info().id())) {
     LOG(INFO) << "Canceling transition of agent "
               << slave.info().id() << " (" << slave.info().hostname() << ")"
               << " to unreachable because it re-registered";
+
+    ++metrics->slave_unreachable_canceled;
+    return Nothing();
+  }
+
+  // The slave might be in the process of reregistering.
+  if (slaves.reregistering.contains(slave.info().id())) {
+    LOG(INFO) << "Canceling transition of agent "
+              << slave.info().id() << " (" << slave.info().hostname() << ")"
+              << " to unreachable because it is re-registering";
 
     ++metrics->slave_unreachable_canceled;
     return Nothing();
@@ -1875,8 +1890,6 @@ Nothing Master::markUnreachableAfterFailover(const Registry::Slave& slave)
                << " after master failover; marking it unreachable";
 
   ++metrics->slave_unreachable_completed;
-
-  slaves.recovered.erase(slave.info().id());
 
   TimeInfo unreachableTime = protobuf::getCurrentTime();
 
@@ -1899,6 +1912,9 @@ void Master::_markUnreachableAfterFailover(
 {
   CHECK(slaves.markingUnreachable.contains(slaveInfo.id()));
   slaves.markingUnreachable.erase(slaveInfo.id());
+
+  CHECK(slaves.recovered.contains(slaveInfo.id()));
+  slaves.recovered.erase(slaveInfo.id());
 
   if (registrarResult.isFailed()) {
     LOG(FATAL) << "Failed to mark agent " << slaveInfo.id()
@@ -3405,19 +3421,36 @@ Resources Master::addTask(
 
 void Master::accept(
     Framework* framework,
-    const scheduler::Call::Accept& accept)
+    scheduler::Call::Accept accept)
 {
   CHECK_NOTNULL(framework);
 
-  foreach (const Offer::Operation& operation, accept.operations()) {
-    if (operation.type() == Offer::Operation::LAUNCH) {
-      if (operation.launch().task_infos().size() > 0) {
+  for (int i = 0; i < accept.operations_size(); ++i) {
+    Offer::Operation* operation = accept.mutable_operations(i);
+
+    if (operation->type() == Offer::Operation::LAUNCH) {
+      if (operation->launch().task_infos().size() > 0) {
         ++metrics->messages_launch_tasks;
       } else {
         ++metrics->messages_decline_offers;
         LOG(WARNING) << "Implicitly declining offers: " << accept.offer_ids()
                      << " in ACCEPT call for framework " << framework->id()
                      << " as the launch operation specified no tasks";
+      }
+    } else if (operation->type() == Offer::Operation::LAUNCH_GROUP) {
+      const ExecutorInfo& executor = operation->launch_group().executor();
+
+      TaskGroupInfo* taskGroup =
+        operation->mutable_launch_group()->mutable_task_group();
+
+      // Mutate `TaskInfo` to include `ExecutorInfo` to make it easy
+      // for operator API and WebUI to get access to the corresponding
+      // executor for tasks in the task group.
+      for (int j = 0; j < taskGroup->tasks().size(); ++j) {
+        TaskInfo* task = taskGroup->mutable_tasks(j);
+        if (!task->has_executor()) {
+          task->mutable_executor()->CopyFrom(executor);
+        }
       }
     }
 
@@ -3465,7 +3498,9 @@ void Master::accept(
     }
   }
 
-  // If invalid, send TASK_LOST for the launch attempts.
+  // If invalid, send TASK_DROPPED for the launch attempts. If the
+  // framework is not partition-aware, send TASK_LOST instead.
+  //
   // TODO(jieyu): Consider adding a 'drop' overload for ACCEPT call to
   // consistently handle message dropping. It would be ideal if the
   // 'drop' overload can handle both resource recovery and lost task
@@ -3473,6 +3508,12 @@ void Master::accept(
   if (error.isSome()) {
     LOG(WARNING) << "ACCEPT call used invalid offers '" << accept.offer_ids()
                  << "': " << error.get().message;
+
+    TaskState newTaskState = TASK_DROPPED;
+    if (!protobuf::frameworkHasCapability(
+            framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      newTaskState = TASK_LOST;
+    }
 
     foreach (const Offer::Operation& operation, accept.operations()) {
       if (operation.type() != Offer::Operation::LAUNCH &&
@@ -3494,16 +3535,21 @@ void Master::accept(
             framework->id(),
             task.slave_id(),
             task.task_id(),
-            TASK_LOST,
+            newTaskState,
             TaskStatus::SOURCE_MASTER,
             None(),
             "Task launched with invalid offers: " + error.get().message,
             TaskStatus::REASON_INVALID_OFFERS);
 
-        metrics->tasks_lost++;
+        if (protobuf::frameworkHasCapability(
+                framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+          metrics->tasks_dropped++;
+        } else {
+          metrics->tasks_lost++;
+        }
 
         metrics->incrementTasksStates(
-            TASK_LOST,
+            newTaskState,
             TaskStatus::SOURCE_MASTER,
             TaskStatus::REASON_INVALID_OFFERS);
 
@@ -3669,6 +3715,12 @@ void Master::_accept(
   Slave* slave = slaves.registered.get(slaveId);
 
   if (slave == nullptr || !slave->connected) {
+    TaskState newTaskState = TASK_DROPPED;
+    if (!protobuf::frameworkHasCapability(
+            framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      newTaskState = TASK_LOST;
+    }
+
     foreach (const Offer::Operation& operation, accept.operations()) {
       if (operation.type() != Offer::Operation::LAUNCH &&
           operation.type() != Offer::Operation::LAUNCH_GROUP) {
@@ -3701,16 +3753,21 @@ void Master::_accept(
             framework->id(),
             task.slave_id(),
             task.task_id(),
-            TASK_LOST,
+            newTaskState,
             TaskStatus::SOURCE_MASTER,
             None(),
             slave == nullptr ? "Agent removed" : "Agent disconnected",
             reason);
 
-        metrics->tasks_lost++;
+        if (protobuf::frameworkHasCapability(
+                framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+          metrics->tasks_dropped++;
+        } else {
+          metrics->tasks_lost++;
+        }
 
         metrics->incrementTasksStates(
-            TASK_LOST,
+            newTaskState,
             TaskStatus::SOURCE_MASTER,
             reason);
 
@@ -5216,6 +5273,8 @@ void Master::reregisterSlave(
   Slave* slave = slaves.registered.get(slaveInfo.id());
 
   if (slave != nullptr) {
+    CHECK(!slaves.recovered.contains(slaveInfo.id()));
+
     slave->reregisteredTime = Clock::now();
 
     // NOTE: This handles the case where a slave tries to
@@ -5259,10 +5318,9 @@ void Master::reregisterSlave(
     // Update slave's version after re-registering successfully.
     slave->version = version;
 
-    // Reconcile tasks between master and the slave.
-    // NOTE: This sends the re-registered message, including tasks
-    // that need to be reconciled by the slave.
-    reconcile(slave, executorInfos, tasks);
+    // Reconcile tasks between master and slave, and send the
+    // `SlaveReregisteredMessage`.
+    reconcileKnownSlave(slave, executorInfos, tasks);
 
     // If this is a disconnected slave, add it back to the allocator.
     // This is done after reconciliation to ensure the allocator's
@@ -5284,10 +5342,6 @@ void Master::reregisterSlave(
 
     return;
   }
-
-  // Ensure we don't remove the slave for not re-registering after
-  // we've recovered it from the registry.
-  slaves.recovered.erase(slaveInfo.id());
 
   // If we're already re-registering this slave, then no need to ask
   // the registrar again.
@@ -5350,6 +5404,11 @@ void Master::_reregisterSlave(
   CHECK(readmit.get());
 
   // Re-admission succeeded.
+
+  // Ensure we don't remove the slave for not re-registering after
+  // we've recovered it from the registry.
+  slaves.recovered.erase(slaveInfo.id());
+
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
   machineId.set_ip(stringify(pid.address.ip));
@@ -6188,17 +6247,13 @@ void Master::_reconcileTasks(
   // Explicit reconciliation occurs for the following cases:
   //   (1) Task is known, but pending: TASK_STAGING.
   //   (2) Task is known: send the latest state.
-  //   (3) Task is unknown, slave is registered: TASK_LOST.
+  //   (3) Task is unknown, slave is registered: TASK_UNKNOWN.
   //   (4) Task is unknown, slave is transitioning: no-op.
   //   (5) Task is unknown, slave is unreachable: TASK_UNREACHABLE.
-  //   (6) Task is unknown, slave is unknown: TASK_LOST.
+  //   (6) Task is unknown, slave is unknown: TASK_UNKNOWN.
   //
-  // When using a non-strict registry, case (6) may result in
-  // a TASK_LOST for a task that may later be non-terminal. This
-  // is better than no reply at all because the framework can take
-  // action for TASK_LOST. Later, if the task is running, the
-  // framework can discover it with implicit reconciliation and will
-  // be able to kill it.
+  // For cases (3), (5), and (6), TASK_LOST is sent instead if the
+  // framework has not opted-in to the PARTITION_AWARE capability.
   foreach (const TaskStatus& status, statuses) {
     Option<SlaveID> slaveId = None();
     if (status.has_slave_id()) {
@@ -6244,12 +6299,20 @@ void Master::_reconcileTasks(
           None(),
           protobuf::getTaskContainerStatus(*task));
     } else if (slaveId.isSome() && slaves.registered.contains(slaveId.get())) {
-      // (3) Task is unknown, slave is registered: TASK_LOST.
+      // (3) Task is unknown, slave is registered: TASK_UNKNOWN. If
+      // the framework does not have the PARTITION_AWARE capability,
+      // send TASK_LOST for backward compatibility.
+      TaskState taskState = TASK_UNKNOWN;
+      if (!protobuf::frameworkHasCapability(
+              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        taskState = TASK_LOST;
+      }
+
       update = protobuf::createStatusUpdate(
           framework->id(),
           slaveId.get(),
           status.task_id(),
-          TASK_LOST,
+          taskState,
           TaskStatus::SOURCE_MASTER,
           None(),
           "Reconciliation: Task is unknown to the agent",
@@ -6287,12 +6350,20 @@ void Master::_reconcileTasks(
           None(),
           unreachableTime);
     } else {
-      // (6) Task is unknown, slave is unknown: TASK_LOST.
+      // (6) Task is unknown, slave is unknown: TASK_UNKNOWN. If the
+      // framework does not have the PARTITION_AWARE capability, send
+      // TASK_LOST for backward compatibility.
+      TaskState taskState = TASK_UNKNOWN;
+      if (!protobuf::frameworkHasCapability(
+              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        taskState = TASK_LOST;
+      }
+
       update = protobuf::createStatusUpdate(
           framework->id(),
           slaveId,
           status.task_id(),
-          TASK_LOST,
+          taskState,
           TaskStatus::SOURCE_MASTER,
           None(),
           "Reconciliation: Task is unknown",
@@ -6695,10 +6766,7 @@ void Master::authenticationTimeout(Future<Option<string>> future)
 }
 
 
-// NOTE: This function is only called when the slave re-registers
-// with a master that already knows about it (i.e., not a failed
-// over master).
-void Master::reconcile(
+void Master::reconcileKnownSlave(
     Slave* slave,
     const vector<ExecutorInfo>& executors,
     const vector<Task>& tasks)
@@ -6745,9 +6813,9 @@ void Master::reconcile(
                      << " unknown to the agent " << *slave
                      << " during re-registration : reconciling with the agent";
 
-        // NOTE: Currently the slave doesn't look at the task state
-        // when it reconciles the task state; we include the correct
-        // state for correctness and consistency.
+        // NOTE: The slave doesn't look at the task state when it
+        // reconciles the task. We send the master's view of the
+        // current task state since it might be useful in the future.
         const TaskState& state = task->has_status_update_state()
             ? task->status_update_state()
             : task->state();

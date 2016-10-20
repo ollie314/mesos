@@ -17,8 +17,6 @@
 #include <map>
 #include <ostream>
 #include <string>
-#include <tuple>
-#include <type_traits>
 #include <typeinfo> // For typeid.
 #include <vector>
 
@@ -46,8 +44,27 @@ namespace flags {
 class FlagsBase
 {
 public:
-  FlagsBase() { add(&help, "help", "Prints this help message", false); }
-  virtual ~FlagsBase() {}
+  FlagsBase()
+  {
+    add(&FlagsBase::help, "help", "Prints this help message", false);
+  }
+
+  virtual ~FlagsBase() = default;
+
+  // Explicitly disable rvalue constructors and assignment operators
+  // since we plan for this class to be used in virtual inheritance
+  // scenarios. Here e.g., constructing from an rvalue will be
+  // problematic since we can potentially have multiple lineages
+  // leading to the same base class, and could then potentially use a
+  // moved from base object.
+  // All of the following functions would be implicitly generated for
+  // C++14, but in C++11 only the versions taking lvalue references
+  // should be. GCC seems to create all of these even in C++11 mode so
+  // we need to explicitly disable them.
+  FlagsBase(const FlagsBase&) = default;
+  FlagsBase(FlagsBase&&) = delete;
+  FlagsBase& operator=(const FlagsBase&) = default;
+  FlagsBase& operator=(FlagsBase&&) = delete;
 
   // Load any flags from the environment given the variable prefix,
   // i.e., given prefix 'STOUT_' will load a flag named 'foo' via
@@ -165,99 +182,6 @@ public:
   // `Option` infers a character array type, which causes problems in the
   // current implementation of `Option`. See MESOS-5471.
 
-  template <typename T1, typename T2, typename F>
-  void add(
-      T1* t1,
-      const Name& name,
-      const Option<Name>& alias,
-      const std::string& help,
-      const T2* t2,
-      F validate);
-
-  template <typename T1, typename T2, typename F>
-  void add(
-      T1* t1,
-      const Name& name,
-      const std::string& help,
-      const T2& t2,
-      F validate)
-  {
-    add(t1, name, None(), help, &t2, validate);
-  }
-
-  template <typename T1, typename T2>
-  void add(
-      T1* t1,
-      const Name& name,
-      const std::string& help,
-      const T2& t2)
-  {
-    add(t1, name, None(), help, &t2, [](const T1&) { return None(); });
-  }
-
-  template <typename T1>
-  void add(
-      T1* t1,
-      const Name& name,
-      const std::string& help)
-  {
-    add(t1,
-        name,
-        None(),
-        help,
-        static_cast<const T1*>(nullptr),
-        [](const T1&) { return None(); });
-  }
-
-  template <typename T1, typename T2>
-  void add(
-      T1* t1,
-      const Name& name,
-      const Option<Name>& alias,
-      const std::string& help,
-      const T2& t2)
-  {
-    add(t1, name, alias, help, &t2, [](const T1&) { return None(); });
-  }
-
-  template <typename T, typename F>
-  void add(
-      Option<T>* option,
-      const Name& name,
-      const Option<Name>& alias,
-      const std::string& help,
-      F validate);
-
-  template <typename T, typename F>
-  void add(
-      Option<T>* option,
-      const Name& name,
-      const std::string& help,
-      F validate)
-  {
-    add(option, name, None(), help, validate);
-  }
-
-  template <typename T>
-  void add(
-      Option<T>* option,
-      const Name& name,
-      const std::string& help)
-  {
-    add(option, name, None(), help, [](const Option<T>&) { return None(); });
-  }
-
-  template <typename T>
-  void add(
-      Option<T>* option,
-      const Name& name,
-      const Option<Name>& alias,
-      const std::string& help)
-  {
-    add(option, name, alias, help, [](const Option<T>&) { return None(); });
-  }
-
-protected:
   template <typename Flags, typename T1, typename T2, typename F>
   void add(
       T1 Flags::*t1,
@@ -364,7 +288,6 @@ protected:
 
   void add(const Flag& flag);
 
-public:
   // TODO(marco): IMO the entire --help functionality should be
   // encapsulated inside the FlagsBase class.
   // For now, exposing this for the caller(s) to decide what to
@@ -400,142 +323,6 @@ private:
   // Maps flag's alias to flag's name.
   std::map<std::string, std::string> aliases;
 };
-
-
-template <typename... FlagsTypes>
-class Flags : public virtual FlagsTypes...
-{
-  // Construct tuple types of sizeof...(FlagsTypes) compile-time bools to check
-  // non-recursively that all FlagsTypes derive from FlagsBase; as a helper we
-  // use is_object<FlagTypes> to construct sizeof...(FlagTypes) true types for
-  // the RHS (is_object<T> is a true type for anything one would inherit from).
-  static_assert(
-    std::is_same<
-      std::tuple<typename std::is_base_of<FlagsBase, FlagsTypes>::type...>,
-      std::tuple<typename std::is_object<FlagsTypes>::type...>>::value,
-    "Can only instantiate Flags with FlagsBase types.");
-};
-
-template <>
-class Flags<> : public virtual FlagsBase {};
-
-
-template <typename T1, typename T2, typename F>
-void FlagsBase::add(
-    T1* t1,
-    const Name& name,
-    const Option<Name>& alias,
-    const std::string& help,
-    const T2* t2,
-    F validate)
-{
-  // Don't bother adding anything if the pointer is `nullptr`.
-  if (t1 == nullptr) {
-    return;
-  }
-
-  Flag flag;
-  flag.name = name;
-  flag.alias = alias;
-  flag.help = help;
-  flag.boolean = typeid(T1) == typeid(bool);
-
-  if (t2 != nullptr) {
-    *t1 = *t2; // Set the default.
-    flag.required = false;
-  } else {
-    flag.required = true;
-  }
-
-  // NOTE: We need to take FlagsBase* (or const FlagsBase&) as the
-  // first argument to match the function signature of the 'load',
-  // 'stringify', and 'validate' lambdas used in other overloads of
-  // FlagsBase::add. Since we don't need to use the pointer here we
-  // don't name it as a parameter.
-
-  flag.load = [t1](FlagsBase*, const std::string& value) -> Try<Nothing> {
-    // NOTE: 'fetch' "retrieves" the value if necessary and then
-    // invokes 'parse'. See 'fetch' for more details.
-    Try<T1> t = fetch<T1>(value);
-    if (t.isSome()) {
-      *t1 = t.get();
-    } else {
-      return Error("Failed to load value '" + value + "': " + t.error());
-    }
-
-    return Nothing();
-  };
-
-  flag.stringify = [t1](const FlagsBase&) -> Option<std::string> {
-    return stringify(*t1);
-  };
-
-  flag.validate = [t1, validate](const FlagsBase&) -> Option<Error> {
-    return validate(*t1);
-  };
-
-  // Update the help string to include the default value.
-  flag.help += help.size() > 0 && help.find_last_of("\n\r") != help.size() - 1
-    ? " (default: " // On same line, add space.
-    : "(default: "; // On newline.
-  if (t2 != nullptr) {
-    flag.help += stringify(*t2);
-  }
-  flag.help += ")";
-
-  add(flag);
-}
-
-
-template <typename T, typename F>
-void FlagsBase::add(
-    Option<T>* option,
-    const Name& name,
-    const Option<Name>& alias,
-    const std::string& help,
-    F validate)
-{
-  // Don't bother adding anything if the pointer is `nullptr`.
-  if (option == nullptr) {
-    return;
-  }
-
-  Flag flag;
-  flag.name = name;
-  flag.alias = alias;
-  flag.help = help;
-  flag.boolean = typeid(T) == typeid(bool);
-  flag.required = false;
-
-  // NOTE: See comment above in T* overload of FlagsBase::add for why
-  // we need to take the FlagsBase* parameter.
-
-  flag.load = [option](FlagsBase*, const std::string& value) -> Try<Nothing> {
-    // NOTE: 'fetch' "retrieves" the value if necessary and then
-    // invokes 'parse'. See 'fetch' for more details.
-    Try<T> t = fetch<T>(value);
-    if (t.isSome()) {
-      *option = Some(t.get());
-    } else {
-      return Error("Failed to load value '" + value + "': " + t.error());
-    }
-
-    return Nothing();
-  };
-
-  flag.stringify = [option](const FlagsBase&) -> Option<std::string> {
-    if (option->isSome()) {
-      return stringify(option->get());
-    }
-    return None();
-  };
-
-  flag.validate = [option, validate](const FlagsBase&) -> Option<Error> {
-    return validate(*option);
-  };
-
-  add(flag);
-}
 
 
 template <typename Flags, typename T1, typename T2, typename F>

@@ -176,6 +176,43 @@ template <typename T1, typename T2>
   EXPECT_TRUE(actual.isNone())
 
 
+// Creates a gtest `TEST` that is disabled on Windows.
+// TODO(hausdorff): Remove after temporarily-disabled tests are fixed on
+// Windows. See MESOS-6392.
+#ifndef __WINDOWS__
+#define TEST_TEMP_DISABLED_ON_WINDOWS(test_case_name, test_name) \
+  TEST(test_case_name, test_name)
+#else
+#define TEST_TEMP_DISABLED_ON_WINDOWS(test_case_name, test_name) \
+  TEST(test_case_name, DISABLED_##test_name)
+#endif // __WINDOWS__
+
+
+// Creates a gtest `TEST_F` that is disabled on Windows.
+// TODO(hausdorff): Remove after temporarily-disabled tests are fixed on
+// Windows. See MESOS-6392.
+#ifndef __WINDOWS__
+#define TEST_F_TEMP_DISABLED_ON_WINDOWS(test_case_name, test_name) \
+  TEST_F(test_case_name, test_name)
+#else
+#define TEST_F_TEMP_DISABLED_ON_WINDOWS(test_case_name, test_name) \
+  TEST_F(test_case_name, DISABLED_##test_name)
+#endif // __WINDOWS__
+
+
+// NOTE: On Windows, the closest equivalent to `sleep` is `timeout`.
+// Unfortunately, `timeout` requires an interactive terminal, otherwise
+// it errors out immediately. Instead, we use `ping` against localhost
+// with a count.  On Windows, `ping` waits one second between pings.
+// Additionally, because `ping` requires a count greater than 0,
+// we simply `exit 0` if the sleep is too short.
+#ifndef __WINDOWS__
+#define SLEEP_COMMAND(x) "sleep " #x
+#else
+#define SLEEP_COMMAND(x) (x > 0 ? "ping 127.0.0.1 -n " #x : "cmd /C exit 0")
+#endif // __WINDOWS__
+
+
 inline ::testing::AssertionResult AssertExited(
     const char* actualExpr,
     const int actual)

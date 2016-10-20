@@ -14,49 +14,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __LOG_TOOL_READ_HPP__
-#define __LOG_TOOL_READ_HPP__
-
-#include <stdint.h>
-
-#include <stout/duration.hpp>
-#include <stout/flags.hpp>
-#include <stout/option.hpp>
-
-#include "log/tool.hpp"
-
-#include "logging/flags.hpp"
+#ifndef __MESOS_PROVISIONER_CONSTANTS_HPP__
+#define __MESOS_PROVISIONER_CONSTANTS_HPP__
 
 namespace mesos {
 namespace internal {
-namespace log {
-namespace tool {
+namespace slave {
 
-class Read : public Tool
-{
-public:
-  class Flags : public virtual logging::Flags
-  {
-  public:
-    Flags();
+// Provisioner backends.
+constexpr char AUFS_BACKEND[] = "aufs";
+constexpr char BIND_BACKEND[] = "bind";
+constexpr char COPY_BACKEND[] = "copy";
+constexpr char OVERLAY_BACKEND[] = "overlay";
 
-    Option<std::string> path;
-    Option<uint64_t> from;
-    Option<uint64_t> to;
-    Option<Duration> timeout;
-    bool help;
-  };
-
-  virtual std::string name() const { return "read"; }
-  virtual Try<Nothing> execute(int argc = 0, char** argv = nullptr);
-
-  // Users can change the default configuration by setting this flags.
-  Flags flags;
-};
-
-} // namespace tool {
-} // namespace log {
+} // namespace slave {
 } // namespace internal {
 } // namespace mesos {
 
-#endif // __LOG_TOOL_READ_HPP__
+#endif  // __MESOS_PROVISIONER_CONSTANTS_HPP__

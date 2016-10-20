@@ -416,16 +416,29 @@ TEST_F(NestedMesosContainerizerTest, ROOT_CGROUPS_ParentExit)
   int pipes[2] = {-1, -1};
   ASSERT_SOME(os::pipe(pipes));
 
+  // NOTE: We use a non-shell command here to use 'bash -c' to execute
+  // the 'read', which deals with the file descriptor, because of a bug
+  // in ubuntu dash. Multi-digit file descriptor is not supported in
+  // ubuntu dash, which executes the shell command.
+  CommandInfo command;
+  command.set_shell(false);
+  command.set_value("/bin/bash");
+  command.add_arguments("bash");
+  command.add_arguments("-c");
+  command.add_arguments("read key <&" + stringify(pipes[0]));
+
+  ExecutorInfo executor;
+  executor.mutable_executor_id()->set_value("executor");
+  executor.mutable_command()->CopyFrom(command);
+  executor.mutable_resources()->CopyFrom(Resources::parse("cpus:1").get());
+
   Try<string> directory = environment->mkdtemp();
   ASSERT_SOME(directory);
 
   Future<bool> launch = containerizer->launch(
       containerId,
       None(),
-      createExecutorInfo(
-          "executor",
-          "read key <&" + stringify(pipes[0]),
-          "cpus:1"),
+      executor,
       directory.get(),
       None(),
       state.id,
@@ -1519,6 +1532,89 @@ TEST_F(NestedMesosContainerizerTest, ROOT_CGROUPS_Environment)
   wait = containerizer->wait(containerId);
 
   containerizer->destroy(containerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+  ASSERT_TRUE(wait.get()->has_status());
+  EXPECT_WTERMSIG_EQ(SIGKILL, wait.get()->status());
+}
+
+
+TEST_F(NestedMesosContainerizerTest, ROOT_CGROUPS_LaunchNestedThreeLevels)
+{
+  slave::Flags flags = CreateSlaveFlags();
+  flags.launcher = "linux";
+  flags.isolation = "cgroups/cpu,filesystem/linux,namespaces/pid";
+
+  Fetcher fetcher;
+
+  Try<MesosContainerizer*> create = MesosContainerizer::create(
+      flags,
+      false,
+      &fetcher);
+
+  ASSERT_SOME(create);
+
+  Owned<MesosContainerizer> containerizer(create.get());
+
+  SlaveState state;
+  state.id = SlaveID();
+
+  AWAIT_READY(containerizer->recover(state));
+
+  ContainerID level1ContainerId;
+  level1ContainerId.set_value(UUID::random().toString());
+
+  Try<string> directory = environment->mkdtemp();
+  ASSERT_SOME(directory);
+
+  Future<bool> launch = containerizer->launch(
+      level1ContainerId,
+      None(),
+      createExecutorInfo("executor", "sleep 1000", "cpus:1"),
+      directory.get(),
+      None(),
+      state.id,
+      map<string, string>(),
+      true); // TODO(benh): Ever want to test not checkpointing?
+
+  AWAIT_ASSERT_TRUE(launch);
+
+  ContainerID level2ContainerId;
+  level2ContainerId.mutable_parent()->CopyFrom(level1ContainerId);
+  level2ContainerId.set_value(UUID::random().toString());
+
+  launch = containerizer->launch(
+      level2ContainerId,
+      createCommandInfo("sleep 1000"),
+      None(),
+      None(),
+      state.id);
+
+  AWAIT_ASSERT_TRUE(launch);
+
+  ContainerID level3ContainerId;
+  level3ContainerId.mutable_parent()->CopyFrom(level2ContainerId);
+  level3ContainerId.set_value(UUID::random().toString());
+
+  launch = containerizer->launch(
+      level3ContainerId,
+      createCommandInfo("exit 42"),
+      None(),
+      None(),
+      state.id);
+
+  Future<Option<ContainerTermination>> wait =
+    containerizer->wait(level3ContainerId);
+
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+  ASSERT_TRUE(wait.get()->has_status());
+  EXPECT_WEXITSTATUS_EQ(42, wait.get()->status());
+
+  wait = containerizer->wait(level1ContainerId);
+
+  containerizer->destroy(level1ContainerId);
 
   AWAIT_READY(wait);
   ASSERT_SOME(wait.get());

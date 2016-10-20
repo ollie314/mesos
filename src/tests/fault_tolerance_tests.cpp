@@ -855,7 +855,10 @@ TEST_F(FaultToleranceTest, FrameworkReregister)
 }
 
 
-TEST_F(FaultToleranceTest, TaskLost)
+// This test checks that if a non-partition-aware scheduler that is
+// disconnected from the master attempts to launch a task, it receives
+// a TASK_LOST status update.
+TEST_F(FaultToleranceTest, DisconnectedSchedulerLaunchLost)
 {
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
@@ -874,8 +877,8 @@ TEST_F(FaultToleranceTest, TaskLost)
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(Return()); // Ignore subsequent offers.
 
-  Future<process::Message> message =
-    FUTURE_MESSAGE(Eq(FrameworkRegisteredMessage().GetTypeName()), _, _);
+  Future<FrameworkRegisteredMessage> message =
+    FUTURE_PROTOBUF(FrameworkRegisteredMessage(), _, _);
 
   driver.start();
 
@@ -893,12 +896,7 @@ TEST_F(FaultToleranceTest, TaskLost)
 
   AWAIT_READY(disconnected);
 
-  TaskInfo task;
-  task.set_name("test task");
-  task.mutable_task_id()->set_value("1");
-  task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
-  task.mutable_resources()->MergeFrom(offers.get()[0].resources());
-  task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+  TaskInfo task = createTask(offers.get()[0], "sleep 60");
 
   Future<TaskStatus> status;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
@@ -909,6 +907,70 @@ TEST_F(FaultToleranceTest, TaskLost)
   AWAIT_READY(status);
   EXPECT_EQ(TASK_LOST, status.get().state());
   EXPECT_EQ(TaskStatus::REASON_MASTER_DISCONNECTED, status.get().reason());
+  EXPECT_EQ(TaskStatus::SOURCE_MASTER, status.get().source());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test checks that if a partition-aware scheduler that is
+// disconnected from the master attempts to launch a task, it receives
+// a TASK_DROPPED status update.
+TEST_F(FaultToleranceTest, DisconnectedSchedulerLaunchDropped)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  StandaloneMasterDetector detector(master.get()->pid);
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector);
+  ASSERT_SOME(slave);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::PARTITION_AWARE);
+
+  MockScheduler sched;
+  TestingMesosSchedulerDriver driver(&sched, &detector, frameworkInfo);
+
+  EXPECT_CALL(sched, registered(&driver, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  Future<FrameworkRegisteredMessage> message =
+    FUTURE_PROTOBUF(FrameworkRegisteredMessage(), _, _);
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  AWAIT_READY(message);
+
+  Future<Nothing> disconnected;
+  EXPECT_CALL(sched, disconnected(&driver))
+    .WillOnce(FutureSatisfy(&disconnected));
+
+  // Simulate a spurious master loss event at the scheduler.
+  detector.appoint(None());
+
+  AWAIT_READY(disconnected);
+
+  TaskInfo task = createTask(offers.get()[0], "sleep 60");
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_DROPPED, status.get().state());
+  EXPECT_EQ(TaskStatus::REASON_MASTER_DISCONNECTED, status.get().reason());
+  EXPECT_EQ(TaskStatus::SOURCE_MASTER, status.get().source());
 
   driver.stop();
   driver.join();

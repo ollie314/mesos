@@ -21,14 +21,14 @@
 // class MyFlags : public virtual FlagsBase // Use 'virtual' for composition!
 // {
 // public:
-//   Flags()
+//   MyFlags()
 //   {
-//     add(&debug,
+//     add(&MyFlags::debug,
 //         "debug",
 //         "Help string for debug",
 //         false);
 //
-//     add(&name,
+//     add(&MyFlags::name,
 //         "name",
 //         "Help string for name");
 //   }
@@ -55,7 +55,9 @@
 // You can also compose flags provided that each has used "virtual
 // inheritance":
 //  -------------------------------------------------------------
-// Flags<MyFlags1, MyFlags2> flags;
+// class MyFlags : public virtual MyFlags1, public virtual MyFlags2 {};
+//
+// MyFlags flags;
 // flags.add(...); // Any other flags you want to throw in there.
 // flags.load(values);
 // flags.flag_from_myflags1 ...

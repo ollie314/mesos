@@ -640,9 +640,10 @@ protected:
       Framework* framework,
       const std::vector<TaskStatus>& statuses);
 
-  // Handles a known re-registering slave by reconciling the master's
-  // view of the slave's tasks and executors.
-  void reconcile(
+  // When a slave that is known to the master re-registers, we need to
+  // reconcile the master's view of the slave's tasks and executors.
+  // This function also sends the `ReregisterSlaveMessage`.
+  void reconcileKnownSlave(
       Slave* slave,
       const std::vector<ExecutorInfo>& executors,
       const std::vector<Task>& tasks);
@@ -911,7 +912,7 @@ private:
 
   void accept(
       Framework* framework,
-      const scheduler::Call::Accept& accept);
+      scheduler::Call::Accept accept);
 
   void _accept(
       const FrameworkID& frameworkId,
@@ -1616,9 +1617,10 @@ private:
     // registry to re-register with the master.
     Option<process::Timer> recoveredTimer;
 
-    // Slaves that have been recovered from the registrar but have yet
-    // to re-register. We use `recoveredTimer` above to ensure we
-    // remove these slaves if they do not re-register.
+    // Slaves that have been recovered from the registrar after master
+    // failover. Slaves are removed from this collection when they
+    // either re-register with the master or are marked unreachable
+    // because they do not re-register before `recoveredTimer` fires.
     hashset<SlaveID> recovered;
 
     // Slaves that are in the process of registering.
@@ -1726,13 +1728,9 @@ private:
     bool transitioning(const Option<SlaveID>& slaveId)
     {
       if (slaveId.isSome()) {
-        return recovered.contains(slaveId.get()) ||
-               reregistering.contains(slaveId.get()) ||
-               removing.contains(slaveId.get());
+        return recovered.contains(slaveId.get());
       } else {
-        return !recovered.empty() ||
-               !reregistering.empty() ||
-               !removing.empty();
+        return !recovered.empty();
       }
     }
   } slaves;

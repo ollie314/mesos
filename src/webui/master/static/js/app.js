@@ -40,7 +40,9 @@
         //
         //     https://github.com/angular/angular.js/issues/1838
         .when('/agents/:agent_id/frameworks/:framework_id/executors/:executor_id/browse',
-          {template: ' ', controller: 'AgentExecutorRerouterCtrl'})
+          {template: ' ', controller: 'AgentTaskAndExecutorRerouterCtrl'})
+        .when('/agents/:agent_id/frameworks/:framework_id/executors/:executor_id/tasks/:task_id/browse',
+          {template: ' ', controller: 'AgentTaskAndExecutorRerouterCtrl'})
         .when('/agents/:agent_id/browse',
           {templateUrl: 'static/browse.html', controller: 'BrowseCtrl'})
 
@@ -115,6 +117,12 @@
           return $filter('date')(date, 'MMM dd yyyy');
         }
       };
+    })
+    // A filter that uses to convert small float number to decimal string.
+    .filter('decimalFloat', function() {
+      return function(num) {
+        return num ? parseFloat(num.toFixed(4)).toString() : num;
+      }
     })
     .filter('dataSize', function() {
       var BYTES_PER_KB = Math.pow(2, 10);

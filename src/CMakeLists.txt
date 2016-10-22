@@ -355,6 +355,7 @@ if (NOT WIN32)
     slave/containerizer/mesos/mount.cpp
     slave/containerizer/mesos/isolators/filesystem/posix.cpp
     slave/containerizer/mesos/isolators/posix/disk.cpp
+    slave/containerizer/mesos/isolators/posix/rlimits.cpp
     slave/containerizer/mesos/isolators/docker/volume/paths.cpp
     slave/containerizer/mesos/isolators/network/cni/paths.cpp
     slave/containerizer/mesos/isolators/network/cni/spec.cpp
@@ -376,6 +377,10 @@ if (NOT WIN32)
     uri/fetchers/hadoop.cpp
     )
 endif (NOT WIN32)
+
+set(POSIX_SRC
+  posix/rlimits.cpp
+  )
 
 set(USAGE_SRC
   usage/usage.cpp
@@ -440,6 +445,7 @@ if (NOT WIN32)
     ${HDFS_SRC}
     ${LOCAL_SRC}
     ${LOG_SRC}
+    ${POSIX_SRC}
     ${SCHED_SRC}
     ${SCHEDULER_SRC}
     ${STATE_SRC}

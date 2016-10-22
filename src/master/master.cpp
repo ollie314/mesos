@@ -1900,6 +1900,7 @@ Nothing Master::markUnreachableAfterFailover(const Registry::Slave& slave)
     .onAny(defer(self(),
                  &Self::_markUnreachableAfterFailover,
                  slave.info(),
+                 unreachableTime,
                  lambda::_1));
 
   return Nothing();
@@ -1908,6 +1909,7 @@ Nothing Master::markUnreachableAfterFailover(const Registry::Slave& slave)
 
 void Master::_markUnreachableAfterFailover(
     const SlaveInfo& slaveInfo,
+    const TimeInfo& unreachableTime,
     const Future<bool>& registrarResult)
 {
   CHECK(slaves.markingUnreachable.contains(slaveInfo.id()));
@@ -1935,6 +1937,8 @@ void Master::_markUnreachableAfterFailover(
   ++metrics->slave_removals;
   ++metrics->slave_removals_reason_unhealthy;
   ++metrics->recovery_slave_removals;
+
+  slaves.unreachable[slaveInfo.id()] = unreachableTime;
 
   sendSlaveLost(slaveInfo);
 }
@@ -5979,7 +5983,7 @@ void Master::markUnreachable(const SlaveID& slaveId)
 
 void Master::_markUnreachable(
     Slave* slave,
-    TimeInfo unreachableTime,
+    const TimeInfo& unreachableTime,
     const Future<bool>& registrarResult)
 {
   CHECK_NOTNULL(slave);
@@ -6327,7 +6331,7 @@ void Master::_reconcileTasks(
       // does not have the PARTITION_AWARE capability, send TASK_LOST
       // for backward compatibility. In either case, the status update
       // also includes the time when the slave was marked unreachable.
-      TimeInfo unreachableTime = slaves.unreachable[slaveId.get()];
+      const TimeInfo& unreachableTime = slaves.unreachable[slaveId.get()];
 
       TaskState taskState = TASK_UNREACHABLE;
       if (!protobuf::frameworkHasCapability(
@@ -6804,14 +6808,13 @@ void Master::reconcileKnownSlave(
 
   foreachkey (const FrameworkID& frameworkId, slave->tasks) {
     ReconcileTasksMessage reconcile;
-    reconcile.mutable_framework_id()->CopyFrom(frameworkId);
 
     foreachvalue (Task* task, slave->tasks[frameworkId]) {
       if (!slaveTasks.contains(task->framework_id(), task->task_id())) {
         LOG(WARNING) << "Task " << task->task_id()
                      << " of framework " << task->framework_id()
                      << " unknown to the agent " << *slave
-                     << " during re-registration : reconciling with the agent";
+                     << " during re-registration: reconciling with the agent";
 
         // NOTE: The slave doesn't look at the task state when it
         // reconciles the task. We send the master's view of the
@@ -6832,6 +6835,20 @@ void Master::reconcileKnownSlave(
     }
 
     if (reconcile.statuses_size() > 0) {
+      // NOTE: This function is only invoked when a slave reregisters
+      // with a master that previously knew about the slave and has
+      // not marked it unreachable. If the master has any tasks for
+      // the agent that are not known to the agent itself, it MUST
+      // have the FrameworkInfo for those tasks. This is because if a
+      // master has a task that the agent doesn't know about, the
+      // framework must have reregistered with this master since the
+      // last master failover.
+      Framework* framework = getFramework(frameworkId);
+      CHECK_NOTNULL(framework);
+
+      reconcile.mutable_framework_id()->CopyFrom(frameworkId);
+      reconcile.mutable_framework()->CopyFrom(framework->info);
+
       reregistered.add_reconciliations()->CopyFrom(reconcile);
     }
   }

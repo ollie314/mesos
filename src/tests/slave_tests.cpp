@@ -2316,8 +2316,9 @@ TEST_F(SlaveTest, DISABLED_TerminatingSlaveDoesNotReregister)
 
 // This test verifies the slave will destroy a container if, when
 // receiving a terminal status task update, updating the container's
-// resources fails.
-TEST_F(SlaveTest, TerminalTaskContainerizerUpdateFails)
+// resources fails. A non-partition-aware framework should receive
+// TASK_LOST in this situation.
+TEST_F(SlaveTest, TerminalTaskContainerizerUpdateFailsWithLost)
 {
   // Start a master.
   Try<Owned<cluster::Master>> master = StartMaster();
@@ -2333,6 +2334,7 @@ TEST_F(SlaveTest, TerminalTaskContainerizerUpdateFails)
   Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
+  // Connect a non-partition-aware scheduler.
   MockScheduler sched;
   MesosSchedulerDriver driver(
       &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
@@ -2411,6 +2413,123 @@ TEST_F(SlaveTest, TerminalTaskContainerizerUpdateFails)
   EXPECT_EQ(TaskStatus::REASON_CONTAINER_UPDATE_FAILED, status4->reason());
 
   AWAIT_READY(executorLost);
+
+  JSON::Object stats = Metrics();
+  EXPECT_EQ(0, stats.values["slave/tasks_gone"]);
+  EXPECT_EQ(1, stats.values["slave/tasks_lost"]);
+
+  driver.stop();
+  driver.join();
+}
+
+
+// This test verifies the slave will destroy a container if, when
+// receiving a terminal status task update, updating the container's
+// resources fails. A partition-aware framework should receive
+// TASK_GONE in this situation.
+TEST_F(SlaveTest, TerminalTaskContainerizerUpdateFailsWithGone)
+{
+  // Start a master.
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+  EXPECT_CALL(exec, registered(_, _, _, _));
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  // Start a slave.
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
+  ASSERT_SOME(slave);
+
+  // Connect a partition-aware scheduler.
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.add_capabilities()->set_type(
+      FrameworkInfo::Capability::PARTITION_AWARE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(_, _, _));
+
+  Future<vector<Offer>> offers;
+
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+  Offer offer = offers.get()[0];
+
+  // Start two tasks.
+  vector<TaskInfo> tasks;
+
+  tasks.push_back(createTask(
+      offer.slave_id(),
+      Resources::parse("cpus:0.1;mem:32").get(),
+      "sleep 1000",
+      exec.id));
+
+  tasks.push_back(createTask(
+      offer.slave_id(),
+      Resources::parse("cpus:0.1;mem:32").get(),
+      "sleep 1000",
+      exec.id));
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<TaskStatus> status1, status2, status3, status4;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status1))
+    .WillOnce(FutureArg<1>(&status2))
+    .WillOnce(FutureArg<1>(&status3))
+    .WillOnce(FutureArg<1>(&status4));
+
+  driver.launchTasks(offer.id(), tasks);
+
+  AWAIT_READY(status1);
+  EXPECT_EQ(TASK_RUNNING, status1.get().state());
+
+  AWAIT_READY(status2);
+  EXPECT_EQ(TASK_RUNNING, status2.get().state());
+
+  // Set up the containerizer so the next update() will fail.
+  EXPECT_CALL(containerizer, update(_, _))
+    .WillOnce(Return(Failure("update() failed")))
+    .WillRepeatedly(Return(Nothing()));
+
+  EXPECT_CALL(exec, killTask(_, _))
+    .WillOnce(SendStatusUpdateFromTaskID(TASK_KILLED));
+
+  Future<Nothing> executorLost;
+  EXPECT_CALL(sched, executorLost(&driver, DEFAULT_EXECUTOR_ID, _, _))
+    .WillOnce(FutureSatisfy(&executorLost));
+
+  // Kill one of the tasks. The failed update should result in the
+  // second task going lost when the container is destroyed.
+  driver.killTask(tasks[0].task_id());
+
+  AWAIT_READY(status3);
+  EXPECT_EQ(TASK_KILLED, status3.get().state());
+  EXPECT_EQ(TaskStatus::SOURCE_EXECUTOR, status3.get().source());
+
+  AWAIT_READY(status4);
+  EXPECT_EQ(TASK_GONE, status4->state());
+  EXPECT_EQ(TaskStatus::SOURCE_SLAVE, status4->source());
+  EXPECT_EQ(TaskStatus::REASON_CONTAINER_UPDATE_FAILED, status4->reason());
+
+  AWAIT_READY(executorLost);
+
+  JSON::Object stats = Metrics();
+  EXPECT_EQ(1, stats.values["slave/tasks_gone"]);
+  EXPECT_EQ(0, stats.values["slave/tasks_lost"]);
 
   driver.stop();
   driver.join();
@@ -3330,8 +3449,8 @@ TEST_F(SlaveTest, KillTaskUnregisteredHTTPExecutor)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
-  auto executor = std::make_shared<MockV1HTTPExecutor>();
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
 
   Resources resources =
     Resources::parse("cpus:0.1;mem:32;disk:32").get();
@@ -3353,7 +3472,7 @@ TEST_F(SlaveTest, KillTaskUnregisteredHTTPExecutor)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::TestV1Mesos mesos(
+  scheduler::v1::TestMesos mesos(
       master.get()->pid, ContentType::PROTOBUF, scheduler);
 
   AWAIT_READY(connected);
@@ -3374,7 +3493,7 @@ TEST_F(SlaveTest, KillTaskUnregisteredHTTPExecutor)
     call.set_type(Call::SUBSCRIBE);
 
     Call::Subscribe* subscribe = call.mutable_subscribe();
-    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
+    subscribe->mutable_framework_info()->CopyFrom(v1::DEFAULT_FRAMEWORK_INFO);
 
     mesos.send(call);
   }
@@ -4780,8 +4899,8 @@ TEST_F(SlaveTest, RunTaskGroup)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
-  auto executor = std::make_shared<MockV1HTTPExecutor>();
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
 
   Resources resources =
     Resources::parse("cpus:0.1;mem:32;disk:32").get();
@@ -4802,7 +4921,7 @@ TEST_F(SlaveTest, RunTaskGroup)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::TestV1Mesos mesos(
+  scheduler::v1::TestMesos mesos(
       master.get()->pid, ContentType::PROTOBUF, scheduler);
 
   AWAIT_READY(connected);
@@ -4822,7 +4941,7 @@ TEST_F(SlaveTest, RunTaskGroup)
     Call call;
     call.set_type(Call::SUBSCRIBE);
     Call::Subscribe* subscribe = call.mutable_subscribe();
-    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
+    subscribe->mutable_framework_info()->CopyFrom(v1::DEFAULT_FRAMEWORK_INFO);
 
     mesos.send(call);
   }
@@ -4838,7 +4957,7 @@ TEST_F(SlaveTest, RunTaskGroup)
   EXPECT_NE(0, offers->offers().size());
 
   EXPECT_CALL(*executor, connected(_))
-    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
+    .WillOnce(v1::executor::SendSubscribe(frameworkId, evolve(executorId)));
 
   EXPECT_CALL(*executor, subscribed(_, _));
 
@@ -4904,8 +5023,8 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
-  auto executor = std::make_shared<MockV1HTTPExecutor>();
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
 
   Resources resources =
     Resources::parse("cpus:0.1;mem:32;disk:32").get();
@@ -4927,7 +5046,7 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::TestV1Mesos mesos(
+  scheduler::v1::TestMesos mesos(
       master.get()->pid, ContentType::PROTOBUF, scheduler);
 
   AWAIT_READY(connected);
@@ -4948,7 +5067,7 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
     Call call;
     call.set_type(Call::SUBSCRIBE);
     Call::Subscribe* subscribe = call.mutable_subscribe();
-    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
+    subscribe->mutable_framework_info()->CopyFrom(v1::DEFAULT_FRAMEWORK_INFO);
 
     mesos.send(call);
   }
@@ -5095,8 +5214,8 @@ TEST_F(SlaveTest, DefaultExecutorCommandInfo)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
-  auto executor = std::make_shared<MockV1HTTPExecutor>();
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
 
   Resources resources =
     Resources::parse("cpus:0.1;mem:32;disk:32").get();
@@ -5120,7 +5239,7 @@ TEST_F(SlaveTest, DefaultExecutorCommandInfo)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::TestV1Mesos mesos(
+  scheduler::v1::TestMesos mesos(
       master.get()->pid, ContentType::PROTOBUF, scheduler);
 
   AWAIT_READY(connected);
@@ -5208,8 +5327,8 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
-  auto executor = std::make_shared<MockV1HTTPExecutor>();
+  auto scheduler = std::make_shared<v1::MockHTTPScheduler>();
+  auto executor = std::make_shared<v1::MockHTTPExecutor>();
 
   Resources resources =
     Resources::parse("cpus:0.1;mem:32;disk:32").get();
@@ -5230,7 +5349,7 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::TestV1Mesos mesos(
+  scheduler::v1::TestMesos mesos(
       master.get()->pid, ContentType::PROTOBUF, scheduler);
 
   AWAIT_READY(connected);
@@ -5251,7 +5370,7 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
     Call call;
     call.set_type(Call::SUBSCRIBE);
     Call::Subscribe* subscribe = call.mutable_subscribe();
-    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
+    subscribe->mutable_framework_info()->CopyFrom(v1::DEFAULT_FRAMEWORK_INFO);
 
     mesos.send(call);
   }

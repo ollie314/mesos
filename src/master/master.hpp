@@ -683,7 +683,7 @@ protected:
 
   void _markUnreachable(
       Slave* slave,
-      TimeInfo unreachableTime,
+      const TimeInfo& unreachableTime,
       const process::Future<bool>& registrarResult);
 
   // Mark a slave as unreachable in the registry. Called when the slave
@@ -692,6 +692,7 @@ protected:
 
   void _markUnreachableAfterFailover(
       const SlaveInfo& slaveInfo,
+      const TimeInfo& unreachableTime,
       const process::Future<bool>& registrarResult);
 
   void sendSlaveLost(const SlaveInfo& slaveInfo);
@@ -1953,7 +1954,7 @@ private:
 class MarkSlaveUnreachable : public Operation
 {
 public:
-  MarkSlaveUnreachable(const SlaveInfo& _info, TimeInfo _unreachableTime)
+  MarkSlaveUnreachable(const SlaveInfo& _info, const TimeInfo& _unreachableTime)
     : info(_info), unreachableTime(_unreachableTime) {
     CHECK(info.has_id()) << "SlaveInfo is missing the 'id' field";
   }

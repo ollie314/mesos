@@ -1269,36 +1269,44 @@ void Slave::reregistered(
       const TaskID& taskId = status.task_id();
 
       bool known = false;
-
-      // Try to locate the task.
       if (framework != nullptr) {
-        foreachkey (const ExecutorID& executorId, framework->pending) {
-          if (framework->pending[executorId].contains(taskId)) {
-            known = true;
-          }
-        }
-        foreachvalue (Executor* executor, framework->executors) {
-          if (executor->queuedTasks.contains(taskId) ||
-              executor->launchedTasks.contains(taskId) ||
-              executor->terminatedTasks.contains(taskId)) {
-            known = true;
-          }
-        }
+        known = framework->hasTask(taskId);
       }
 
-      // We only need to send a TASK_LOST update when the task is
-      // unknown (so that the master removes it). Otherwise, the
-      // master correctly holds the task and will receive updates.
+      // Send a terminal status update for each task that is known to
+      // the master but not known to the agent. This ensures that the
+      // master will cleanup any state associated with the task, which
+      // is not running. We send TASK_DROPPED to partition-aware
+      // frameworks; frameworks that are not partition-aware are sent
+      // TASK_LOST for backward compatibility.
+      //
+      // If the task is known to the agent, we don't need to send a
+      // status update to the master: because the master already knows
+      // about the task, any subsequent status updates will be
+      // propagated correctly.
       if (!known) {
+        // NOTE: The `framework` field of the `ReconcileTasksMessage`
+        // is only set by masters running Mesos 1.1.0 or later. If the
+        // field is unset, we assume the framework is not partition-aware.
+        mesos::TaskState taskState = TASK_LOST;
+
+        if (reconcile.has_framework() &&
+            protobuf::frameworkHasCapability(
+                reconcile.framework(),
+                FrameworkInfo::Capability::PARTITION_AWARE)) {
+          taskState = TASK_DROPPED;
+        }
+
         LOG(WARNING) << "Agent reconciling task " << taskId
                      << " of framework " << reconcile.framework_id()
-                     << " in state TASK_LOST: task unknown to the agent";
+                     << " in state " << taskState
+                     << ": task unknown to the agent";
 
         const StatusUpdate update = protobuf::createStatusUpdate(
             reconcile.framework_id(),
             info.id(),
             taskId,
-            TASK_LOST,
+            taskState,
             TaskStatus::SOURCE_SLAVE,
             UUID::random(),
             "Reconciliation: task unknown to the agent",
@@ -1783,12 +1791,21 @@ void Slave::_run(
     LOG(ERROR) << "Failed to unschedule directories scheduled for gc: "
                << (future.isFailed() ? future.failure() : "future discarded");
 
+    // We report TASK_DROPPED to the framework because the task was
+    // never launched. For non-partition-aware frameworks, we report
+    // TASK_LOST for backward compatibility.
+    mesos::TaskState taskState = TASK_DROPPED;
+    if (!protobuf::frameworkHasCapability(
+            frameworkInfo, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      taskState = TASK_LOST;
+    }
+
     foreach (const TaskInfo& task, tasks) {
       const StatusUpdate update = protobuf::createStatusUpdate(
           frameworkId,
           info.id(),
           task.task_id(),
-          TASK_LOST,
+          taskState,
           TaskStatus::SOURCE_SLAVE,
           UUID::random(),
           "Could not launch the task because we failed to unschedule"
@@ -1814,8 +1831,8 @@ void Slave::_run(
   // NOTE: If the task/task group or executor uses resources that are
   // checkpointed on the slave (e.g. persistent volumes), we should
   // already know about it. If the slave doesn't know about them (e.g.
-  // CheckpointResourcesMessage was dropped or came out of order),
-  // we send TASK_LOST status updates here since restarting the task
+  // CheckpointResourcesMessage was dropped or came out of order), we
+  // send TASK_DROPPED status updates here since restarting the task
   // may succeed in the event that CheckpointResourcesMessage arrives
   // out of order.
   bool kill = false;
@@ -1836,12 +1853,21 @@ void Slave::_run(
   }
 
   if (kill) {
+    // We report TASK_DROPPED to the framework because the task was
+    // never launched. For non-partition-aware frameworks, we report
+    // TASK_LOST for backward compatibility.
+    mesos::TaskState taskState = TASK_DROPPED;
+    if (!protobuf::frameworkHasCapability(
+            frameworkInfo, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      taskState = TASK_LOST;
+    }
+
     foreach (const TaskInfo& task, tasks) {
       const StatusUpdate update = protobuf::createStatusUpdate(
           frameworkId,
           info.id(),
           task.task_id(),
-          TASK_LOST,
+          taskState,
           TaskStatus::SOURCE_SLAVE,
           UUID::random(),
           "The checkpointed resources being used by the task or task group are "
@@ -1876,12 +1902,21 @@ void Slave::_run(
   }
 
   if (kill) {
+    // We report TASK_DROPPED to the framework because the task was
+    // never launched. For non-partition-aware frameworks, we report
+    // TASK_LOST for backward compatibility.
+    mesos::TaskState taskState = TASK_DROPPED;
+    if (!protobuf::frameworkHasCapability(
+            frameworkInfo, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      taskState = TASK_LOST;
+    }
+
     foreach (const TaskInfo& task, tasks) {
       const StatusUpdate update = protobuf::createStatusUpdate(
           frameworkId,
           info.id(),
           task.task_id(),
-          TASK_LOST,
+          taskState,
           TaskStatus::SOURCE_SLAVE,
           UUID::random(),
           "The checkpointed resources being used by the executor are unknown "
@@ -1952,12 +1987,21 @@ void Slave::_run(
                    << " with executor '" << executorId
                    << "' which is " << executorState;
 
+      // We report TASK_DROPPED to the framework because the task was
+      // never launched. For non-partition-aware frameworks, we report
+      // TASK_LOST for backward compatibility.
+      mesos::TaskState taskState = TASK_DROPPED;
+      if (!protobuf::frameworkHasCapability(
+              frameworkInfo, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        taskState = TASK_LOST;
+      }
+
       foreach (const TaskInfo& task, tasks) {
         const StatusUpdate update = protobuf::createStatusUpdate(
             frameworkId,
             info.id(),
             task.task_id(),
-            TASK_LOST,
+            taskState,
             TaskStatus::SOURCE_SLAVE,
             UUID::random(),
             "Executor " + executorState,
@@ -2067,8 +2111,20 @@ void Slave::__run(
 
     Executor* executor = getExecutor(frameworkId, executorId);
     if (executor != nullptr) {
+      Framework* framework = getFramework(frameworkId);
+      CHECK_NOTNULL(framework);
+
+      // Send TASK_GONE because the task was started but has now
+      // been terminated. If the framework is not partition-aware,
+      // we send TASK_LOST instead for backward compatibility.
+      mesos::TaskState taskState = TASK_GONE;
+      if (!protobuf::frameworkHasCapability(
+              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        taskState = TASK_LOST;
+      }
+
       ContainerTermination termination;
-      termination.set_state(TASK_LOST);
+      termination.set_state(taskState);
       termination.add_reasons(TaskStatus::REASON_CONTAINER_UPDATE_FAILED);
       termination.set_message(
           "Failed to update resources for container: " +
@@ -2348,13 +2404,21 @@ void Slave::killTask(
     LOG(WARNING) << "Cannot kill task " << taskId
                  << " of framework " << frameworkId
                  << " because no corresponding executor is running";
-    // We send a TASK_LOST update because this task has never
-    // been launched on this slave.
+
+    // We send a TASK_DROPPED update because this task has never been
+    // launched on this slave. If the framework is not partition-aware,
+    // we send TASK_LOST for backward compatibility.
+    mesos::TaskState taskState = TASK_DROPPED;
+    if (!protobuf::frameworkHasCapability(
+            framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+      taskState = TASK_LOST;
+    }
+
     const StatusUpdate update = protobuf::createStatusUpdate(
         frameworkId,
         info.id(),
         taskId,
-        TASK_LOST,
+        taskState,
         TaskStatus::SOURCE_SLAVE,
         UUID::random(),
         "Cannot find executor",
@@ -3182,27 +3246,37 @@ void Slave::subscribe(
       // Now, if there is any task still in STAGING state and not in
       // unacknowledged 'tasks' known to the executor, the slave must
       // have died before the executor received the task! We should
-      // transition it to TASK_LOST. We only consider/store
+      // transition it to TASK_DROPPED. We only consider/store
       // unacknowledged 'tasks' at the executor driver because if a
-      // task has been acknowledged, the slave must have received
-      // an update for that task and transitioned it out of STAGING!
+      // task has been acknowledged, the slave must have received an
+      // update for that task and transitioned it out of STAGING!
+      //
       // TODO(vinod): Consider checkpointing 'TaskInfo' instead of
-      // 'Task' so that we can relaunch such tasks! Currently we
-      // don't do it because 'TaskInfo.data' could be huge.
+      // 'Task' so that we can relaunch such tasks! Currently we don't
+      // do it because 'TaskInfo.data' could be huge.
+      //
       // TODO(vinod): Use foreachvalue instead once LinkedHashmap
       // supports it.
       foreach (Task* task, executor->launchedTasks.values()) {
         if (task->state() == TASK_STAGING &&
             !unackedTasks.contains(task->task_id())) {
+          mesos::TaskState newTaskState = TASK_DROPPED;
+          if (!protobuf::frameworkHasCapability(
+                  framework->info,
+                  FrameworkInfo::Capability::PARTITION_AWARE)) {
+            newTaskState = TASK_LOST;
+          }
+
           LOG(INFO) << "Transitioning STAGED task " << task->task_id()
-                    << " to LOST because it is unknown to the executor "
+                    << " to " << newTaskState
+                    << " because it is unknown to the executor "
                     << executor->id;
 
           const StatusUpdate update = protobuf::createStatusUpdate(
               framework->id(),
               info.id(),
               task->task_id(),
-              TASK_LOST,
+              newTaskState,
               TaskStatus::SOURCE_SLAVE,
               UUID::random(),
               "Task launched during agent restart",
@@ -3492,27 +3566,37 @@ void Slave::reregisterExecutor(
       // Now, if there is any task still in STAGING state and not in
       // unacknowledged 'tasks' known to the executor, the slave must
       // have died before the executor received the task! We should
-      // transition it to TASK_LOST. We only consider/store
+      // transition it to TASK_DROPPED. We only consider/store
       // unacknowledged 'tasks' at the executor driver because if a
       // task has been acknowledged, the slave must have received
       // an update for that task and transitioned it out of STAGING!
+      //
       // TODO(vinod): Consider checkpointing 'TaskInfo' instead of
       // 'Task' so that we can relaunch such tasks! Currently we
       // don't do it because 'TaskInfo.data' could be huge.
+      //
       // TODO(vinod): Use foreachvalue instead once LinkedHashmap
       // supports it.
       foreach (Task* task, executor->launchedTasks.values()) {
         if (task->state() == TASK_STAGING &&
             !unackedTasks.contains(task->task_id())) {
+          mesos::TaskState newTaskState = TASK_DROPPED;
+          if (!protobuf::frameworkHasCapability(
+                  framework->info,
+                  FrameworkInfo::Capability::PARTITION_AWARE)) {
+            newTaskState = TASK_LOST;
+          }
+
           LOG(INFO) << "Transitioning STAGED task " << task->task_id()
-                    << " to LOST because it is unknown to the executor '"
+                    << " to " << newTaskState
+                    << " because it is unknown to the executor '"
                     << executorId << "'";
 
           const StatusUpdate update = protobuf::createStatusUpdate(
               frameworkId,
               info.id(),
               task->task_id(),
-              TASK_LOST,
+              newTaskState,
               TaskStatus::SOURCE_SLAVE,
               UUID::random(),
               "Task launched during agent restart",
@@ -3552,8 +3636,20 @@ void Slave::_reregisterExecutor(
 
     Executor* executor = getExecutor(frameworkId, executorId);
     if (executor != nullptr) {
+      Framework* framework = getFramework(frameworkId);
+      CHECK_NOTNULL(framework);
+
+      // Send TASK_GONE because the task was started but has now
+      // been terminated. If the framework is not partition-aware,
+      // we send TASK_LOST instead for backward compatibility.
+      mesos::TaskState taskState = TASK_GONE;
+      if (!protobuf::frameworkHasCapability(
+              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        taskState = TASK_LOST;
+      }
+
       ContainerTermination termination;
-      termination.set_state(TASK_LOST);
+      termination.set_state(taskState);
       termination.add_reasons(TaskStatus::REASON_CONTAINER_UPDATE_FAILED);
       termination.set_message(
           "Failed to update resources for container: " +
@@ -3595,8 +3691,18 @@ void Slave::reregisterExecutorTimeout()
 
           executor->state = Executor::TERMINATING;
 
+          // Send TASK_GONE because the task was started but has now
+          // been terminated. If the framework is not partition-aware,
+          // we send TASK_LOST instead for backward compatibility.
+          mesos::TaskState taskState = TASK_GONE;
+          if (!protobuf::frameworkHasCapability(
+                  framework->info,
+                  FrameworkInfo::Capability::PARTITION_AWARE)) {
+            taskState = TASK_LOST;
+          }
+
           ContainerTermination termination;
-          termination.set_state(TASK_LOST);
+          termination.set_state(taskState);
           termination.add_reasons(
               TaskStatus::REASON_EXECUTOR_REREGISTRATION_TIMEOUT);
           termination.set_message(
@@ -3910,8 +4016,20 @@ void Slave::__statusUpdate(
 
     Executor* executor = getExecutor(update.framework_id(), executorId);
     if (executor != nullptr) {
+      Framework* framework = getFramework(update.framework_id());
+      CHECK_NOTNULL(framework);
+
+      // Send TASK_GONE because the task was started but has now
+      // been terminated. If the framework is not partition-aware,
+      // we send TASK_LOST instead for backward compatibility.
+      mesos::TaskState taskState = TASK_GONE;
+      if (!protobuf::frameworkHasCapability(
+              framework->info, FrameworkInfo::Capability::PARTITION_AWARE)) {
+        taskState = TASK_LOST;
+      }
+
       ContainerTermination termination;
-      termination.set_state(TASK_LOST);
+      termination.set_state(taskState);
       termination.add_reasons(TaskStatus::REASON_CONTAINER_UPDATE_FAILED);
       termination.set_message(
           "Failed to update resources for container: " +
@@ -4572,10 +4690,10 @@ void Slave::executorTerminated(
 
       executor->state = Executor::TERMINATED;
 
-      // Transition all live tasks to TASK_LOST/TASK_FAILED.
+      // Transition all live tasks to TASK_GONE/TASK_FAILED.
       // If the containerizer killed the executor (e.g., due to OOM event)
       // or if this is a command executor, we send TASK_FAILED status updates
-      // instead of TASK_LOST.
+      // instead of TASK_GONE.
       // NOTE: We don't send updates if the framework is terminating
       // because we don't want the status update manager to keep retrying
       // these updates since it won't receive ACKs from the scheduler.  Also,
@@ -5626,8 +5744,18 @@ void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
           // (MESOS-2875).
           executor->state = Executor::TERMINATING;
 
+          // Send TASK_GONE because the task was started but has now
+          // been terminated. If the framework is not partition-aware,
+          // we send TASK_LOST instead for backward compatibility.
+          mesos::TaskState taskState = TASK_GONE;
+          if (!protobuf::frameworkHasCapability(
+                  framework->info,
+                  FrameworkInfo::Capability::PARTITION_AWARE)) {
+            taskState = TASK_LOST;
+          }
+
           ContainerTermination termination;
-          termination.set_state(TASK_LOST);
+          termination.set_state(taskState);
           termination.add_reasons(TaskStatus::REASON_CONTAINER_PREEMPTED);
           termination.set_message("Container preempted by QoS correction");
 
@@ -6732,6 +6860,7 @@ Try<Nothing> Executor::updateTaskState(const TaskStatus& status)
       case TASK_FAILED:   ++slave->metrics.tasks_failed;   break;
       case TASK_KILLED:   ++slave->metrics.tasks_killed;   break;
       case TASK_LOST:     ++slave->metrics.tasks_lost;     break;
+      case TASK_GONE:     ++slave->metrics.tasks_gone;     break;
       default:
         LOG(ERROR) << "Unexpected terminal task state " << status.state();
         break;

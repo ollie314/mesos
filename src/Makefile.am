@@ -801,6 +801,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   master/detector/zookeeper.cpp						\
   messages/messages.cpp							\
   module/manager.cpp							\
+  posix/rlimits.cpp							\
   sched/sched.cpp							\
   scheduler/scheduler.cpp						\
   slave/constants.cpp							\
@@ -834,6 +835,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/isolators/network/cni/paths.cpp		\
   slave/containerizer/mesos/isolators/network/cni/spec.cpp		\
   slave/containerizer/mesos/isolators/posix/disk.cpp			\
+  slave/containerizer/mesos/isolators/posix/rlimits.cpp			\
   slave/containerizer/mesos/isolators/volume/sandbox_path.cpp		\
   slave/containerizer/mesos/provisioner/backend.cpp			\
   slave/containerizer/mesos/provisioner/paths.cpp			\
@@ -927,6 +929,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   messages/flags.hpp							\
   messages/messages.hpp							\
   module/manager.hpp							\
+  posix/rlimits.hpp							\
   sched/constants.hpp							\
   sched/flags.hpp							\
   scheduler/constants.hpp						\
@@ -959,6 +962,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/isolators/filesystem/posix.hpp		\
   slave/containerizer/mesos/isolators/filesystem/windows.hpp		\
   slave/containerizer/mesos/isolators/posix/disk.hpp			\
+  slave/containerizer/mesos/isolators/posix/rlimits.hpp			\
   slave/containerizer/mesos/isolators/docker/volume/driver.hpp		\
   slave/containerizer/mesos/isolators/docker/volume/paths.hpp		\
   slave/containerizer/mesos/isolators/docker/volume/state.hpp		\
@@ -997,6 +1001,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   tests/mock_slave.hpp							\
   tests/mock_registrar.hpp						\
   tests/module.hpp							\
+  tests/resources_utils.hpp						\
   tests/script.hpp							\
   tests/utils.hpp							\
   tests/zookeeper.hpp							\
@@ -1928,6 +1933,7 @@ check_PROGRAMS += test-helper
 test_helper_SOURCES =						\
   tests/active_user_test_helper.cpp				\
   tests/flags.cpp						\
+  tests/resources_utils.cpp					\
   tests/test_helper_main.cpp					\
   tests/utils.cpp						\
   tests/containerizer/memory_test_helper.cpp
@@ -2132,6 +2138,7 @@ mesos_tests_SOURCES =						\
   tests/reservation_tests.cpp					\
   tests/resource_offers_tests.cpp				\
   tests/resources_tests.cpp					\
+  tests/resources_utils.cpp					\
   tests/role_tests.cpp						\
   tests/scheduler_driver_tests.cpp				\
   tests/scheduler_event_call_tests.cpp				\
@@ -2167,6 +2174,7 @@ mesos_tests_SOURCES =						\
   tests/containerizer/memory_test_helper.cpp			\
   tests/containerizer/mesos_containerizer_tests.cpp		\
   tests/containerizer/mesos_containerizer_paths_tests.cpp	\
+  tests/containerizer/posix_rlimits_isolator_tests.cpp		\
   tests/containerizer/provisioner_appc_tests.cpp		\
   tests/containerizer/provisioner_backend_tests.cpp		\
   tests/containerizer/provisioner_docker_tests.cpp		\

@@ -39,7 +39,7 @@ This release contains the following new features:
     container may have. This allows a container to run as root, but not have all
     the privileges associated with the root user (e.g., CAP_SYS_ADMIN).
 
-  * [MESOS-5344] -- **Experimental** support for partition-aware Mesos
+  * [MESOS-5344] - **Experimental** support for partition-aware Mesos
     frameworks. In previous Mesos releases, when an agent is partitioned from
     the master and then reregisters with the cluster, all tasks running on the
     agent are terminated and the agent is shutdown. In Mesos 1.1, partitioned
@@ -52,6 +52,11 @@ This release contains the following new features:
     introduces a new set of task states: TASK_UNREACHABLE, TASK_DROPPED,
     TASK_GONE, TASK_GONE_BY_OPERATOR, and TASK_UNKNOWN. These new states are
     intended to eventually replace the TASK_LOST state.
+
+  * [MESOS-5788] - **Experimental** support for Java scheduler adapter. This
+    adapter allows framework developers to toggle between the old/new API
+    (driver/scheduler library) implementations, thereby allowing them to easily
+    transition their frameworks to the new v1 Scheduler API.
 
   * [MESOS-6077] - **Experimental** A new default executor is introduced which
     frameworks can use to launch task groups as nested containers. All the
@@ -105,6 +110,8 @@ All Issues:
   * [MESOS-4638] - versioning preprocessor macros.
   * [MESOS-4668] - Agent's /state endpoint does not include full reservation information.
   * [MESOS-4948] - Move maintenance tests to use the new scheduler library interface.
+  * [MESOS-4973] - Duplicates in 'unregistered_frameworks' in /state
+  * [MESOS-4975] - mesos::internal::master::Slave::tasks can grow unboundedly.
   * [MESOS-5276] - HTTPCommandExecutor should terminate after it receives an ACK from the agent.
   * [MESOS-5290] - WebUI shows the active task is launched 46 years ago.
   * [MESOS-5320] - SSL related error messages can be misguiding or incomplete.
@@ -143,7 +150,7 @@ All Issues:
   * [MESOS-6000] - Overlayfs backend cannot support the image with numerous layers.
   * [MESOS-6005] - Support docker registry running non-https on localhost:<non-80-port>.
   * [MESOS-6013] - Use readdir instead of readdir_r.
-  * [MESOS-6026] - Tasks mistakenly marked as FAILED due to race b/w ﻿⁠sendExecutorTerminatedStatusUpdate()﻿⁠ and ﻿⁠_statusUpdate()﻿⁠.
+  * [MESOS-6026] - Tasks mistakenly marked as FAILED due to race b/w sendExecutorTerminatedStatusUpdate() and _statusUpdate().
   * [MESOS-6031] - Collect throttle related metrics for DockerContainerizer.
   * [MESOS-6041] - Stream ID mismatch should print out expected and received stream ID.
   * [MESOS-6049] - XFS disk isolator doesn't handle old containers correctly.
@@ -211,6 +218,14 @@ All Issues:
   * [MESOS-6386] - "Reached unreachable statement" in LinuxCapabilitiesIsolatorTest.
   * [MESOS-6391] - Command task's sandbox should not be owned by root if it uses container image.
   * [MESOS-6393] - Deprecated SSL_ environment variables are non functional already.
+  * [MESOS-6420] - Mesos Agent leaking sockets when port mapping network isolator is ON.
+  * [MESOS-6445] - Reconciliation for unreachable agent after master failover is incorrect.
+  * [MESOS-6446] - WebUI redirect doesn't work with stats from /metric/snapshot.
+  * [MESOS-6461] - Duplicate framework ids in /master/frameworks endpoint 'unregistered_frameworks'.
+  * [MESOS-6482] - Master check failure when marking an agent unreachable.
+  * [MESOS-6483] - Check failure when a 1.1 master marking a 0.28 agent as unreachable.
+  * [MESOS-6497] - Java Scheduler Adapter does not surface MasterInfo.
+  * [MESOS-6502] - _version uses incorrect MESOS_{MAJOR,MINOR,PATCH}_VERSION in libmesos java binding.
 
 ** Documentation
   * [MESOS-5221] - Add Documentation for Nvidia GPU support.
@@ -361,76 +376,82 @@ All Issues:
   * [MESOS-6312] - Update CHANGELOG to mention addition of agent '--runtime_dir' flag.
   * [MESOS-6344] - Allow `network/cni` isolator to take a search path for CNI plugins instead of single directory.
   * [MESOS-6408] - Changelog for `mesos-cni-port-mapper` to 1.1.0.
-  * [MESOS-6445] - Reconciliation for unreachable agent after master failover is incorrect 
 
 ** Wish
   * [MESOS-5929] - Total cluster resources on master Mesos UI should have better spacing.
 
 
 Release Notes - Mesos - Version 1.0.2
---------------------------------------------
+-------------------------------------
 * This is a bug fix release.
 
 All Issues:
 ** Bug
+    * [MESOS-4638] - Versioning preprocessor macros.
+    * [MESOS-4973] - Duplicates in 'unregistered_frameworks' in /state
+    * [MESOS-4975] - mesos::internal::master::Slave::tasks can grow unboundedly.
     * [MESOS-5613] - mesos-local fails to start if MESOS_WORK_DIR isn't set.
     * [MESOS-6013] - Use readdir instead of readdir_r.
-    * [MESOS-6026] - Tasks mistakenly marked as FAILED due to race b/w ﻿⁠sendExecutorTerminatedStatusUpdate()﻿⁠ and ﻿⁠_statusUpdate()﻿⁠
-    * [MESOS-6074] - Master check failure if the metrics endpoint is polled soon after it starts
-    * [MESOS-6100] - Make fails compiling 1.0.1 
+    * [MESOS-6026] - Tasks mistakenly marked as FAILED due to race b/w sendExecutorTerminatedStatusUpdate() and _statusUpdate().
+    * [MESOS-6074] - Master check failure if the metrics endpoint is polled soon after it starts.
+    * [MESOS-6100] - Make fails compiling 1.0.1.
     * [MESOS-6104] - Potential FD double close in libevent's implementation of `sendfile`.
     * [MESOS-6118] - Agent would crash with docker container tasks due to host mount table read.
-    * [MESOS-6122] - Mesos slave throws systemd errors even when passed a flag to disable systemd
+    * [MESOS-6122] - Mesos slave throws systemd errors even when passed a flag to disable systemd.
     * [MESOS-6152] - Resource leak in libevent_ssl_socket.cpp.
-    * [MESOS-6216] - LibeventSSLSocketImpl::create is not safe to call concurrently with os::getenv
-    * [MESOS-6233] - Master CHECK fails during recovery while relinking to other masters
-    * [MESOS-6234] - Potential socket leak during Zookeeper network changes
+    * [MESOS-6212] - Validate the name format of mesos managed docker containers.
+    * [MESOS-6216] - LibeventSSLSocketImpl::create is not safe to call concurrently with os::getenv.
+    * [MESOS-6233] - Master CHECK fails during recovery while relinking to other masters.
+    * [MESOS-6234] - Potential socket leak during Zookeeper network changes.
     * [MESOS-6245] - Driver based schedulers performing explicit acknowledgements cannot acknowledge updates from HTTP based executors.
-    * [MESOS-6246] - Libprocess links will not generate an ExitedEvent if the socket creation fails
-    * [MESOS-6269] - CNI isolator doesn't activate loopback interface
+    * [MESOS-6246] - Libprocess links will not generate an ExitedEvent if the socket creation fails.
+    * [MESOS-6269] - CNI isolator doesn't activate loopback interface.
     * [MESOS-6274] - Agent should not allow HTTP executors to re-subscribe before containerizer recovery is done.
-    * [MESOS-6324] - CNI should not use `ifconfig` in executors `pre_exec_command`
+    * [MESOS-6324] - CNI should not use `ifconfig` in executors `pre_exec_command`.
     * [MESOS-6391] - Command task's sandbox should not be owned by root if it uses container image.
     * [MESOS-6393] - Deprecated SSL_ environment variables are non functional already.
-    * [MESOS-6420] - Mesos Agent leaking sockets when port mapping network isolator is ON 
+    * [MESOS-6420] - Mesos Agent leaking sockets when port mapping network isolator is ON.
+    * [MESOS-6446] - WebUI redirect doesn't work with stats from /metric/snapshot.
+    * [MESOS-6461] - Duplicate framework ids in /master/frameworks endpoint 'unregistered_frameworks'.
+    * [MESOS-6502] - _version uses incorrect MESOS_{MAJOR,MINOR,PATCH}_VERSION in libmesos java binding.
 
 ** Improvement
     * [MESOS-6075] - Avoid libprocess functions in `mesos-containerizer launch`.
-    * [MESOS-6299] - Master doesn't remove task from pending when it is invalid
+    * [MESOS-6299] - Master doesn't remove task from pending when it is invalid.
 
 
 Release Notes - Mesos - Version 1.0.1
---------------------------------------------
+-------------------------------------
 * This is a bug fix release.
 
 All Issues:
 ** Bug
     * [MESOS-5388] - MesosContainerizerLaunch flags execute arbitrary commands via shell.
     * [MESOS-5862] - External links to .md files broken.
-    * [MESOS-5911] - Webui redirection to leader in browser does not work
+    * [MESOS-5911] - Webui redirection to leader in browser does not work.
     * [MESOS-5913] - Stale socket FD usage when using libevent + SSL.
-    * [MESOS-5922] - mesos-agent --help exit status is 1
-    * [MESOS-5923] - Ubuntu 14.04 LTS GPU Isolator "/run" directory is noexec
+    * [MESOS-5922] - mesos-agent --help exit status is 1.
+    * [MESOS-5923] - Ubuntu 14.04 LTS GPU Isolator "/run" directory is noexec.
     * [MESOS-5927] - Unable to run "scratch" Dockerfiles with Unified Containerizer.
-    * [MESOS-5928] - Agent's '--version' flag doesn't work
+    * [MESOS-5928] - Agent's '--version' flag doesn't work.
     * [MESOS-5930] - Orphan tasks can show up as running after they have finished.
-    * [MESOS-5943] - Incremental http parsing of URLs leads to decoder error
-    * [MESOS-5945] - NvidiaVolume::create() should check for root before creating volume
-    * [MESOS-5959] - All non-root tests fail on GPU machine
-    * [MESOS-5969] - Linux 'MountInfoTable' entries not sorted as expected
-    * [MESOS-5982] - NvidiaVolume errors out if any binary is missing
-    * [MESOS-5986] - SSL Socket CHECK can fail after socket receives EOF
+    * [MESOS-5943] - Incremental http parsing of URLs leads to decoder error.
+    * [MESOS-5945] - NvidiaVolume::create() should check for root before creating volume.
+    * [MESOS-5959] - All non-root tests fail on GPU machine.
+    * [MESOS-5969] - Linux 'MountInfoTable' entries not sorted as expected.
+    * [MESOS-5982] - NvidiaVolume errors out if any binary is missing.
+    * [MESOS-5986] - SSL Socket CHECK can fail after socket receives EOF.
     * [MESOS-5988] - PollSocketImpl can write to a stale fd.
 
 ** Improvement
-    * [MESOS-5830] - Make a sweep to trim excess space around angle brackets
+    * [MESOS-5830] - Make a sweep to trim excess space around angle brackets.
 
 ** Task
     * [MESOS-5970] - Remove HTTP_PARSER_VERSION_MAJOR < 2 code in decoder.
 
 
 Release Notes - Mesos - Version 1.0.0
---------------------------------------------
+-------------------------------------
 This release contains the following new features:
 
   * Scheduler and Executor v1 HTTP APIs are now considered stable.

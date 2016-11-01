@@ -14,29 +14,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <jni.h>
+#ifndef __HEALTH_CHECK_TEST_HELPER_HPP__
+#define __HEALTH_CHECK_TEST_HELPER_HPP__
 
-#include <mesos/version.hpp>
+#include <cstdint>
+#include <string>
 
-extern "C" {
+#include <stout/flags.hpp>
+#include <stout/subcommand.hpp>
 
-/*
- * Class:     org_apache_mesos_MesosNativeLibrary
- * Method:    _version
- * Signature: ()Lorg/apache/mesos/MesosNativeLibrary$Version;
- */
-JNIEXPORT jobject JNICALL Java_org_apache_mesos_MesosNativeLibrary__1version
-  (JNIEnv* env)
+namespace mesos {
+namespace internal {
+namespace tests {
+
+class HealthCheckTestHelper : public Subcommand
 {
-  jclass clazz = env->FindClass("org/apache/mesos/MesosNativeLibrary$Version");
-  jmethodID _init_ = env->GetMethodID(clazz, "<init>", "(JJJ)V");
-  jobject jversion = env->NewObject(
-      clazz,
-      _init_,
-      (jlong) MESOS_MAJOR_VERSION_NUM,
-      (jlong) MESOS_MINOR_VERSION_NUM,
-      (jlong) MESOS_PATCH_VERSION_NUM);
-  return jversion;
-}
+public:
+  static const char NAME[];
 
-} // extern "C" {
+  struct Flags : public virtual flags::FlagsBase
+  {
+    Flags();
+
+    std::string ip;
+    uint16_t port;
+  };
+
+  HealthCheckTestHelper() : Subcommand(NAME) {}
+
+  Flags flags;
+
+protected:
+  virtual int execute();
+  virtual flags::FlagsBase* getFlags() { return &flags; }
+};
+
+} // namespace tests {
+} // namespace internal {
+} // namespace mesos {
+
+#endif // __HEALTH_CHECK_TEST_HELPER_HPP__

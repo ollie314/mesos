@@ -14,16 +14,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __LAUNCHER_EXECUTOR_HPP__
-#define __LAUNCHER_EXECUTOR_HPP__
+#ifndef __MESOS_CONTAINERIZER_PROVISIONER_UTILS_HPP__
+#define __MESOS_CONTAINERIZER_PROVISIONER_UTILS_HPP__
 
+#include <string>
 
-// For readability, we minimize the number of #ifdef blocks in the code by
-// splitting platform specific system calls into separate directories.
-#ifdef __WINDOWS__
-#include "launcher/windows/executor.hpp"
-#else
-#include "launcher/posix/executor.hpp"
-#endif // __WINDOWS__
+#include <stout/nothing.hpp>
+#include <stout/try.hpp>
 
-#endif // __LAUNCHER_EXECUTOR_HPP__
+namespace mesos {
+namespace internal {
+namespace slave {
+
+#ifdef __linux__
+Try<Nothing> convertWhiteouts(const std::string& directory);
+#endif
+
+} // namespace slave {
+} // namespace internal {
+} // namespace mesos {
+
+#endif // __MESOS_CONTAINERIZER_PROVISIONER_UTILS_HPP__

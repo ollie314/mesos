@@ -2151,6 +2151,13 @@ TEST_F(SlaveTest, ContainersEndpoint)
 
   ContainerStatus containerStatus;
 
+  ContainerID parent;
+  ContainerID child;
+  parent.set_value("parent");
+  child.set_value("child");
+  child.mutable_parent()->CopyFrom(parent);
+  containerStatus.mutable_container_id()->CopyFrom(child);
+
   CgroupInfo* cgroupInfo = containerStatus.mutable_cgroup_info();
   CgroupInfo::NetCls* netCls = cgroupInfo->mutable_net_cls();
   netCls->set_classid(42);
@@ -2184,6 +2191,10 @@ TEST_F(SlaveTest, ContainersEndpoint)
               "\"mem_limit_bytes\":2048"
           "},"
           "\"status\":{"
+              "\"container_id\":{"
+                "\"parent\":{\"value\":\"parent\"},"
+                "\"value\":\"child\""
+              "},"
               "\"cgroup_info\":{\"net_cls\":{\"classid\":42}},"
               "\"network_infos\":[{"
                   "\"ip_addresses\":[{\"ip_address\":\"192.168.1.20\"}]"
@@ -3472,8 +3483,10 @@ TEST_F(SlaveTest, KillTaskUnregisteredHTTPExecutor)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::v1::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
 
   AWAIT_READY(connected);
 
@@ -4921,8 +4934,10 @@ TEST_F(SlaveTest, RunTaskGroup)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::v1::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
 
   AWAIT_READY(connected);
 
@@ -5046,8 +5061,10 @@ TEST_F(SlaveTest, KillTaskGroupBetweenRunTaskParts)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::v1::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
 
   AWAIT_READY(connected);
 
@@ -5239,8 +5256,10 @@ TEST_F(SlaveTest, DefaultExecutorCommandInfo)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::v1::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
 
   AWAIT_READY(connected);
 
@@ -5349,8 +5368,10 @@ TEST_F(SlaveTest, KillQueuedTaskGroup)
   EXPECT_CALL(*scheduler, connected(_))
     .WillOnce(FutureSatisfy(&connected));
 
-  scheduler::v1::TestMesos mesos(
-      master.get()->pid, ContentType::PROTOBUF, scheduler);
+  v1::scheduler::TestMesos mesos(
+      master.get()->pid,
+      ContentType::PROTOBUF,
+      scheduler);
 
   AWAIT_READY(connected);
 

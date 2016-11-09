@@ -325,9 +325,11 @@ set(AGENT_SRC
   slave/containerizer/mesos/launcher.cpp
   slave/containerizer/mesos/mount.cpp
   slave/containerizer/mesos/paths.cpp
+  slave/containerizer/mesos/utils.cpp
   slave/containerizer/mesos/provisioner/paths.cpp
   slave/containerizer/mesos/provisioner/provisioner.cpp
   slave/containerizer/mesos/provisioner/store.cpp
+  slave/containerizer/mesos/provisioner/utils.cpp
   slave/containerizer/mesos/provisioner/appc/cache.cpp
   slave/containerizer/mesos/provisioner/appc/fetcher.cpp
   slave/containerizer/mesos/provisioner/appc/paths.cpp
@@ -522,6 +524,7 @@ target_link_libraries(${MESOS_PROTOBUF_TARGET} ${AGENT_LIBS})
 ##############################
 add_subdirectory(cli/)
 add_subdirectory(docker/)
+add_subdirectory(health-check/)
 add_subdirectory(launcher/)
 add_subdirectory(local/)
 add_subdirectory(log/)

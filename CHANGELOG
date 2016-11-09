@@ -2,6 +2,15 @@ Release Notes - Mesos - Version 1.2.0 (WIP)
 -------------------------------------------
 
 
+Release Notes - Mesos - Version 1.1.1 (WIP)
+-------------------------------------------
+* This is a bug fix release.
+
+All Issues:
+** Bug
+  * [MESOS-6142] - Frameworks may RESERVE for an arbitrary role.
+
+
 Release Notes - Mesos - Version 1.1.0
 -------------------------------------
 This release contains the following new features:
@@ -15,7 +24,7 @@ This release contains the following new features:
     Executors may now use the updated `HealthCheck` protobuf to implement
     HTTP(S) health checks. Both default executors (command and docker) leverage
     `curl` binary for sending HTTP(S) requests and connect to `127.0.0.1`,
-    hence a task must listen on all interfaces. On Linux, For BRIDGE and USER
+    hence a task must listen on all interfaces. On Linux, for BRIDGE and USER
     modes, docker executor enters the task's network namespace.
 
   * [MESOS-3421] - **Experimental** Support sharing of resources across
@@ -25,14 +34,12 @@ This release contains the following new features:
   * [MESOS-3567] - **Experimental** support for TCP health checks. Executors
     may now use the updated `HealthCheck` protobuf to implement TCP health
     checks. Both default executors (command and docker) connect to `127.0.0.1`,
-    hence a task must listen on all interfaces. On Linux, For BRIDGE and USER
+    hence a task must listen on all interfaces. On Linux, for BRIDGE and USER
     modes, docker executor enters the task's network namespace.
 
-  * [MESOS-4324] - Allow access to persistent volumes as read-only or read-write
-    by tasks. Mesos doesn't allow persistent volumes to be created as read-only
-    but in 1.1 it starts allow tasks to use the volumes as read-only. This is
-    mainly motivated by shared persistent volumes but applies to regular
-    persistent volumes as well.
+  * [MESOS-4324] - Allow tasks to access persistent volumes in either a
+    read-only or read-write manner. Using a volume in read-only mode can
+    simplify sharing that volume between multiple tasks on the same agent.
 
   * [MESOS-5275] - **Experimental** support for linux capabilities. Frameworks
     or operators now have fine-grained control over the capabilities that a
@@ -58,10 +65,6 @@ This release contains the following new features:
     (driver/scheduler library) implementations, thereby allowing them to easily
     transition their frameworks to the new v1 Scheduler API.
 
-  * [MESOS-6077] - **Experimental** A new default executor is introduced which
-    frameworks can use to launch task groups as nested containers. All the
-    nested containers share resources likes cpu, memory, network and volumes.
-
   * [MESOS-6014] - **Experimental** A new port-mapper CNI plugin, the
     `mesos-cni-port-mapper` has been introduced. For Mesos containers, with the
     CNI port-mapper plugin, users can now expose container ports through host
@@ -70,13 +73,20 @@ This release contains the following new features:
     services running in the container needs to be exposed outside these
     isolated networks.
 
+  * [MESOS-6077] - **Experimental** A new default executor is introduced which
+    frameworks can use to launch task groups as nested containers. All the
+    nested containers share resources likes cpu, memory, network and volumes.
+
 Deprecations:
   * The following metrics are deprecated and will be removed in Mesos 1.4:
-    master/slave_shutdowns_scheduled, master/slave_shutdowns_canceled, and
-    slave_shutdowns_completed. As of Mesos 1.1.0, these metrics will always be
-    zero. The following new metrics have been introduced as replacements:
-    master/slave_unreachable_scheduled, master/slave_unreachable_canceled,
-    and master/slave_unreachable_completed.
+      master/slave_shutdowns_scheduled,
+      master/slave_shutdowns_canceled,
+      slave_shutdowns_completed.
+    As of Mesos 1.1.0, these metrics will always be zero. The following new
+    metrics have been introduced as replacements:
+      master/slave_unreachable_scheduled,
+      master/slave_unreachable_canceled,
+      master/slave_unreachable_completed.
 
   * [MESOS-5955] - Health check binary "mesos-health-check" is removed.
 
@@ -97,6 +107,34 @@ Additional API Changes:
   * [MESOS-6241] - New API calls (LAUNCH_NESTED_CONTAINER,
     KILL_NESTED_CONTAINER and WAIT_NESTED_CONTAINER) have been added to the
     v1 Agent API to manage nested containers within an executor container.
+
+Unresolved Critical Issues:
+  * [MESOS-3794] - Master should not store arbitrarily sized data in ExecutorInfo.
+  * [MESOS-4642] - Mesos Agent Json API can dump binary data from log files out as invalid JSON.
+  * [MESOS-5396] - After failover, master does not remove agents with same UPID.
+  * [MESOS-5856] - Logrotate ContainerLogger module does not rotate logs when run as root with `--switch_user`.
+  * [MESOS-6142] - Frameworks may RESERVE for an arbitrary role.
+  * [MESOS-6327] - Large docker images causes container launch failures: Too many levels of symbolic links.
+  * [MESOS-6360] - The handling of whiteout files in provisioner is not correct.
+  * [MESOS-6419] - The 'master/teardown' endpoint should support tearing down 'unregistered_frameworks'.
+  * [MESOS-6432] - Roles with quota assigned can "game" the system to receive excessive resources.
+
+All Experimental Features:
+  * [MESOS-2449] - Support group of tasks (Pod) constructs and API in Mesos.
+  * [MESOS-2533] - Support HTTP checks in Mesos.
+  * [MESOS-3094] - Mesos on Windows.
+  * [MESOS-3421] - Support sharing of resources across task instances.
+  * [MESOS-3567] - Support TCP checks in Mesos.
+  * [MESOS-4312] - Porting Mesos on Power (ppc64le).
+  * [MESOS-4355] - Implement isolator for Docker volume.
+  * [MESOS-4641] - Support Container Network Interface (CNI).
+  * [MESOS-4791] - Operator API v1.
+  * [MESOS-4828] - XFS disk quota isolator.
+  * [MESOS-5275] - Add capabilities support for unified containerizer.
+  * [MESOS-5344] - Partition-aware Mesos frameworks.
+  * [MESOS-5788] - Added JAVA API adapter for seamless transition to new scheduler API.
+  * [MESOS-6014] - Added port mapping CNI plugin.
+  * [MESOS-6077] - Added a default (task group) executor.
 
 All Issues:
 
@@ -221,11 +259,13 @@ All Issues:
   * [MESOS-6420] - Mesos Agent leaking sockets when port mapping network isolator is ON.
   * [MESOS-6445] - Reconciliation for unreachable agent after master failover is incorrect.
   * [MESOS-6446] - WebUI redirect doesn't work with stats from /metric/snapshot.
+  * [MESOS-6457] - Tasks shouldn't transition from TASK_KILLING to TASK_RUNNING.
   * [MESOS-6461] - Duplicate framework ids in /master/frameworks endpoint 'unregistered_frameworks'.
   * [MESOS-6482] - Master check failure when marking an agent unreachable.
   * [MESOS-6483] - Check failure when a 1.1 master marking a 0.28 agent as unreachable.
   * [MESOS-6497] - Java Scheduler Adapter does not surface MasterInfo.
   * [MESOS-6502] - _version uses incorrect MESOS_{MAJOR,MINOR,PATCH}_VERSION in libmesos java binding.
+  * [MESOS-6527] - Memory leak in the libprocess request decoder.
 
 ** Documentation
   * [MESOS-5221] - Add Documentation for Nvidia GPU support.
@@ -240,6 +280,7 @@ All Issues:
   * [MESOS-4312] - Porting Mesos on Power (ppc64le).
   * [MESOS-4791] - Operator API v1.
   * [MESOS-5344] - Partition-aware Mesos frameworks.
+  * [MESOS-6014] - Added port mapping CNI plugin.
 
 ** Improvement
   * [MESOS-2533] - Support HTTP checks in Mesos.
@@ -322,7 +363,7 @@ All Issues:
   * [MESOS-5516] - Implement GET_STATE Call in v1 agent API.
   * [MESOS-5651] - Add devices subsystem support in cgroups unified isolator.
   * [MESOS-5652] - Enable cgroups unified isolator.
-  * [MESOS-5788] - Consider adding a Java Scheduler Shim/Adapter for the new/old API.
+  * [MESOS-5788] - Added JAVA API adapter for seamless transition to new scheduler API.
   * [MESOS-5809] - Implement GET_FRAMEWORKS Call in v1 agent API.
   * [MESOS-5810] - Implement GET_EXECUTORS Call in v1 agent API.
   * [MESOS-5811] - Implement GET_TASKS Call in v1 agent API.
@@ -348,7 +389,7 @@ All Issues:
   * [MESOS-6071] - Validate that an explicitly specified DEFAULT executor has disk resources.
   * [MESOS-6073] - Update the streaming function for ContainerID to be nesting aware.
   * [MESOS-6076] - Implement RunTaskGroup handler on the agent.
-  * [MESOS-6077] - Implement a basic default pod executor.
+  * [MESOS-6077] - Added a default (task group) executor.
   * [MESOS-6102] - Add event for agent added in master operator API.
   * [MESOS-6130] - Make the disk usage isolator nesting-aware.
   * [MESOS-6150] - Introduce the new isolator recover interface for nested container support.
@@ -379,6 +420,15 @@ All Issues:
 
 ** Wish
   * [MESOS-5929] - Total cluster resources on master Mesos UI should have better spacing.
+
+
+Release Notes - Mesos - Version 1.0.3
+-------------------------------------
+* This is a bug fix release.
+
+All Issues:
+** Bug
+    * [MESOS-6142] - Frameworks may RESERVE for an arbitrary role.
 
 
 Release Notes - Mesos - Version 1.0.2
@@ -412,8 +462,10 @@ All Issues:
     * [MESOS-6393] - Deprecated SSL_ environment variables are non functional already.
     * [MESOS-6420] - Mesos Agent leaking sockets when port mapping network isolator is ON.
     * [MESOS-6446] - WebUI redirect doesn't work with stats from /metric/snapshot.
+    * [MESOS-6457] - Tasks shouldn't transition from TASK_KILLING to TASK_RUNNING.
     * [MESOS-6461] - Duplicate framework ids in /master/frameworks endpoint 'unregistered_frameworks'.
     * [MESOS-6502] - _version uses incorrect MESOS_{MAJOR,MINOR,PATCH}_VERSION in libmesos java binding.
+    * [MESOS-6527] - Memory leak in the libprocess request decoder.
 
 ** Improvement
     * [MESOS-6075] - Avoid libprocess functions in `mesos-containerizer launch`.
@@ -717,7 +769,7 @@ All Issues:
     * [MESOS-4807] - IOTest.BufferedRead writes to the current directory
     * [MESOS-4810] - ProvisionerDockerPullerTest.ROOT_INTERNET_CURL_ShellCommand fails.
     * [MESOS-4827] - Destroy Docker container crashes Mesos slave
-    * [MESOS-4875] - overlayfs does not work when lauching tasks
+    * [MESOS-4875] - overlayfs does not work when launching tasks
     * [MESOS-4876] - bind backend does not work when launching tasks
     * [MESOS-4885] - Unzip should force overwrite
     * [MESOS-4901] - Build fails on some systems due to unportable use of time.h
@@ -1298,10 +1350,14 @@ All Issues:
   * [MESOS-5943] - Incremental http parsing of URLs leads to decoder error.
   * [MESOS-5986] - SSL Socket CHECK can fail after socket receives EOF.
   * [MESOS-6104] - Potential FD double close in libevent's implementation of `sendfile`.
+  * [MESOS-6142] - Frameworks may RESERVE for an arbitrary role.
   * [MESOS-6152] - Resource leak in libevent_ssl_socket.cpp.
   * [MESOS-6233] - Master CHECK fails during recovery while relinking to other masters.
   * [MESOS-6234] - Potential socket leak during Zookeeper network changes.
   * [MESOS-6246] - Libprocess links will not generate an ExitedEvent if the socket creation fails.
+  * [MESOS-6299] - Master doesn't remove task from pending when it is invalid.
+  * [MESOS-6457] - Tasks shouldn't transition from TASK_KILLING to TASK_RUNNING.
+  * [MESOS-6527] - Memory leak in the libprocess request decoder.
 
 
 Release Notes - Mesos - Version 0.28.2

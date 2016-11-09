@@ -64,12 +64,13 @@
 #include <stout/os/touch.hpp>
 #include <stout/os/utime.hpp>
 #include <stout/os/wait.hpp>
+#include <stout/os/xattr.hpp>
 
 #include <stout/os/raw/argv.hpp>
 #include <stout/os/raw/environment.hpp>
 
 // For readability, we minimize the number of #ifdef blocks in the code by
-// splitting platform specifc system calls into separate directories.
+// splitting platform specific system calls into separate directories.
 #ifdef __WINDOWS__
 #include <stout/windows/os.hpp>
 #else

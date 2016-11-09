@@ -344,7 +344,6 @@ namespace agent = mesos::v1::agent;
 namespace maintenance = mesos::v1::maintenance;
 namespace master = mesos::v1::master;
 namespace quota = mesos::v1::quota;
-namespace scheduler = mesos::v1::scheduler;
 
 using mesos::v1::TASK_STAGING;
 using mesos::v1::TASK_STARTING;
@@ -363,6 +362,7 @@ using mesos::v1::TASK_UNKNOWN;
 
 using mesos::v1::AgentID;
 using mesos::v1::ContainerID;
+using mesos::v1::ContainerStatus;
 using mesos::v1::ExecutorID;
 using mesos::v1::ExecutorInfo;
 using mesos::v1::Filters;
@@ -453,44 +453,48 @@ namespace common {
 template <typename TExecutorInfo, typename TResources, typename TCommandInfo>
 inline TExecutorInfo createExecutorInfo(
     const std::string& executorId,
-    const TCommandInfo& command,
-    const Option<std::string>& resources = None())
+    const Option<TCommandInfo>& command = None(),
+    const Option<std::string>& resources = None(),
+    const Option<typename TExecutorInfo::Type>& type = None())
 {
   TExecutorInfo executor;
   executor.mutable_executor_id()->set_value(executorId);
-  executor.mutable_command()->CopyFrom(command);
+  if (command.isSome()) {
+    executor.mutable_command()->CopyFrom(command.get());
+  }
   if (resources.isSome()) {
     executor.mutable_resources()->CopyFrom(
         TResources::parse(resources.get()).get());
+  }
+  if (type.isSome()) {
+    executor.set_type(type.get());
   }
   return executor;
 }
 
 
-template <typename TExecutorInfo, typename TResources>
+template <typename TExecutorInfo, typename TResources, typename TCommandInfo>
 inline TExecutorInfo createExecutorInfo(
     const std::string& executorId,
     const std::string& command,
-    const Option<std::string>& resources = None())
+    const Option<std::string>& resources = None(),
+    const Option<typename TExecutorInfo::Type>& type = None())
 {
-  TExecutorInfo executor;
-  executor.mutable_executor_id()->set_value(executorId);
-  executor.mutable_command()->set_value(command);
-  if (resources.isSome()) {
-    executor.mutable_resources()->CopyFrom(
-        TResources::parse(resources.get()).get());
-  }
-  return executor;
+  TCommandInfo commandInfo;
+  commandInfo.set_value(command);
+  return createExecutorInfo<TExecutorInfo, TResources, TCommandInfo>(
+      executorId, commandInfo, resources, type);
 }
 
 
-template <typename TExecutorInfo, typename TResources>
+template <typename TExecutorInfo, typename TResources, typename TCommandInfo>
 inline TExecutorInfo createExecutorInfo(
     const std::string& executorId,
     const char* command,
-    const Option<std::string>& resources = None())
+    const Option<std::string>& resources = None(),
+    const Option<typename TExecutorInfo::Type>& type = None())
 {
-  return createExecutorInfo<TExecutorInfo, TResources>(
+  return createExecutorInfo<TExecutorInfo, TResources, TCommandInfo>(
       executorId,
       std::string(command),
       resources);
@@ -498,10 +502,18 @@ inline TExecutorInfo createExecutorInfo(
 
 
 template <typename TCommandInfo>
-inline TCommandInfo createCommandInfo(const std::string& command)
+inline TCommandInfo createCommandInfo(
+    const std::string& value,
+    const std::vector<std::string>& arguments = {})
 {
   TCommandInfo commandInfo;
-  commandInfo.set_value(command);
+  commandInfo.set_value(value);
+  if (!arguments.empty()) {
+    commandInfo.set_shell(false);
+    foreach (const std::string& arg, arguments) {
+      commandInfo.add_arguments(arg);
+    }
+  }
   return commandInfo;
 }
 
@@ -675,6 +687,17 @@ inline TTaskInfo createTask(
           executorId,
           name,
           id);
+}
+
+
+template <typename TTaskGroupInfo, typename TTaskInfo>
+inline TTaskGroupInfo createTaskGroupInfo(const std::vector<TTaskInfo>& tasks)
+{
+  TTaskGroupInfo taskGroup;
+  foreach (const TTaskInfo& task, tasks) {
+    taskGroup.add_tasks()->CopyFrom(task);
+  }
+  return taskGroup;
 }
 
 
@@ -993,6 +1016,19 @@ inline typename TOffer::Operation LAUNCH(const std::vector<TTaskInfo>& tasks)
 }
 
 
+template <typename TExecutorInfo, typename TTaskGroupInfo, typename TOffer>
+inline typename TOffer::Operation LAUNCH_GROUP(
+    const TExecutorInfo& executorInfo,
+    const TTaskGroupInfo& taskGroup)
+{
+  typename TOffer::Operation operation;
+  operation.set_type(TOffer::Operation::LAUNCH_GROUP);
+  operation.mutable_launch_group()->mutable_executor()->CopyFrom(executorInfo);
+  operation.mutable_launch_group()->mutable_task_group()->CopyFrom(taskGroup);
+  return operation;
+}
+
+
 template <typename TParameters, typename TParameter>
 inline TParameters parameterize(const ACLs& acls)
 {
@@ -1012,15 +1048,19 @@ inline namespace internal {
 template <typename... Args>
 inline ExecutorInfo createExecutorInfo(Args&&... args)
 {
-  return common::createExecutorInfo<ExecutorInfo, Resources>(
-      std::forward<Args>(args)...);
+  return common::createExecutorInfo<
+      ExecutorInfo,
+      Resources,
+      CommandInfo>(std::forward<Args>(args)...);
 }
 
 
-template <typename... Args>
-inline CommandInfo createCommandInfo(Args&&... args)
+// We specify the argument to allow brace initialized construction.
+inline CommandInfo createCommandInfo(
+    const std::string& value,
+    const std::vector<std::string>& arguments = {})
 {
-  return common::createCommandInfo<CommandInfo>(std::forward<Args>(args)...);
+  return common::createCommandInfo<CommandInfo>(value, arguments);
 }
 
 
@@ -1068,6 +1108,13 @@ inline TaskInfo createTask(Args&&... args)
       ExecutorInfo,
       CommandInfo,
       Offer>(std::forward<Args>(args)...);
+}
+
+
+// We specify the argument to allow brace initialized construction.
+inline TaskGroupInfo createTaskGroupInfo(const std::vector<TaskInfo>& tasks)
+{
+  return common::createTaskGroupInfo<TaskGroupInfo, TaskInfo>(tasks);
 }
 
 
@@ -1183,6 +1230,14 @@ inline Offer::Operation LAUNCH(const std::vector<TaskInfo>& tasks)
 
 
 template <typename... Args>
+inline Offer::Operation LAUNCH_GROUP(Args&&... args)
+{
+  return common::LAUNCH_GROUP<ExecutorInfo, TaskGroupInfo, Offer>(
+      std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
 inline Parameters parameterize(Args&&... args)
 {
   return common::parameterize<Parameters, Parameter>(
@@ -1197,15 +1252,17 @@ inline mesos::v1::ExecutorInfo createExecutorInfo(Args&&... args)
 {
   return common::createExecutorInfo<
       mesos::v1::ExecutorInfo,
-      mesos::v1::Resources>(std::forward<Args>(args)...);
+      mesos::v1::Resources,
+      mesos::v1::CommandInfo>(std::forward<Args>(args)...);
 }
 
 
-template <typename... Args>
-inline mesos::v1::CommandInfo createCommandInfo(Args&&... args)
+// We specify the argument to allow brace initialized construction.
+inline mesos::v1::CommandInfo createCommandInfo(
+    const std::string& value,
+    const std::vector<std::string>& arguments = {})
 {
-  return common::createCommandInfo<mesos::v1::CommandInfo>(
-      std::forward<Args>(args)...);
+  return common::createCommandInfo<mesos::v1::CommandInfo>(value, arguments);
 }
 
 
@@ -1255,6 +1312,16 @@ inline mesos::v1::TaskInfo createTask(Args&&... args)
       mesos::v1::ExecutorInfo,
       mesos::v1::CommandInfo,
       mesos::v1::Offer>(std::forward<Args>(args)...);
+}
+
+
+// We specify the argument to allow brace initialized construction.
+inline mesos::v1::TaskGroupInfo createTaskGroupInfo(
+    const std::vector<mesos::v1::TaskInfo>& tasks)
+{
+  return common::createTaskGroupInfo<
+      mesos::v1::TaskGroupInfo,
+      mesos::v1::TaskInfo>(tasks);
 }
 
 
@@ -1383,11 +1450,39 @@ inline mesos::v1::Offer::Operation LAUNCH(
 
 
 template <typename... Args>
+inline mesos::v1::Offer::Operation LAUNCH_GROUP(Args&&... args)
+{
+  return common::LAUNCH_GROUP<
+      mesos::v1::ExecutorInfo,
+      mesos::v1::TaskGroupInfo,
+      mesos::v1::Offer>(std::forward<Args>(args)...);
+}
+
+
+template <typename... Args>
 inline mesos::v1::Parameters parameterize(Args&&... args)
 {
   return common::parameterize<mesos::v1::Parameters, mesos::v1::Parameter>(
       std::forward<Args>(args)...);
 }
+
+
+inline mesos::v1::scheduler::Call createCallAccept(
+    const mesos::v1::FrameworkID& frameworkId,
+    const mesos::v1::Offer& offer,
+    const mesos::v1::Offer::Operation& operation)
+{
+  mesos::v1::scheduler::Call call;
+  call.set_type(mesos::v1::scheduler::Call::ACCEPT);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+
+  mesos::v1::scheduler::Call::Accept* accept = call.mutable_accept();
+  accept->add_offer_ids()->CopyFrom(offer.id());
+  accept->add_operations()->CopyFrom(operation);
+
+  return call;
+}
+
 } // namespace v1 {
 
 
@@ -1612,6 +1707,7 @@ public:
   }
 };
 
+
 namespace scheduler {
 
 // A generic mock HTTP scheduler to be used in tests with gmock.
@@ -1743,21 +1839,50 @@ private:
   std::shared_ptr<MockHTTPScheduler<Mesos, Event>> scheduler;
 };
 
-namespace v1 {
-
-using TestMesos =
-  TestMesos<mesos::v1::scheduler::Mesos, mesos::v1::scheduler::Event>;
-
-} // namespace v1 {
-
 } // namespace scheduler {
 
 
 namespace v1 {
+namespace scheduler {
 
-using MockHTTPScheduler =
-  tests::scheduler::MockHTTPScheduler<
-    mesos::v1::scheduler::Mesos, mesos::v1::scheduler::Event>;
+using Call = mesos::v1::scheduler::Call;
+using Event = mesos::v1::scheduler::Event;
+using Mesos = mesos::v1::scheduler::Mesos;
+
+
+using TestMesos = tests::scheduler::TestMesos<
+    mesos::v1::scheduler::Mesos,
+    mesos::v1::scheduler::Event>;
+
+
+ACTION_P(SendSubscribe, frameworkInfo)
+{
+  Call call;
+  call.set_type(Call::SUBSCRIBE);
+  call.mutable_subscribe()->mutable_framework_info()->CopyFrom(frameworkInfo);
+  arg0->send(call);
+}
+
+
+ACTION_P2(SendAcknowledge, frameworkId, agentId)
+{
+  Call call;
+  call.set_type(Call::ACKNOWLEDGE);
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+
+  Call::Acknowledge* acknowledge = call.mutable_acknowledge();
+  acknowledge->mutable_task_id()->CopyFrom(arg1.status().task_id());
+  acknowledge->mutable_agent_id()->CopyFrom(agentId);
+  acknowledge->set_uuid(arg1.status().uuid());
+
+  arg0->send(call);
+}
+
+} // namespace scheduler {
+
+using MockHTTPScheduler = tests::scheduler::MockHTTPScheduler<
+    mesos::v1::scheduler::Mesos,
+    mesos::v1::scheduler::Event>;
 
 } // namespace v1 {
 
@@ -1871,10 +1996,10 @@ using Call = mesos::v1::executor::Call;
 using Event = mesos::v1::executor::Event;
 using Mesos = mesos::v1::executor::Mesos;
 
-using TestMesos =
-  ::mesos::internal::tests::executor::TestMesos<
-      mesos::v1::executor::Mesos,
-      mesos::v1::executor::Event>;
+
+using TestMesos = tests::executor::TestMesos<
+    mesos::v1::executor::Mesos,
+    mesos::v1::executor::Event>;
 
 
 // TODO(anand): Move these actions to the `v1::executor` namespace.
@@ -1935,11 +2060,9 @@ ACTION_P3(SendUpdateFromTaskID, frameworkId, executorId, state)
 
 } // namespace executor {
 
-
-using MockHTTPExecutor =
-  tests::executor::MockHTTPExecutor<
-    mesos::v1::executor::Mesos, mesos::v1::executor::Event>;
-
+using MockHTTPExecutor = tests::executor::MockHTTPExecutor<
+    mesos::v1::executor::Mesos,
+    mesos::v1::executor::Event>;
 
 } // namespace v1 {
 

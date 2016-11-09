@@ -14,16 +14,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __LAUNCHER_EXECUTOR_HPP__
-#define __LAUNCHER_EXECUTOR_HPP__
+#ifndef __STOUT_OS_XATTR_HPP__
+#define __STOUT_OS_XATTR_HPP__
 
-
-// For readability, we minimize the number of #ifdef blocks in the code by
-// splitting platform specific system calls into separate directories.
 #ifdef __WINDOWS__
-#include "launcher/windows/executor.hpp"
+#include <stout/os/windows/xattr.hpp>
 #else
-#include "launcher/posix/executor.hpp"
+#include <stout/os/posix/xattr.hpp>
 #endif // __WINDOWS__
 
-#endif // __LAUNCHER_EXECUTOR_HPP__
+#endif // __STOUT_OS_XATTR_HPP__

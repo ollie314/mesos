@@ -1418,8 +1418,15 @@ namespace operation {
 
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
-    const Option<string>& principal)
+    const Option<string>& principal,
+    const Option<string>& frameworkRole)
 {
+  if (frameworkRole.isSome() && frameworkRole.get() == "*") {
+    return Error(
+        "A reserve operation was attempted by a framework with role"
+        " '*', but frameworks with that role cannot reserve resources");
+  }
+
   Option<Error> error = resource::validate(reserve.resources());
   if (error.isSome()) {
     return Error("Invalid resources: " + error.get().message);
@@ -1435,17 +1442,24 @@ Option<Error> validate(
       if (!resource.reservation().has_principal()) {
         return Error(
             "A reserve operation was attempted by principal '" +
-            principal.get() + "', but there is a reserved resource in the "
-            "request with no principal set in `ReservationInfo`");
+            principal.get() + "', but there is a reserved resource in the"
+            " request with no principal set in `ReservationInfo`");
       }
 
       if (resource.reservation().principal() != principal.get()) {
         return Error(
             "A reserve operation was attempted by principal '" +
-            principal.get() + "', but there is a reserved resource in the "
-            "request with principal '" + resource.reservation().principal() +
+            principal.get() + "', but there is a reserved resource in the"
+            " request with principal '" + resource.reservation().principal() +
             "' set in `ReservationInfo`");
       }
+    }
+
+    if (frameworkRole.isSome() && resource.role() != frameworkRole.get()) {
+      return Error(
+          "A reserve operation was attempted for a resource with role"
+          " '" + resource.role() + "', but the framework can only reserve"
+          " resources with role '" + frameworkRole.get() + "'");
     }
 
     // NOTE: This check would be covered by 'contains' since there
@@ -1497,7 +1511,8 @@ Option<Error> validate(const Offer::Operation::Unreserve& unreserve)
 Option<Error> validate(
     const Offer::Operation::Create& create,
     const Resources& checkpointedResources,
-    const Option<string>& principal)
+    const Option<string>& principal,
+    const Option<FrameworkInfo>& frameworkInfo)
 {
   Option<Error> error = resource::validate(create.volumes());
   if (error.isSome()) {
@@ -1516,9 +1531,23 @@ Option<Error> validate(
     return error;
   }
 
-  // Ensure that the provided principals match. If `principal` is `None`, then
-  // we allow `volume.disk().persistence().principal()` to take any value.
   foreach (const Resource& volume, create.volumes()) {
+    // If the volume being created is a shared persistent volume, we
+    // allow it only if the framework has opted in for SHARED_RESOURCES.
+    if (frameworkInfo.isSome() &&
+        volume.has_shared() &&
+        !protobuf::frameworkHasCapability(
+            frameworkInfo.get(),
+            FrameworkInfo::Capability::SHARED_RESOURCES)) {
+      return Error(
+          "Create volume operation for '" + stringify(volume) +
+          "' has been attempted by framework '" +
+          stringify(frameworkInfo.get().id()) +
+          "' with no SHARED_RESOURCES capability");
+    }
+
+    // Ensure that the provided principals match. If `principal` is `None`,
+    // we allow `volume.disk().persistence().principal()` to take any value.
     if (principal.isSome()) {
       if (!volume.disk().persistence().has_principal()) {
         return Error(

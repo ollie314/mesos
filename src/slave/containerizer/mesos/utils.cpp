@@ -14,16 +14,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __LAUNCHER_EXECUTOR_HPP__
-#define __LAUNCHER_EXECUTOR_HPP__
+#include "slave/containerizer/mesos/utils.hpp"
 
+namespace mesos {
+namespace internal {
+namespace slave {
 
-// For readability, we minimize the number of #ifdef blocks in the code by
-// splitting platform specific system calls into separate directories.
-#ifdef __WINDOWS__
-#include "launcher/windows/executor.hpp"
-#else
-#include "launcher/posix/executor.hpp"
-#endif // __WINDOWS__
+ContainerID getRootContainerId(const ContainerID& containerId)
+{
+  ContainerID rootContainerId = containerId;
+  while (rootContainerId.has_parent()) {
+    // NOTE: Looks like protobuf does not handle copying well when
+    // nesting message is involved, because the source and the target
+    // point to the same object. Therefore, we create a temporary
+    // variable and use an extra copy here.
+    ContainerID id = rootContainerId.parent();
+    rootContainerId = id;
+  }
 
-#endif // __LAUNCHER_EXECUTOR_HPP__
+  return rootContainerId;
+}
+
+} // namespace slave {
+} // namespace internal {
+} // namespace mesos {

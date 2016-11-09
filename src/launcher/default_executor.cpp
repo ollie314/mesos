@@ -406,6 +406,7 @@ protected:
         Try<Owned<health::HealthChecker>> _checker =
           health::HealthChecker::create(
               task.health_check(),
+              launcherDirectory,
               self(),
               taskId,
               None(),
@@ -866,6 +867,17 @@ private:
 
     if (healthy.isSome()) {
       status.set_healthy(healthy.get());
+    }
+
+    // Fill the container ID associated with this task.
+    // TODO(jieyu): Consider maintain a hashmap between TaskID to
+    // ContainerID so that we don't have to loop through all tasks.
+    foreach (const ContainerID& containerId, containers.keys()) {
+      if (containers[containerId] == taskId) {
+        ContainerStatus* containerStatus = status.mutable_container_status();
+        containerStatus->mutable_container_id()->CopyFrom(containerId);
+        break;
+      }
     }
 
     Call call;

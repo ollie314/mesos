@@ -829,6 +829,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/launcher.cpp				\
   slave/containerizer/mesos/mount.cpp					\
   slave/containerizer/mesos/paths.cpp					\
+  slave/containerizer/mesos/utils.cpp					\
   slave/containerizer/mesos/isolators/docker/volume/driver.cpp		\
   slave/containerizer/mesos/isolators/docker/volume/paths.cpp		\
   slave/containerizer/mesos/isolators/filesystem/posix.cpp		\
@@ -841,6 +842,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/provisioner/paths.cpp			\
   slave/containerizer/mesos/provisioner/provisioner.cpp			\
   slave/containerizer/mesos/provisioner/store.cpp			\
+  slave/containerizer/mesos/provisioner/utils.cpp			\
   slave/containerizer/mesos/provisioner/appc/cache.cpp			\
   slave/containerizer/mesos/provisioner/appc/fetcher.cpp		\
   slave/containerizer/mesos/provisioner/appc/paths.cpp			\
@@ -975,6 +977,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   slave/containerizer/mesos/provisioner/paths.hpp			\
   slave/containerizer/mesos/provisioner/provisioner.hpp			\
   slave/containerizer/mesos/provisioner/store.hpp			\
+  slave/containerizer/mesos/provisioner/utils.hpp			\
   slave/containerizer/mesos/provisioner/appc/cache.hpp			\
   slave/containerizer/mesos/provisioner/appc/fetcher.hpp		\
   slave/containerizer/mesos/provisioner/appc/paths.hpp			\
@@ -1393,6 +1396,11 @@ pkglibexec_PROGRAMS += mesos-docker-executor
 mesos_docker_executor_SOURCES = docker/executor.cpp
 mesos_docker_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
 mesos_docker_executor_LDADD = libmesos.la $(LDADD)
+
+pkglibexec_PROGRAMS += mesos-tcp-connect
+mesos_tcp_connect_SOURCES = health-check/tcp_connect.cpp
+mesos_tcp_connect_CPPFLAGS = $(MESOS_CPPFLAGS)
+mesos_tcp_connect_LDADD = libmesos.la $(LDADD)
 
 bin_PROGRAMS += mesos-log
 mesos_log_SOURCES = log/main.cpp
@@ -1823,7 +1831,7 @@ python/dist/setup.cfg:
 # Makefile.am for an explanation of this variable.
 pipinstallargs=
 
-if WITHOUT_PYTHON_DEPS
+if !ENABLE_PYTHON_DEPENDENCY_INSTALL
 pipinstallargs += --no-deps
 endif
 
